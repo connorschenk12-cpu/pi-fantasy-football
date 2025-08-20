@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import Leagues from "./components/Leagues";
 import { useEffect } from "react";
 import { joinLeague } from "./lib/storage";
+import LeagueHome from "./components/LeagueHome";
+
 
 
 export default function App() {
@@ -99,22 +101,13 @@ export default function App() {
           )}
 
           {view === "league" && activeLeague && (
-            <div style={{ marginTop: 20 }}>
-              <button onClick={() => setView("leagues")} style={{ marginBottom: 12, padding: 8 }}>
-                ← Back to Leagues
-              </button>
-              <h2>{activeLeague.name}</h2>
-              <p><strong>League ID:</strong> <code>{activeLeague.id}</code></p>
-              <p><strong>Members:</strong> {activeLeague.members.join(", ")}</p>
+  <LeagueHome
+    league={activeLeague}
+    me={user.username}
+    onBack={() => setView("leagues")}
+  />
+)}
 
-              {/* Stubs for next steps */}
-              <h3 style={{ marginTop: 16 }}>Team Roster (coming soon)</h3>
-              <p>Pick players here. (We’ll wire this up next.)</p>
-
-              <h3 style={{ marginTop: 16 }}>Weekly Matchup (coming soon)</h3>
-              <p>See who you’re facing and projected points.</p>
-            </div>
-          )}
         </>
       )}
     </div>
