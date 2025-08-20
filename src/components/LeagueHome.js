@@ -1,7 +1,19 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
+import MyTeam from "./MyTeam";
 
 export default function LeagueHome({ league, me, onBack }) {
+  const [showTeam, setShowTeam] = useState(false);
   const isOwner = useMemo(() => league.owner === me, [league, me]);
+
+  if (showTeam) {
+    return (
+      <MyTeam
+        leagueId={league.id}
+        username={me}
+        onBack={() => setShowTeam(false)}
+      />
+    );
+  }
 
   return (
     <div style={{ marginTop: 8 }}>
@@ -20,17 +32,20 @@ export default function LeagueHome({ league, me, onBack }) {
         ))}
       </ul>
 
-      {isOwner && (
-        <>
-          <h3 style={{ marginTop: 16 }}>Owner Tools</h3>
+      <div style={{ display: "grid", gap: 10, marginTop: 16, maxWidth: 320 }}>
+        <button onClick={() => setShowTeam(true)} style={{ padding: 10 }}>
+          Open “My Team”
+        </button>
+
+        {isOwner && (
           <button
-            onClick={() => alert("Starting season soon — draft/roster coming next!")}
+            onClick={() => alert("Draft/Start Season coming soon")}
             style={{ padding: 10 }}
           >
-            Start Season (coming soon)
+            Start Season (owner)
           </button>
-        </>
-      )}
+        )}
+      </div>
     </div>
   );
 }
