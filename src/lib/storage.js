@@ -85,3 +85,44 @@ export async function getTeam({ leagueId, username }) {
   const snap = await getDoc(ref);
   return snap.exists() ? snap.data() : null;
 }
+import { db } from "./firebase";
+import { doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
+
+// Creates a team doc if missing
+export async function ensureTeam({ leagueId, username }) {
+  const ref = doc(db, "leagues", leagueId, "teams", username);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    await setDoc(ref, {
+      username,
+      roster: { QB: null, RB: null, WR: null, TE: null, FLEX: null, K: null, DEF: null },
+      bench: [],
+      createdAt: Date.now(),
+    });
+  }
+  return ref.id;
+}
+
+export async function getTeam({ leagueId, username }) {
+  const ref = doc(db, "leagues", leagueId, "teams", username);
+  const snap = await getDoc(ref);
+  return snap.exists() ? snap.data() : null;
+}
+
+// Set a single roster slot (e.g., QB -> playerId)
+// If slot is FLEX, allow RB/WR/TE only.
+export async function setRosterSlot({ leagueId, username, slot, playerId }) {
+  const ref = doc(db, "leagues", leagueId, "teams", username);
+  const teamSnap = await getDoc(ref);
+  if (!teamSnap.exists()) throw new Error("Team not found");
+  const team = teamSnap.data();
+
+  // Basic validation
+  const slotUpper = String(slot).toUpperCase();
+  const newRoster = { ...(team.roster || {}) };
+  newRoster[slotUpper] = playerId || null;
+
+  await updateDoc(ref, { roster: newRoster });
+  return (await getDoc(ref)).data();
+}
+
