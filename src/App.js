@@ -1,37 +1,12 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Leagues from "./components/Leagues";
-import { useEffect } from "react";
-import { joinLeague } from "./lib/storage";
 import LeagueHome from "./components/LeagueHome";
-
-
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [status, setStatus] = useState("Not logged in.");
-  const [view, setView] = useState("home"); // "home" | "leagues" | "league"
-  const [activeLeague, setActiveLeague] = useState(null);
-  useEffect(() => {
-  const params = new URLSearchParams(window.location.search);
-  const toJoin = params.get("join");
-  if (!toJoin || !user) return;
-
-  (async () => {
-    try {
-      await joinLeague({ leagueId: toJoin, username: user.username });
-      setStatus(`✅ Joined league ${toJoin}`);
-      // Clean the URL so the join param doesn't repeat
-      const url = new URL(window.location.href);
-      url.searchParams.delete("join");
-      window.history.replaceState({}, "", url.toString());
-      setView("leagues");
-    } catch (e) {
-      console.error(e);
-      setStatus("❌ League not found for join link.");
-    }
-  })();
-}, [user]);
-
+  const [view, setView] = useState("home"); // 'home' | 'leagues' | 'league'
+  const [activeLeague, setActiveLeague] = useState(null); // <- always use this var
 
   function onIncompletePaymentFound(payment) {
     console.log("⚠️ Incomplete payment found:", payment);
@@ -61,9 +36,32 @@ export default function App() {
   }
 
   function handleOpenLeague(l) {
-    setActiveLeague(l);
+    setActiveLeague(l || null);
     setView("league");
   }
+
+  // Auto-join handler for ?join=...
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const toJoin = params.get("join");
+    if (!toJoin || !user) return;
+
+    (async () => {
+      try {
+        // lazy import to avoid circular refs
+        const { joinLeague } = await import("./lib/storage");
+        await joinLeague({ leagueId: toJoin, username: user.username });
+        setStatus(`✅ Joined league ${toJoin}`);
+        const url = new URL(window.location.href);
+        url.searchParams.delete("join");
+        window.history.replaceState({}, "", url.toString());
+        setView("leagues");
+      } catch (e) {
+        console.error(e);
+        setStatus("❌ League not found for join link.");
+      }
+    })();
+  }, [user]);
 
   return (
     <div style={{ padding: 20, fontFamily: "Arial, sans-serif", maxWidth: 640, margin: "0 auto" }}>
@@ -92,7 +90,6 @@ export default function App() {
               <button onClick={openLeagues} style={{ padding: 12 }}>
                 Go to Leagues
               </button>
-              {/* future: “My Team”, “Weekly Matchup”, etc. */}
             </div>
           )}
 
@@ -100,14 +97,22 @@ export default function App() {
             <Leagues username={user.username} onOpenLeague={handleOpenLeague} />
           )}
 
-          {view === "league" && activeLeague && (
-  <LeagueHome
-    league={activeLeague}
-    me={user.username}
-    onBack={() => setView("leagues")}
-  />
-)}
-
+          {view === "league" && (
+            activeLeague ? (
+              <LeagueHome
+                league={activeLeague}
+                me={user.username}
+                onBack={() => setView("leagues")}
+              />
+            ) : (
+              <div>
+                <p>⚠️ No league selected.</p>
+                <button onClick={() => setView("leagues")} style={{ padding: 8 }}>
+                  ← Back to Leagues
+                </button>
+              </div>
+            )
+          )}
         </>
       )}
     </div>
