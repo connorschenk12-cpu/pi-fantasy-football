@@ -197,6 +197,7 @@ export async function listMyLeagues(username) {
   if (!username) return [];
 
   const leaguesCol = collection(db, "leagues");
+  
 // Create a new league (owner auto-added to members)
 export async function createLeague({ name, owner, id }) {
   const leagueId = id || crypto.randomUUID();
