@@ -1,13 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ensureTeam, getTeam, setRosterSlot } from "../lib/storage";
+import { ensureTeam, listenTeam, releasePlayerAndClearSlot } from "../lib/storage";
 import { PLAYERS } from "../data/players";
 
 const SLOT_ORDER = ["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"];
 
-function optionsForSlot(slot) {
-  const S = slot.toUpperCase();
-  if (S === "FLEX") return PLAYERS.filter(p => ["RB","WR","TE"].includes(p.pos));
-  return PLAYERS.filter(p => p.pos === S);
+function playerLabel(id) {
+  if (!id) return "— empty —";
+  const found = PLAYERS.find((p) => p.id === id);
+  return found ? `${found.name} (${found.pos || found.position})` : id;
 }
 
 export default function MyTeam({ leagueId, username, onBack }) {
@@ -16,20 +16,22 @@ export default function MyTeam({ leagueId, username, onBack }) {
   const roster = useMemo(() => team?.roster || {}, [team]);
 
   useEffect(() => {
+    let unsub = null;
     (async () => {
       await ensureTeam({ leagueId, username });
-      const t = await getTeam({ leagueId, username });
-      setTeam(t);
+      unsub = listenTeam({ leagueId, username, onChange: setTeam });
     })();
+    return () => unsub && unsub();
   }, [leagueId, username]);
 
-  async function handleSet(slot, playerId) {
+  async function handleRemove(slot) {
+    const playerId = roster[String(slot).toUpperCase()];
+    if (!playerId) return;
     setSaving(true);
     try {
-      const updated = await setRosterSlot({ leagueId, username, slot, playerId });
-      setTeam(updated);
+      await releasePlayerAndClearSlot({ leagueId, username, playerId, slot });
     } catch (e) {
-      alert("Failed to save slot");
+      alert(e.message || "Failed to release player");
       console.error(e);
     } finally {
       setSaving(false);
@@ -48,21 +50,16 @@ export default function MyTeam({ leagueId, username, onBack }) {
       ) : (
         <div style={{ display: "grid", gap: 10 }}>
           {SLOT_ORDER.map((slot) => (
-            <div key={slot} style={{ display: "grid", gap: 6 }}>
-              <label><strong>{slot}</strong></label>
-              <select
-                value={roster[slot] || ""}
-                onChange={(e) => handleSet(slot, e.target.value || null)}
-                disabled={saving}
-                style={{ padding: 10 }}
+            <div key={slot} style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <div style={{ width: 60 }}><strong>{slot}</strong></div>
+              <div style={{ flex: 1 }}>{playerLabel(roster[slot])}</div>
+              <button
+                onClick={() => handleRemove(slot)}
+                disabled={!roster[slot] || saving}
+                style={{ padding: 8 }}
               >
-                <option value="">{saving ? "Saving…" : "— Select —"}</option>
-                {optionsForSlot(slot).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.pos})
-                  </option>
-                ))}
-              </select>
+                Remove
+              </button>
             </div>
           ))}
         </div>
