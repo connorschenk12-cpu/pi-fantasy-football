@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Pi Auth Test</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Pi SDK -->
+  <script src="https://sdk.minepi.com/pi-sdk.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, Arial; padding: 16px; }
+    button { padding: 10px 14px; font-size: 16px; margin-right: 8px; margin-bottom: 8px; }
+    pre { background: #f6f8fa; padding: 12px; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>Pi Auth Test</h1>
+  <div id="status">Not initialized.</div>
+  <div style="margin:12px 0;">
+    <button onclick="showHostInfo()">Show host info</button>
+    <button onclick="initNoAppId()">Init WITHOUT appId</button>
+    <button onclick="initWithAppId()">Init WITH appId</button>
+    <button onclick="loginUsername()">Login (username)</button>
+  </div>
+  <h3>Diagnostics</h3>
+  <pre id="diag"></pre>
+  <h3>User</h3>
+  <pre id="user"></pre>
+
+  <script>
+    const SLUG = "fantasy-football-f6a0c6cf6115e138";
+    const TIMEOUT = 15000;
+
+    const $ = (id) => document.getElementById(id);
+    const setStatus = (t) => { $("status").textContent = t; };
+    const logDiag = (extra = {}) => {
+      const info = {
+        href: location.href,
+        hasPi: !!window.Pi,
+        piKeys: window.Pi ? Object.keys(window.Pi) : [],
+        ...extra
+      };
+      $("diag").textContent = JSON.stringify(info, null, 2);
+      console.log("🔎 DIAG:", info);
+    };
+
+    async function showHostInfo() {
+      if (!window.Pi) return setStatus("❌ Pi SDK not found. Open in Pi Browser.");
+      try {
+        const fn = window.Pi.getPiHostAppInfo || window.Pi.getPiHostAppName;
+        const info = fn ? await fn() : "(no host info function)";
+        setStatus("ℹ️ Host info fetched");
+        logDiag({ hostInfo: info });
+      } catch (e) {
+        setStatus("⚠️ Could not fetch host info");
+        logDiag({ hostInfoError: String(e) });
+      }
+    }
+
+    function initNoAppId() {
+      if (!window.Pi) return setStatus("❌ Pi SDK not found.");
+      try {
+        window.Pi.init({ version: "2.0" });
+        setStatus("✅ Initialized WITHOUT appId");
+        logDiag({ init: "without-appId" });
+      } catch (e) {
+        setStatus("❌ Init error (no appId)");
+        logDiag({ initError: String(e) });
+      }
+    }
+
+    function initWithAppId() {
+      if (!window.Pi) return setStatus("❌ Pi SDK not found.");
+      try {
+        window.Pi.init({ version: "2.0", appId: SLUG });
+        setStatus("✅ Initialized WITH appId");
+        logDiag({ init: "with-appId", appId: SLUG });
+      } catch (e) {
+        setStatus("❌ Init error (with appId)");
+        logDiag({ initError: String(e) });
+      }
+    }
+
+    async function loginUsername() {
+      if (!window.Pi) return setStatus("❌ Pi SDK not found.");
+      setStatus("⏳ Authenticating (username)...");
+      logDiag({ phase: "before-auth", scopes: ["username"] });
+
+      const watchdog = new Promise((_, rej) => setTimeout(() => rej(new Error("Auth timed out")), TIMEOUT));
+
+      try {
+        const authPromise = window.Pi.authenticate(["username"], (p)=>console.log("incomplete payment", p));
+        const result = await Promise.race([authPromise, watchdog]);
+
+        const u = result?.user || result;
+        if (!u?.username) throw new Error("No username in result");
+
+        $("user").textContent = JSON.stringify(u, null, 2);
+        setStatus("✅ Logged in (username)");
+        logDiag({ phase: "after-auth", success: true, user: u });
+      } catch (e) {
+        setStatus("❌ Authentication failed or timed out");
+        logDiag({ phase: "auth-error", error: String(e) });
+      }
+    }
+  </script>
+</body>
+</html>
