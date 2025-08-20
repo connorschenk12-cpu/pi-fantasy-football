@@ -6,34 +6,57 @@ export default function Leagues({ username, onOpenLeague }) {
   const [joinId, setJoinId] = useState("");
   const [mine, setMine] = useState([]);
   const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  function refresh() {
-    setMine(listMyLeagues(username));
+  async function refresh() {
+    setLoading(true);
+    try {
+      const data = await listMyLeagues(username);
+      setMine(data);
+    } catch (e) {
+      setMsg("❌ Failed to load leagues");
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
     refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
-  function handleCreate() {
+  async function handleCreate() {
     const name = leagueName.trim();
     if (!name) return setMsg("Enter a league name");
-    const id = createLeague({ name, owner: username });
-    setLeagueName("");
-    setMsg(`✅ League created: ${name} (ID: ${id})`);
-    refresh();
+    setLoading(true);
+    try {
+      const id = await createLeague({ name, owner: username });
+      setLeagueName("");
+      setMsg(`✅ League created: ${name} (ID: ${id})`);
+      await refresh();
+    } catch (e) {
+      setMsg("❌ Failed to create league");
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
   }
 
-  function handleJoin() {
+  async function handleJoin() {
     const id = joinId.trim();
     if (!id) return setMsg("Enter a league ID");
+    setLoading(true);
     try {
-      joinLeague({ leagueId: id, username });
+      await joinLeague({ leagueId: id, username });
       setJoinId("");
       setMsg(`✅ Joined league ${id}`);
-      refresh();
+      await refresh();
     } catch (e) {
       setMsg("❌ League not found");
+      console.error(e);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -41,6 +64,7 @@ export default function Leagues({ username, onOpenLeague }) {
     <div style={{ marginTop: 20 }}>
       <h2>Leagues</h2>
       {msg && <p>{msg}</p>}
+      {loading && <p>Loading…</p>}
 
       <div style={{ display: "grid", gap: 12, maxWidth: 420 }}>
         <div>
@@ -61,7 +85,7 @@ export default function Leagues({ username, onOpenLeague }) {
           <input
             value={joinId}
             onChange={(e) => setJoinId(e.target.value)}
-            placeholder="League ID (e.g. abcd-1234)"
+            placeholder="League ID (Firestore doc id)"
             style={{ padding: 10, width: "100%" }}
           />
           <button onClick={handleJoin} style={{ marginTop: 8, padding: 10, width: "100%" }}>
@@ -79,7 +103,7 @@ export default function Leagues({ username, onOpenLeague }) {
             <li key={l.id} style={{ marginBottom: 8 }}>
               <strong>{l.name}</strong> — ID: <code>{l.id}</code>
               <br />
-              Members: {l.members.join(", ")}
+              Members: {(l.members || []).join(", ")}
               <br />
               <button
                 onClick={() => onOpenLeague(l)}
