@@ -15,14 +15,25 @@ export default function MyTeam({ leagueId, username, onBack }) {
   const [saving, setSaving] = useState(false);
   const roster = useMemo(() => team?.roster || {}, [team]);
 
-  useEffect(() => {
-    let unsub = null;
-    (async () => {
+ // inside MyTeam.js
+useEffect(() => {
+  let unsub = null;
+  (async () => {
+    try {
       await ensureTeam({ leagueId, username });
       unsub = listenTeam({ leagueId, username, onChange: setTeam });
-    })();
-    return () => unsub && unsub();
-  }, [leagueId, username]);
+    } catch (e) {
+      console.error("Team listener error:", e);
+      alert(
+        e?.message?.includes("offline")
+          ? "You're offline or Firestore was blocked. Retrying when the network returns."
+          : "Failed to load your team."
+      );
+    }
+  })();
+  return () => unsub && unsub();
+}, [leagueId, username]);
+
 
   async function handleRemove(slot) {
     const playerId = roster[String(slot).toUpperCase()];
