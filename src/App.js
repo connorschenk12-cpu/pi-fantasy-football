@@ -1,69 +1,50 @@
-import React, { useEffect, useState } from "react";
+import React, { useState, useEffect } from "react";
 
 function App() {
   const [piUser, setPiUser] = useState(null);
-  const [leagueName, setLeagueName] = useState("");
-  const [myLeagues, setMyLeagues] = useState([]);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
-    // Initialize Pi SDK
-    if (window.Pi) {
-      window.Pi.init({ version: "2.0" });
+    async function initPi() {
+      if (!window.Pi) {
+        setError("Pi SDK not found. Please open in Pi Browser.");
+        return;
+      }
 
-      // Example auth flow
-      window.Pi.authenticate(
-        ["username", "payments"], // permissions
-        (authResult) => {
-          console.log("Auth result:", authResult);
-          setPiUser(authResult.user);
-        },
-        (error) => {
-          console.error("Auth failed:", error);
-        }
-      );
+      try {
+        // Initialize Pi SDK
+        window.Pi.init({ version: "2.0" });
+
+        // Authenticate user
+        const scopes = ["username", "payments"];
+        const user = await window.Pi.authenticate(
+          scopes,
+          (payment) => console.log("Payment callback:", payment)
+        );
+
+        setPiUser(user);
+      } catch (err) {
+        console.error("Pi Authentication failed:", err);
+        setError(err.message);
+      }
     }
+
+    initPi();
   }, []);
 
-  const handleCreateLeague = () => {
-    if (!leagueName.trim()) return;
-
-    // In the future, we'll save this to a database.
-    setMyLeagues([...myLeagues, leagueName]);
-    setLeagueName("");
-  };
-
   return (
-    <div style={{ padding: "20px", fontFamily: "Arial" }}>
+    <div style={{ textAlign: "center", padding: "20px" }}>
       <h1>Pi Fantasy Football</h1>
 
-      {piUser ? (
+      {error && <p style={{ color: "red" }}>{error}</p>}
+
+      {!piUser && !error && <p>Loading Pi user...</p>}
+
+      {piUser && (
         <div>
-          <p>Welcome, {piUser.username}!</p>
-
-          <h2>Create a League</h2>
-          <input
-            type="text"
-            value={leagueName}
-            onChange={(e) => setLeagueName(e.target.value)}
-            placeholder="Enter league name"
-          />
-          <button onClick={handleCreateLeague} style={{ marginLeft: "10px" }}>
-            Create League
-          </button>
-
-          <h2>My Leagues</h2>
-          {myLeagues.length > 0 ? (
-            <ul>
-              {myLeagues.map((league, index) => (
-                <li key={index}>{league}</li>
-              ))}
-            </ul>
-          ) : (
-            <p>No leagues yet. Create one above!</p>
-          )}
+          <h2>Welcome, {piUser.username}!</h2>
+          <p>Your Pi ID: {piUser.uid}</p>
         </div>
-      ) : (
-        <p>Loading Pi user...</p>
       )}
     </div>
   );
