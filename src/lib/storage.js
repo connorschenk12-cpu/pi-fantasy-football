@@ -13,6 +13,7 @@ import {
   updateDoc,
   arrayUnion,
   runTransaction,
+  onSnapshot
 } from "firebase/firestore";
 
 /** ----------------------
@@ -174,5 +175,26 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId, 
       }
     }
     tx.delete(claimRef);
+  });
+}
+
+// 🔔 Live listeners
+import { onSnapshot } from "firebase/firestore";
+
+/** Listen to all player claims in a league. Returns unsubscribe fn. */
+export function listenLeagueClaims(leagueId, onChange) {
+  const colRef = collection(db, "leagues", leagueId, "claims");
+  return onSnapshot(colRef, (qs) => {
+    const map = new Map();
+    qs.docs.forEach((d) => map.set(d.id, d.data()));
+    onChange(map);
+  });
+}
+
+/** Listen to the current user's team document. Returns unsubscribe fn. */
+export function listenTeam({ leagueId, username, onChange }) {
+  const ref = doc(db, "leagues", leagueId, "teams", username);
+  return onSnapshot(ref, (snap) => {
+    onChange(snap.exists() ? snap.data() : null);
   });
 }
