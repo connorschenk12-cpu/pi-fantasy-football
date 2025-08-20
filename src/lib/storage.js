@@ -162,6 +162,88 @@ export async function claimPlayerAndAssignSlot({ leagueId, username, playerId, s
       throw new Error(`Player already claimed by ${claimedBy}`);
     }
 
+    // --- LEAGUE CORE --- //
+export async function getLeague(leagueId) {
+  const ref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(ref);
+  return snap.exists() ? (snap.data() || null) : null;
+}
+
+export function listenLeague(leagueId, onChange) {
+  const ref = doc(db, "leagues", leagueId);
+  return onSnapshot(ref, (snap) => {
+    onChange(snap.exists() ? (snap.data() || null) : null);
+  });
+}
+
+// Initialize league defaults (call after league creation or lazily on open)
+export async function initLeagueDefaults(leagueId) {
+  const ref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error("League not found");
+  const data = snap.data() || {};
+
+  const defaults = {
+    draft: data.draft || { status: "unscheduled", scheduledAt: null, startedAt: null },
+    settings: data.settings || {
+      maxTeams: 10,
+      rosterSlots: { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1, K: 1, DEF: 1 },
+      bench: 5,
+      scoring: {
+        passYds: 0.04,
+        passTD: 4,
+        rushYds: 0.1,
+        rushTD: 6,
+        recYds: 0.1,
+        recTD: 6,
+        reception: 0, // PPR: set to 1 later if you want
+        int: -2,
+        fumble: -2,
+      },
+    },
+  };
+
+  // Only set keys that are missing, don’t overwrite if already there
+  await updateDoc(ref, {
+    draft: defaults.draft,
+    settings: defaults.settings,
+  });
+  const updated = await getDoc(ref);
+  return updated.data();
+}
+
+// --- DRAFT SCHEDULING --- //
+export async function scheduleDraft(leagueId, isoDateString) {
+  const when = new Date(isoDateString);
+  if (isNaN(+when)) throw new Error("Invalid date/time");
+  const ref = doc(db, "leagues", leagueId);
+  await updateDoc(ref, {
+    draft: {
+      status: "scheduled",
+      scheduledAt: when.toISOString(),
+      startedAt: null,
+    },
+  });
+}
+
+export async function setDraftStatus(leagueId, status) {
+  if (!["unscheduled", "scheduled", "live", "complete"].includes(status)) {
+    throw new Error("Invalid draft status");
+  }
+  const ref = doc(db, "leagues", leagueId);
+  const patch = status === "live"
+    ? { draft: { status: "live", scheduledAt: null, startedAt: new Date().toISOString() } }
+    : { draft: { status } };
+  await updateDoc(ref, patch);
+}
+
+// Helper used by Draft UI to gate picks
+export function canDraft(league) {
+  const st = league?.draft?.status;
+  return st === "live";
+}
+
+
     // ensure team exists
     let teamSnap = await tx.get(teamRef);
     if (!teamSnap.exists()) {
