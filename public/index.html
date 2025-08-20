@@ -6,8 +6,31 @@
   <title>Pi Fantasy Football</title>
   <!-- Pi SDK -->
   <script src="https://sdk.minepi.com/pi-sdk.js"></script>
+
+  <!-- 🔎 Minimal crash catcher: shows runtime errors on-screen -->
+  <style>
+    #errbox { display:none; white-space:pre-wrap; background:#fff3f3; color:#900; border:1px solid #f5c2c7; padding:10px; margin:10px; border-radius:8px; font-family:system-ui, -apple-system, Arial; }
+  </style>
+  <script>
+    (function setupCrashCatcher(){
+      function showErr(msg, src, line, col, err) {
+        var box = document.getElementById('errbox');
+        if (!box) return;
+        box.style.display = 'block';
+        const details = [
+          msg && ('Message: ' + msg),
+          src && ('Source: ' + src + (line ? (':' + line) : '') + (col ? (':' + col) : '')),
+          err && err.stack ? ('Stack:\n' + err.stack) : ''
+        ].filter(Boolean).join('\n');
+        box.textContent = '⚠️ Runtime error detected:\n' + details;
+      }
+      window.addEventListener('error', function(e){ showErr(e.message, e.filename, e.lineno, e.colno, e.error); });
+      window.addEventListener('unhandledrejection', function(e){ showErr(String(e.reason && e.reason.message || e.reason)); });
+    })();
+  </script>
 </head>
 <body>
+  <div id="errbox"></div>
   <div id="root"></div>
 </body>
 </html>
