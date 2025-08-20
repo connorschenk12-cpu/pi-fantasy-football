@@ -109,3 +109,105 @@ export async function listPlayers() {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
+import {
+  runTransaction,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  setDoc,
+  updateDoc,
+  serverTimestamp,
+  query,
+  where,
+} from "firebase/firestore";
+import { db } from "./firebase";
+
+/**
+ * Return a Map of playerId -> { claimedBy }
+ */
+export async function getLeagueClaims(leagueId) {
+  const qs = await getDocs(collection(db, "leagues", leagueId, "claims"));
+  const map = new Map();
+  qs.docs.forEach((d) => map.set(d.id, d.data()));
+  return map;
+}
+
+/**
+ * Atomically claim a player for a user AND set them in a roster slot.
+ * Throws if player already claimed by someone else.
+ */
+export async function claimPlayerAndAssignSlot({ leagueId, username, playerId, slot }) {
+  const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
+  const teamRef  = doc(db, "leagues", leagueId, "teams", username);
+
+  await runTransaction(db, async (tx) => {
+    // Check claim
+    const claimSnap = await tx.get(claimRef);
+    if (claimSnap.exists()) {
+      const { claimedBy } = claimSnap.data();
+      throw new Error(`Player already claimed by ${claimedBy}`);
+    }
+
+    // Ensure team exists
+    const teamSnap = await tx.get(teamRef);
+    if (!teamSnap.exists()) {
+      tx.set(teamRef, {
+        username,
+        roster: { QB: null, RB: null, WR: null, TE: null, FLEX: null, K: null, DEF: null },
+        bench: [],
+        createdAt: Date.now(),
+      });
+    }
+
+    const teamData = (await tx.get(teamRef)).data();
+    const newRoster = { ...(teamData.roster || {}) };
+    const upper = String(slot).toUpperCase();
+
+    // Basic slot validation
+    const posFromId = playerId.split("_")[0].toUpperCase(); // e.g. "qb", "rb" from "qb_mahomes" (works for your starter pool)
+    const isFlex = upper === "FLEX";
+    const validForFlex = posFromId === "RB" || posFromId === "WR" || posFromId === "TE";
+    if (!isFlex && upper !== posFromId) {
+      throw new Error(`Player ${playerId} cannot be assigned to slot ${upper}`);
+    }
+    if (isFlex && !validForFlex) {
+      throw new Error(`Only RB/WR/TE can go to FLEX`);
+    }
+
+    newRoster[upper] = playerId;
+
+    // Write claim + team roster
+    tx.set(claimRef, { claimedBy: username, claimedAt: serverTimestamp() });
+    tx.update(teamRef, { roster: newRoster });
+  });
+}
+
+/**
+ * (Optional) Release a claimed player (owner only) and clear slot if matching.
+ */
+export async function releasePlayerAndClearSlot({ leagueId, username, playerId, slot }) {
+  const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
+  const teamRef  = doc(db, "leagues", leagueId, "teams", username);
+
+  await runTransaction(db, async (tx) => {
+    const claimSnap = await tx.get(claimRef);
+    if (!claimSnap.exists()) return; // nothing to do
+    const { claimedBy } = claimSnap.data();
+    if (claimedBy !== username) throw new Error("You do not own this player");
+
+    const teamSnap = await tx.get(teamRef);
+    if (teamSnap.exists()) {
+      const data = teamSnap.data();
+      const newRoster = { ...(data.roster || {}) };
+      const upper = String(slot).toUpperCase();
+      if (newRoster[upper] === playerId) {
+        newRoster[upper] = null;
+        tx.update(teamRef, { roster: newRoster });
+      }
+    }
+    tx.delete(claimRef);
+  });
+}
+
+
