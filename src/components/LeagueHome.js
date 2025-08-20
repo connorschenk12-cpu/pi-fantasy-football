@@ -65,7 +65,7 @@ export default function LeagueHome({ league, me, onBack }) {
       </div>
 
       {/* Players list (interactive, with claims) */}
-      <Players leagueId={league.id} username={me} />
+  
     </div>
   );
 }
