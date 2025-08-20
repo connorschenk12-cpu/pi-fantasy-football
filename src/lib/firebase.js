@@ -1,28 +1,30 @@
-// src/firebase.js
+// src/lib/firebase.js
+import { initializeApp, getApps, getApp } from "firebase/app";
+import { initializeFirestore, getFirestore } from "firebase/firestore";
 
-// Import the functions you need
-import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
-import { getAuth } from "firebase/auth";
-import { getAnalytics } from "firebase/analytics";
-
-// Your Firebase configuration
+// Your Firebase configuration (from your console)
 const firebaseConfig = {
   apiKey: "AIzaSyBWEBHSEPR8JummZhprqMS80DOptQHoYKg",
   authDomain: "pi-fantasy-football.firebaseapp.com",
   projectId: "pi-fantasy-football",
-  storageBucket: "pi-fantasy-football.appspot.com", // 👈 corrected `.appspot.com`
+  storageBucket: "pi-fantasy-football.appspot.com", // ✅ corrected domain
   messagingSenderId: "133234554090",
   appId: "1:133234554090:web:254d166d2b13640440d393",
-  measurementId: "G-BWFGWS5XWG"
+  // measurementId: "G-BWFGWS5XWG" // optional; omit in Pi Browser for stability
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
+const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
-// Initialize services
-export const db = getFirestore(app);
-export const auth = getAuth(app);
-export const analytics = getAnalytics(app);
+// Force long-polling (best for Pi Browser webview) and disable fetch streams
+let db;
+try {
+  db = initializeFirestore(app, {
+    experimentalForceLongPolling: true,
+    useFetchStreams: false,
+  });
+} catch {
+  db = getFirestore(app);
+}
 
+export { db };
 export default app;
