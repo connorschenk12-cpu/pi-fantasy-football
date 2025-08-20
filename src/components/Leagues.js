@@ -23,8 +23,7 @@ export default function Leagues({ username, onOpenLeague }) {
 
   useEffect(() => {
     refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [username]);
+  }, [username]); // correct dependency
 
   async function handleCreate() {
     const name = leagueName.trim();
@@ -75,10 +74,10 @@ export default function Leagues({ username, onOpenLeague }) {
             placeholder="League name"
             style={{ padding: 10, width: "100%" }}
           />
-          <button onClick={handleCreate} style={{ marginTop: 8, padding: 10, width: "100%" }}>
-            Create
-          </button>
         </div>
+        <button onClick={handleCreate} style={{ marginTop: 8, padding: 10, width: "100%" }}>
+          Create
+        </button>
 
         <div>
           <h3>Join a League</h3>
@@ -88,33 +87,10 @@ export default function Leagues({ username, onOpenLeague }) {
             placeholder="League ID (Firestore doc id)"
             style={{ padding: 10, width: "100%" }}
           />
-          <button onClick={handleJoin} style={{ marginTop: 8, padding: 10, width: "100%" }}>
-            Join
-          </button>
         </div>
+        <button onClick={handleJoin} style={{ marginTop: 8, padding: 10, width: "100%" }}>
+          Join
+        </button>
       </div>
 
-      <h3 style={{ marginTop: 24 }}>My Leagues</h3>
-      {mine.length === 0 ? (
-        <p>No leagues yet. Create one above or paste an ID to join.</p>
-      ) : (
-        <ul style={{ paddingLeft: 16 }}>
-          {mine.map((l) => (
-            <li key={l.id} style={{ marginBottom: 8 }}>
-              <strong>{l.name}</strong> — ID: <code>{l.id}</code>
-              <br />
-              Members: {(l.members || []).join(", ")}
-              <br />
-              <button
-                onClick={() => onOpenLeague(l)}
-                style={{ marginTop: 6, padding: 8 }}
-              >
-                Open League
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
+      <h3 style={{ marginTop: 24
