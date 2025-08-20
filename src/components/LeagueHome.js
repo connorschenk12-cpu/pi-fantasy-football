@@ -1,11 +1,10 @@
+// src/components/LeagueHome.js
 import React, { useMemo, useState } from "react";
 import MyTeam from "./MyTeam";
-import Players from "./Players";
 import PlayersList from "./PlayersList";
 
-
 export default function LeagueHome({ league, me, onBack }) {
-  // Guard against missing prop to avoid ReferenceError
+  // Guard against missing prop so we never crash
   if (!league) {
     return (
       <div style={{ marginTop: 8 }}>
@@ -13,15 +12,13 @@ export default function LeagueHome({ league, me, onBack }) {
           ← Back to Leagues
         </button>
         <p>⚠️ League not found.</p>
-
-        <PlayersList />
-
       </div>
     );
   }
 
   const [showTeam, setShowTeam] = useState(false);
   const isOwner = useMemo(() => league.owner === me, [league, me]);
+  const members = Array.isArray(league.members) ? league.members : [];
 
   if (showTeam) {
     return (
@@ -40,15 +37,23 @@ export default function LeagueHome({ league, me, onBack }) {
       </button>
 
       <h2>{league.name}</h2>
-      <p><strong>League ID:</strong> <code>{league.id}</code></p>
-      <p><strong>Owner:</strong> {league.owner}</p>
+      <p>
+        <strong>League ID:</strong> <code>{league.id}</code>
+      </p>
+      <p>
+        <strong>Owner:</strong> {league.owner}
+      </p>
 
       <h3 style={{ marginTop: 16 }}>Members</h3>
-      <ul style={{ paddingLeft: 16 }}>
-        {(league.members || []).map((m) => (
-          <li key={m}>{m}</li>
-        ))}
-      </ul>
+      {members.length === 0 ? (
+        <p>No members yet.</p>
+      ) : (
+        <ul style={{ paddingLeft: 16 }}>
+          {members.map((m) => (
+            <li key={m}>{m}</li>
+          ))}
+        </ul>
+      )}
 
       <div style={{ display: "grid", gap: 10, marginTop: 16, maxWidth: 360 }}>
         <button onClick={() => setShowTeam(true)} style={{ padding: 10 }}>
@@ -64,8 +69,8 @@ export default function LeagueHome({ league, me, onBack }) {
         )}
       </div>
 
-      {/* Players list (interactive, with claims) */}
-  
+      {/* 🔎 Debug-friendly players list (global players + projectId/counts) */}
+      <PlayersList leagueId={league.id} />
     </div>
   );
 }
