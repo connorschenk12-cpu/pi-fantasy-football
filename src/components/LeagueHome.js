@@ -13,6 +13,9 @@ export default function LeagueHome({ league, me, onBack }) {
           ← Back to Leagues
         </button>
         <p>⚠️ League not found.</p>
+
+        <PlayersList />
+
       </div>
     );
   }
