@@ -13,11 +13,11 @@ import {
   updateDoc,
   arrayUnion,
   runTransaction,
-  onSnapshot
+  onSnapshot, // <-- live listeners (only import once)
 } from "firebase/firestore";
 
 /** ----------------------
- *  Leagues (CRUD-ish)
+ *  Leagues
  *  ---------------------- */
 export async function createLeague({ name, owner }) {
   const leaguesCol = collection(db, "leagues");
@@ -48,7 +48,7 @@ export async function listMyLeagues(username) {
 }
 
 /** ----------------------
- *  Players (read-only list)
+ *  Players (read-only)
  *  ---------------------- */
 export async function listPlayers() {
   const qs = await getDocs(collection(db, "players"));
@@ -92,7 +92,7 @@ export async function setRosterSlot({ leagueId, username, slot, playerId }) {
 }
 
 /** ----------------------
- *  Claims (prevent duplicates in a league)
+ *  Claims (prevent duplicates per league)
  *  ---------------------- */
 export async function getLeagueClaims(leagueId) {
   const qs = await getDocs(collection(db, "leagues", leagueId, "claims"));
@@ -101,23 +101,20 @@ export async function getLeagueClaims(leagueId) {
   return map;
 }
 
-/**
- * Atomically claim a player for a user AND assign to a roster slot.
- * Requires playerId format like "qb_mahomes" so we can validate slot↔position quickly.
- */
+/** Atomically claim + assign to a roster slot */
 export async function claimPlayerAndAssignSlot({ leagueId, username, playerId, slot }) {
   const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
   const teamRef  = doc(db, "leagues", leagueId, "teams", username);
 
   await runTransaction(db, async (tx) => {
-    // check claim
+    // claim check
     const claimSnap = await tx.get(claimRef);
     if (claimSnap.exists()) {
       const { claimedBy } = claimSnap.data();
       throw new Error(`Player already claimed by ${claimedBy}`);
     }
 
-    // ensure team
+    // ensure team exists
     let teamSnap = await tx.get(teamRef);
     if (!teamSnap.exists()) {
       tx.set(teamRef, {
@@ -133,34 +130,29 @@ export async function claimPlayerAndAssignSlot({ leagueId, username, playerId, s
     const upper = String(slot).toUpperCase();
     const newRoster = { ...(team.roster || {}) };
 
-    // simple validation based on id prefix (qb_, rb_, wr_, te_, k_, def_)
-    const posPrefix = String(playerId).split("_")[0].toUpperCase(); // "QB", "RB", etc.
+    // validate slot by id prefix (qb_, rb_, wr_, te_, k_, def_)
+    const posPrefix = String(playerId).split("_")[0].toUpperCase();
     const isFlex = upper === "FLEX";
     const validForFlex = posPrefix === "RB" || posPrefix === "WR" || posPrefix === "TE";
-
-    if (!isFlex && upper !== posPrefix) {
-      throw new Error(`Player ${playerId} cannot be assigned to ${upper}`);
-    }
-    if (isFlex && !validForFlex) {
-      throw new Error(`Only RB/WR/TE can be assigned to FLEX`);
-    }
+    if (!isFlex && upper !== posPrefix) throw new Error(`Player ${playerId} cannot be assigned to ${upper}`);
+    if (isFlex && !validForFlex) throw new Error(`Only RB/WR/TE can be assigned to FLEX`);
 
     newRoster[upper] = playerId;
 
-    // write both claim and roster
+    // write claim + roster
     tx.set(claimRef, { claimedBy: username, claimedAt: serverTimestamp() });
     tx.update(teamRef, { roster: newRoster });
   });
 }
 
-/** Release a claimed player (owner only) and clear the given slot if it matches. */
+/** Release (owner only) + clear slot if it matches */
 export async function releasePlayerAndClearSlot({ leagueId, username, playerId, slot }) {
   const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
   const teamRef  = doc(db, "leagues", leagueId, "teams", username);
 
   await runTransaction(db, async (tx) => {
     const claimSnap = await tx.get(claimRef);
-    if (!claimSnap.exists()) return; // nothing to do
+    if (!claimSnap.exists()) return;
     const { claimedBy } = claimSnap.data();
     if (claimedBy !== username) throw new Error("You do not own this player");
 
@@ -178,10 +170,9 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId, 
   });
 }
 
-// 🔔 Live listeners
-import { onSnapshot } from "firebase/firestore";
-
-/** Listen to all player claims in a league. Returns unsubscribe fn. */
+/** ----------------------
+ *  Live listeners
+ *  ---------------------- */
 export function listenLeagueClaims(leagueId, onChange) {
   const colRef = collection(db, "leagues", leagueId, "claims");
   return onSnapshot(colRef, (qs) => {
@@ -191,7 +182,6 @@ export function listenLeagueClaims(leagueId, onChange) {
   });
 }
 
-/** Listen to the current user's team document. Returns unsubscribe fn. */
 export function listenTeam({ leagueId, username, onChange }) {
   const ref = doc(db, "leagues", leagueId, "teams", username);
   return onSnapshot(ref, (snap) => {
