@@ -235,3 +235,56 @@ export function listenTeam({ leagueId, username, onChange }) {
     onChange(snap.exists() ? obj(snap.data()) : null);
   });
 }
+
+// ✅ New: claim by explicit position (doesn't rely on playerId prefix)
+export async function claimPlayerToSlot({
+  leagueId,
+  username,
+  playerId,
+  playerPosition, // "QB" | "RB" | "WR" | "TE" | "K" | "DEF"
+  slot,           // "QB" | "RB" | "WR" | "TE" | "FLEX" | "K" | "DEF"
+}) {
+  const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
+  const teamRef  = doc(db, "leagues", leagueId, "teams", username);
+
+  await runTransaction(db, async (tx) => {
+    // Already claimed?
+    const claimSnap = await tx.get(claimRef);
+    if (claimSnap.exists()) {
+      const c = claimSnap.data() || {};
+      throw new Error(`Player already claimed by ${c.claimedBy || "someone else"}`);
+    }
+
+    // Ensure team exists
+    let teamSnap = await tx.get(teamRef);
+    if (!teamSnap.exists()) {
+      tx.set(teamRef, {
+        username,
+        roster: { QB: null, RB: null, WR: null, TE: null, FLEX: null, K: null, DEF: null },
+        bench: [],
+        createdAt: Date.now(),
+      });
+      teamSnap = await tx.get(teamRef);
+    }
+
+    const upperSlot = String(slot).toUpperCase();
+    const upperPos  = String(playerPosition || "").toUpperCase();
+    const roster    = { ...((teamSnap.data() && teamSnap.data().roster) || {}) };
+
+    // Validate slot compatibility (by position)
+    const isFlex = upperSlot === "FLEX";
+    const validForFlex = upperPos === "RB" || upperPos === "WR" || upperPos === "TE";
+    if (!isFlex && upperSlot !== upperPos) {
+      throw new Error(`Cannot place a ${upperPos} into ${upperSlot}`);
+    }
+    if (isFlex && !validForFlex) {
+      throw new Error(`Only RB/WR/TE can be assigned to FLEX`);
+    }
+
+    // Assign + write claim
+    roster[upperSlot] = playerId;
+    tx.set(claimRef, { claimedBy: username, claimedAt: serverTimestamp(), position: upperPos });
+    tx.update(teamRef, { roster });
+  });
+}
+
