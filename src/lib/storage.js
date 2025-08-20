@@ -103,3 +103,9 @@ export async function setRosterSlot({ leagueId, username, slot, playerId }) {
   const updated = await getDoc(ref);
   return updated.data();
 }
+// Add to storage.js
+export async function listPlayers() {
+  const snap = await getDocs(collection(db, "players"));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
