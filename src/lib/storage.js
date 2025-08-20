@@ -14,11 +14,9 @@ import {
   where,
 } from "firebase/firestore";
 
-/** ---------------------------
- *  Players
- *  ---------------------------
- */
-
+/* =========================================
+   PLAYERS
+   ========================================= */
 
 // Try league-scoped players first; if empty, fall back to global players
 export async function listPlayers({ leagueId }) {
@@ -36,10 +34,9 @@ export async function listPlayers({ leagueId }) {
   return globalSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
-/** ---------------------------
- *  Claims (availability)
- *  ---------------------------
- */
+/* =========================================
+   CLAIMS (Availability in a league)
+   ========================================= */
 
 export async function getLeagueClaims(leagueId) {
   const claimsCol = collection(db, "leagues", leagueId, "claims");
@@ -58,10 +55,9 @@ export function listenLeagueClaims(leagueId, onChange) {
   });
 }
 
-/** ---------------------------
- *  Teams
- *  ---------------------------
- */
+/* =========================================
+   TEAMS
+   ========================================= */
 
 export async function ensureTeam({ leagueId, username }) {
   const teamRef = doc(db, "leagues", leagueId, "teams", username);
@@ -89,7 +85,7 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId, 
   const teamRef = doc(db, "leagues", leagueId, "teams", username);
 
   await runTransaction(db, async (tx) => {
-    // Only the drafter can release (or you can relax this)
+    // Only the drafter can release (or relax if you prefer)
     const cSnap = await tx.get(claimRef);
     if (!cSnap.exists()) return; // nothing to do
     const c = cSnap.data() || {};
@@ -114,15 +110,15 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId, 
   });
 }
 
-/** ---------------------------
- *  Draft gating + claims
- *  ---------------------------
- */
+/* =========================================
+   DRAFT GATING + CLAIMS
+   ========================================= */
 
 export function canDraft(league) {
   return (league?.draft?.status || "unscheduled") === "live";
 }
 
+// Claim a player into a roster slot (validates slot vs position; draft must be LIVE)
 export async function claimPlayerToSlot({
   leagueId,
   username,
@@ -130,8 +126,8 @@ export async function claimPlayerToSlot({
   playerPosition, // "QB" | "RB" | "WR" | "TE" | "K" | "DEF"
   slot,           // "QB" | "RB" | "WR" | "TE" | "FLEX" | "K" | "DEF"
 }) {
-  const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
-  const teamRef  = doc(db, "leagues", leagueId, "teams", username);
+  const claimRef  = doc(db, "leagues", leagueId, "claims", playerId);
+  const teamRef   = doc(db, "leagues", leagueId, "teams", username);
   const leagueRef = doc(db, "leagues", leagueId);
 
   await runTransaction(db, async (tx) => {
@@ -181,87 +177,15 @@ export async function claimPlayerToSlot({
   });
 }
 
-/** ---------------------------
- *  League (core + draft)
- *  ---------------------------
- */
+/* =========================================
+   LEAGUE CORE + DRAFT META
+   ========================================= */
 
 export async function getLeague(leagueId) {
   const ref = doc(db, "leagues", leagueId);
   const snap = await getDoc(ref);
   return snap.exists() ? (snap.data() || null) : null;
 }
-
-// List leagues this user belongs to (owner or member)
-export async function listMyLeagues(username) {
-  if (!username) return [];
-
-  const leaguesCol = collection(db, "leagues");
-  
-// Create a new league (owner auto-added to members)
-export async function createLeague({ name, owner, id }) {
-  const leagueId = id || crypto.randomUUID();
-  const ref = doc(db, "leagues", leagueId);
-  await setDoc(ref, {
-    id: leagueId,
-    name: name || "New League",
-    owner,
-    members: [owner],
-    draft: { status: "unscheduled", scheduledAt: null, startedAt: null },
-    settings: {
-      maxTeams: 10,
-      rosterSlots: { QB:1, RB:2, WR:2, TE:1, FLEX:1, K:1, DEF:1 },
-      bench: 5,
-      scoring: {
-        passYds: 0.04, passTD: 4,
-        rushYds: 0.1,  rushTD: 6,
-        recYds: 0.1,   recTD: 6,
-        reception: 0,
-        int: -2, fumble: -2,
-      },
-    },
-    createdAt: Date.now(),
-  });
-  return (await getDoc(ref)).data();
-}
-
-// Join an existing league by ID
-export async function joinLeague({ leagueId, username }) {
-  const ref = doc(db, "leagues", leagueId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("League not found");
-  const data = snap.data() || {};
-  const members = Array.isArray(data.members) ? data.members : [];
-  if (!members.includes(username)) {
-    members.push(username);
-    await updateDoc(ref, { members });
-  }
-  return (await getDoc(ref)).data();
-}
-
-  // Owner leagues
-  const ownerQ = query(leaguesCol, where("owner", "==", username));
-  const ownerSnap = await getDocs(ownerQ);
-
-  // Member leagues
-  const memberQ = query(leaguesCol, where("members", "array-contains", username));
-  const memberSnap = await getDocs(memberQ);
-
-  const map = new Map();
-  ownerSnap.forEach((d) => map.set(d.id, { id: d.id, ...d.data() }));
-  memberSnap.forEach((d) => map.set(d.id, { id: d.id, ...d.data() }));
-
-  // If a league doc is missing fields, normalize a bit
-  return Array.from(map.values()).map((l) => ({
-    id: l.id,
-    name: l.name || "Untitled League",
-    owner: l.owner || "",
-    members: Array.isArray(l.members) ? l.members : [],
-    draft: l.draft || { status: "unscheduled", scheduledAt: null, startedAt: null },
-    settings: l.settings || {},
-  }));
-}
-
 
 export function listenLeague(leagueId, onChange) {
   const ref = doc(db, "leagues", leagueId);
@@ -316,11 +240,96 @@ export async function scheduleDraft(leagueId, isoDateString) {
 export async function setDraftStatus(leagueId, status) {
   if (!["unscheduled", "scheduled", "live", "complete"].includes(status)) {
     throw new Error("Invalid draft status");
-    }
+  }
   const ref = doc(db, "leagues", leagueId);
   const patch =
     status === "live"
       ? { draft: { status: "live", scheduledAt: null, startedAt: new Date().toISOString() } }
       : { draft: { status } };
   await updateDoc(ref, patch);
+}
+
+/* =========================================
+   LEAGUE LISTING / CREATION / JOIN
+   ========================================= */
+
+// List leagues this user belongs to (owner or member)
+export async function listMyLeagues(username) {
+  if (!username) return [];
+
+  const leaguesCol = collection(db, "leagues");
+
+  // Owner leagues
+  const ownerQ = query(leaguesCol, where("owner", "==", username));
+  const ownerSnap = await getDocs(ownerQ);
+
+  // Member leagues
+  const memberQ = query(leaguesCol, where("members", "array-contains", username));
+  const memberSnap = await getDocs(memberQ);
+
+  const map = new Map();
+  ownerSnap.forEach((d) => map.set(d.id, { id: d.id, ...d.data() }));
+  memberSnap.forEach((d) => map.set(d.id, { id: d.id, ...d.data() }));
+
+  // Normalize
+  return Array.from(map.values()).map((l) => ({
+    id: l.id,
+    name: l.name || "Untitled League",
+    owner: l.owner || "",
+    members: Array.isArray(l.members) ? l.members : [],
+    draft: l.draft || { status: "unscheduled", scheduledAt: null, startedAt: null },
+    settings: l.settings || {},
+  }));
+}
+
+// Create a new league (owner auto-added to members)
+export async function createLeague({ name, owner, id }) {
+  const leagueId =
+    id ||
+    (typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `lg_${Math.random().toString(36).slice(2)}`);
+
+  const ref = doc(db, "leagues", leagueId);
+
+  await setDoc(ref, {
+    id: leagueId,
+    name: name || "New League",
+    owner,
+    members: [owner],
+    draft: { status: "unscheduled", scheduledAt: null, startedAt: null },
+    settings: {
+      maxTeams: 10,
+      rosterSlots: { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1, K: 1, DEF: 1 },
+      bench: 5,
+      scoring: {
+        passYds: 0.04, passTD: 4,
+        rushYds: 0.1,  rushTD: 6,
+        recYds: 0.1,   recTD: 6,
+        reception: 0,
+        int: -2, fumble: -2,
+      },
+    },
+    createdAt: Date.now(),
+  });
+
+  const snap = await getDoc(ref);
+  return snap.data();
+}
+
+// Join an existing league by ID (adds user to members if not present)
+export async function joinLeague({ leagueId, username }) {
+  const ref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error("League not found");
+
+  const data = snap.data() || {};
+  const members = Array.isArray(data.members) ? data.members : [];
+
+  if (!members.includes(username)) {
+    members.push(username);
+    await updateDoc(ref, { members });
+  }
+  const updated = await getDoc(ref);
+  return updated.data();
 }
