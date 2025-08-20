@@ -105,18 +105,53 @@ export default function Leagues({ username, onOpenLeague }) {
       ) : (
         <ul style={{ paddingLeft: 16 }}>
           {mine.map((l) => (
-            <li key={l.id} style={{ marginBottom: 8 }}>
-              <strong>{l.name}</strong> — ID: <code>{l.id}</code>
-              <br />
-              Members: {(l.members || []).join(", ")}
-              <br />
-              <button
-                onClick={() => onOpenLeague(l)}
-                style={{ marginTop: 6, padding: 8 }}
-              >
-                Open League
-              </button>
-            </li>
+           <li key={l.id} style={{ marginBottom: 12 }}>
+  <strong>{l.name}</strong> — ID: <code>{l.id}</code>
+  <br />
+  Members: {(l.members || []).join(", ")}
+  <br />
+  <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+    <button onClick={() => onOpenLeague(l)} style={{ padding: 8 }}>
+      Open League
+    </button>
+    <button
+      onClick={async () => {
+        try {
+          const url = `${window.location.origin}?join=${encodeURIComponent(l.id)}`;
+          await navigator.clipboard.writeText(url);
+          alert("Join link copied!");
+        } catch {
+          alert("Could not copy — long press and copy the ID.");
+        }
+      }}
+      style={{ padding: 8 }}
+    >
+      Copy Join Link
+    </button>
+    <button
+      onClick={async () => {
+        const url = `${window.location.origin}?join=${encodeURIComponent(l.id)}`;
+        const text = `Join my Pi Fantasy Football league: ${l.name}\n${url}`;
+        try {
+          if (window.Pi?.openShareDialog) {
+            await window.Pi.openShareDialog({ title: "Pi Fantasy Football", text, url });
+          } else if (navigator.share) {
+            await navigator.share({ title: "Pi Fantasy Football", text, url });
+          } else {
+            await navigator.clipboard.writeText(url);
+            alert("Share link copied!");
+          }
+        } catch (e) {
+          console.log("Share cancelled/failed:", e);
+        }
+      }}
+      style={{ padding: 8 }}
+    >
+      Share
+    </button>
+  </div>
+</li>
+
           ))}
         </ul>
       )}
