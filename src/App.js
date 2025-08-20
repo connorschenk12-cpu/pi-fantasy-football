@@ -1,52 +1,47 @@
-import React, { useState, useEffect } from "react";
+// src/App.js
+import React, { useEffect, useState } from "react";
 
 function App() {
-  const [piUser, setPiUser] = useState(null);
-  const [error, setError] = useState(null);
+  const [user, setUser] = useState(null);
+  const [status, setStatus] = useState("Loading Pi User...");
 
   useEffect(() => {
-  async function initPi() {
-    console.log("Pi SDK check:", window.Pi);
+    console.log("🔵 App mounted");
 
     if (!window.Pi) {
-      setError("Pi SDK not found. Please open in Pi Browser.");
+      console.error("❌ window.Pi is not defined. Make sure to open in Pi Browser.");
+      setStatus("Pi SDK not found. Open in Pi Browser.");
       return;
     }
 
-    try {
-      window.Pi.init({ version: "2.0" });
-      console.log("Pi SDK initialized");
+    console.log("✅ Pi SDK detected:", window.Pi);
 
-      const scopes = ["username", "payments"];
-      const user = await window.Pi.authenticate(
-        scopes,
-        (payment) => console.log("Payment callback:", payment)
-      );
+    // Try authentication
+    window.Pi.authenticate(
+      ["username", "payments"],
+      onIncompletePaymentFound
+    ).then(function(authResult) {
+      console.log("✅ Authentication success:", authResult);
+      setUser(authResult.user);
+      setStatus("User loaded!");
+    }).catch(function(err) {
+      console.error("❌ Authentication failed:", err);
+      setStatus("Authentication failed.");
+    });
+  }, []);
 
-      console.log("Pi user object:", user);
-      setPiUser(user);
-    } catch (err) {
-      console.error("Pi Authentication failed:", err);
-      setError(err.message);
-    }
+  function onIncompletePaymentFound(payment) {
+    console.log("⚠️ Incomplete payment found:", payment);
   }
 
-  initPi();
-}, []);
-
-
   return (
-    <div style={{ textAlign: "center", padding: "20px" }}>
+    <div style={{ padding: "20px", fontFamily: "Arial" }}>
       <h1>Pi Fantasy Football</h1>
-
-      {error && <p style={{ color: "red" }}>{error}</p>}
-
-      {!piUser && !error && <p>Loading Pi user...</p>}
-
-      {piUser && (
+      <p>{status}</p>
+      {user && (
         <div>
-          <h2>Welcome, {piUser.username}!</h2>
-          <p>Your Pi ID: {piUser.uid}</p>
+          <p><strong>Logged in as:</strong> {user.username}</p>
+          <pre>{JSON.stringify(user, null, 2)}</pre>
         </div>
       )}
     </div>
