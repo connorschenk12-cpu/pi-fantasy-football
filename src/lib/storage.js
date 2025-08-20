@@ -40,3 +40,36 @@ export async function listMyLeagues(username) {
   const qs = await getDocs(q);
   return qs.docs.map((d) => d.data());
 }
+
+import { collection, doc, setDoc, getDoc } from "firebase/firestore";
+import { db } from "./firebase";
+
+// Creates/initializes a team doc for a user in a league
+export async function ensureTeam({ leagueId, username }) {
+  const ref = doc(db, "leagues", leagueId, "teams", username);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    await setDoc(ref, {
+      username,
+      roster: {
+        QB: null,
+        RB: null,
+        WR: null,
+        TE: null,
+        FLEX: null,
+        K: null,
+        DEF: null,
+      },
+      bench: [],
+      createdAt: Date.now(),
+    });
+  }
+  return ref.id;
+}
+
+// Fetch a user's team
+export async function getTeam({ leagueId, username }) {
+  const ref = doc(db, "leagues", leagueId, "teams", username);
+  const snap = await getDoc(ref);
+  return snap.exists() ? snap.data() : null;
+}
