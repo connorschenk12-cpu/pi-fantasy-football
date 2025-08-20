@@ -1,13 +1,26 @@
 // src/components/LeagueHome.js
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import MyTeam from "./MyTeam";
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
-
+import LeagueAdmin from "./LeagueAdmin";
+import { listenLeague } from "../lib/storage";
 
 export default function LeagueHome({ league, me, onBack }) {
-  // Guard against missing prop so we never crash
-  if (!league) {
+  // Guard: if no league prop yet
+  const [liveLeague, setLiveLeague] = useState(league || null);
+  const [tab, setTab] = useState("players"); // 'team' | 'players' | 'draft' | 'admin'
+
+  // Keep league data live/updated
+  useEffect(() => {
+    if (!league?.id) return;
+    const unsub = listenLeague(league.id, (l) => setLiveLeague(l || league));
+    return () => unsub && unsub();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [league?.id]);
+
+  const l = liveLeague || league;
+  if (!l) {
     return (
       <div style={{ marginTop: 8 }}>
         <button onClick={onBack} style={{ marginBottom: 12, padding: 8 }}>
@@ -18,19 +31,9 @@ export default function LeagueHome({ league, me, onBack }) {
     );
   }
 
-  const [showTeam, setShowTeam] = useState(false);
-  const isOwner = useMemo(() => league.owner === me, [league, me]);
-  const members = Array.isArray(league.members) ? league.members : [];
-
-  if (showTeam) {
-    return (
-      <MyTeam
-        leagueId={league.id}
-        username={me}
-        onBack={() => setShowTeam(false)}
-      />
-    );
-  }
+  const isOwner = useMemo(() => l.owner === me, [l, me]);
+  const members = Array.isArray(l.members) ? l.members : [];
+  const draftStatus = l?.draft?.status || "unscheduled";
 
   return (
     <div style={{ marginTop: 8 }}>
@@ -38,12 +41,15 @@ export default function LeagueHome({ league, me, onBack }) {
         ← Back to Leagues
       </button>
 
-      <h2>{league.name}</h2>
+      <h2>{l.name}</h2>
       <p>
-        <strong>League ID:</strong> <code>{league.id}</code>
+        <strong>League ID:</strong> <code>{l.id}</code>
       </p>
       <p>
-        <strong>Owner:</strong> {league.owner}
+        <strong>Owner:</strong> {l.owner}
+      </p>
+      <p>
+        <strong>Draft status:</strong> {draftStatus}
       </p>
 
       <h3 style={{ marginTop: 16 }}>Members</h3>
@@ -57,24 +63,47 @@ export default function LeagueHome({ league, me, onBack }) {
         </ul>
       )}
 
-      <div style={{ display: "grid", gap: 10, marginTop: 16, maxWidth: 360 }}>
-        <button onClick={() => setShowTeam(true)} style={{ padding: 10 }}>
-          Open “My Team”
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+        <button
+          onClick={() => setTab("team")}
+          style={{ padding: 8, fontWeight: tab === "team" ? 700 : 400 }}
+        >
+          My Team
+        </button>
+        <button
+          onClick={() => setTab("players")}
+          style={{ padding: 8, fontWeight: tab === "players" ? 700 : 400 }}
+        >
+          Players
+        </button>
+        <button
+          onClick={() => setTab("draft")}
+          style={{ padding: 8, fontWeight: tab === "draft" ? 700 : 400 }}
+        >
+          Draft
         </button>
         {isOwner && (
           <button
-            onClick={() => alert("Draft/Start Season coming soon")}
-            style={{ padding: 10 }}
+            onClick={() => setTab("admin")}
+            style={{ padding: 8, fontWeight: tab === "admin" ? 700 : 400 }}
           >
-            Start Season (owner)
+            Admin
           </button>
         )}
-          <DraftBoard leagueId={league.id} username={me} />
-
       </div>
 
-      {/* 🔎 Debug-friendly players list (global players + projectId/counts) */}
-      <PlayersList leagueId={league.id} />
+      {/* Tab content */}
+      <div style={{ marginTop: 16 }}>
+        {tab === "team" && (
+          <MyTeam leagueId={l.id} username={me} onBack={() => setTab("players")} />
+        )}
+        {tab === "players" && <PlayersList leagueId={l.id} />}
+        {tab === "draft" && <DraftBoard leagueId={l.id} username={me} />}
+        {tab === "admin" && isOwner && (
+          <LeagueAdmin leagueId={l.id} me={me} owner={l.owner} />
+        )}
+      </div>
     </div>
   );
 }
