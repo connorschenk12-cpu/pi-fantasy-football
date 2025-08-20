@@ -1,55 +1,47 @@
-// Simple localStorage helpers so it works on your phone now.
-// Later we swap these to Firebase with the same function names.
-
-const KEY = "piff_leagues_v1";
-
-export function loadLeagues() {
-  try {
-    const raw = localStorage.getItem(KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-export function saveLeagues(data) {
-  localStorage.setItem(KEY, JSON.stringify(data));
-}
+// src/lib/storage.js (Firestore-backed)
+import {
+  collection,
+  doc,
+  setDoc,
+  addDoc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  serverTimestamp,
+  updateDoc,
+  arrayUnion,
+} from "firebase/firestore";
+import { db } from "./firebase";
 
 // Create a league owned by username; returns leagueId
-export function createLeague({ name, owner }) {
-  const leagues = loadLeagues();
-  const leagueId = genId();
-  leagues[leagueId] = {
-    id: leagueId,
+export async function createLeague({ name, owner }) {
+  const leaguesCol = collection(db, "leagues");
+  const newDoc = await addDoc(leaguesCol, {
     name,
     owner,
     members: [owner],
-    createdAt: Date.now(),
-  };
-  saveLeagues(leagues);
-  return leagueId;
+    createdAt: serverTimestamp(),
+  });
+  // Also store its id field for convenience
+  await updateDoc(newDoc, { id: newDoc.id });
+  return newDoc.id;
 }
 
 // Join by leagueId; idempotent for same user
-export function joinLeague({ leagueId, username }) {
-  const leagues = loadLeagues();
-  if (!leagues[leagueId]) throw new Error("League not found");
-  const m = new Set(leagues[leagueId].members || []);
-  m.add(username);
-  leagues[leagueId].members = Array.from(m);
-  saveLeagues(leagues);
-  return leagues[leagueId];
+export async function joinLeague({ leagueId, username }) {
+  const ref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error("League not found");
+  await updateDoc(ref, { members: arrayUnion(username) });
+  const updated = await getDoc(ref);
+  return updated.data();
 }
 
 // Return leagues where user is a member
-export function listMyLeagues(username) {
-  const leagues = loadLeagues();
-  return Object.values(leagues).filter(l => (l.members || []).includes(username));
-}
-
-function genId() {
-  // short human-ish id: 4 chars + '-' + 4 chars
-  const s = () => Math.random().toString(36).slice(2, 6);
-  return `${s()}-${s()}`;
+export async function listMyLeagues(username) {
+  const leaguesCol = collection(db, "leagues");
+  const q = query(leaguesCol, where("members", "array-contains", username));
+  const qs = await getDocs(q);
+  return qs.docs.map((d) => d.data());
 }
