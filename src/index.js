@@ -1,66 +1,33 @@
-import React, { useState } from "react";
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
 
-function App() {
-  const [user, setUser] = useState(null);
-  const [status, setStatus] = useState("Not logged in.");
-
-  function onIncompletePaymentFound(payment) {
-    console.log("⚠️ Incomplete payment found:", payment);
-  }
-
-  async function handleLogin() {
-    if (!window.Pi) {
-      setStatus("❌ Pi SDK not found. Open this in Pi Browser.");
-      return;
-    }
-
+// --- Initialize the Pi SDK as early as possible ---
+(function initPi() {
+  // Only run if the SDK is present (Pi Browser)
+  if (typeof window !== "undefined" && window.Pi) {
     try {
-      setStatus("⏳ Authenticating...");
-      const authResult = await window.Pi.authenticate(
-        ["username", "payments"],
-        onIncompletePaymentFound
-      );
-      console.log("✅ Authentication success:", authResult);
-      setUser(authResult.user);
-      setStatus("✅ Logged in!");
-    } catch (err) {
-      console.error("❌ Authentication failed:", err);
-      // Common causes: wrong App ID in Pi.init, App URL mismatch in Portal
-      setStatus("❌ Authentication failed. Check App ID & App URL in Portal.");
+      // ⬇️ REPLACE THIS with your real App ID from the Pi Developer Portal
+      // Portal → Your App → General Settings → "App ID"
+      const APP_ID = "<REPLACE_WITH_YOUR_APP_ID>";
+
+      window.Pi.init({
+        version: "2.0",
+        appId: APP_ID,   // <- critical for auth to succeed
+      });
+
+      console.log("✅ Pi SDK initialized with appId:", APP_ID);
+    } catch (e) {
+      console.error("❌ Pi SDK init error:", e);
     }
+  } else {
+    console.warn("⚠️ Pi SDK not found (open in Pi Browser).");
   }
+})();
 
-  return (
-    <div style={{ padding: 20, fontFamily: "Arial, sans-serif" }}>
-      <h1>Pi Fantasy Football</h1>
-      <p>{status}</p>
-
-      {!user && (
-        <button onClick={handleLogin} style={{ padding: 10, fontSize: 16 }}>
-          Login with Pi
-        </button>
-      )}
-
-      {user && (
-        <div style={{ marginTop: 16 }}>
-          <p>
-            <strong>Logged in as:</strong> {user.username}
-          </p>
-          <pre
-            style={{
-              textAlign: "left",
-              background: "#f6f8fa",
-              padding: 12,
-              borderRadius: 8,
-              overflowX: "auto",
-            }}
-          >
-            {JSON.stringify(user, null, 2)}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-}
-
-export default App;
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
