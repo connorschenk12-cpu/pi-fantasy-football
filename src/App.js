@@ -8,25 +8,37 @@ function App() {
     console.log("⚠️ Incomplete payment found:", payment);
   }
 
-  async function handleLogin() {
+  async function handleLoginUsernameOnly() {
     if (!window.Pi) {
       setStatus("❌ Pi SDK not found. Open this in Pi Browser.");
       return;
     }
-
     try {
-      setStatus("⏳ Authenticating...");
-      const authResult = await window.Pi.authenticate(
-        ["username", "payments"],
-        onIncompletePaymentFound
-      );
-      console.log("✅ Authentication success:", authResult);
-      setUser(authResult.user);
+      setStatus("⏳ Authenticating (username only)...");
+      const authResult = await window.Pi.authenticate(["username"], onIncompletePaymentFound);
+      console.log("✅ Auth success:", authResult);
+      setUser(authResult.user || authResult); // Some SDK returns { user }, others return user
       setStatus("✅ Logged in!");
     } catch (err) {
       console.error("❌ Authentication failed:", err);
-      // Common causes: wrong App ID in Pi.init, App URL mismatch in Portal
-      setStatus("❌ Authentication failed. Check App ID & App URL in Portal.");
+      setStatus("❌ Authentication failed. Check App URL & App ID in Portal.");
+    }
+  }
+
+  async function handleLoginWithPayments() {
+    if (!window.Pi) {
+      setStatus("❌ Pi SDK not found. Open this in Pi Browser.");
+      return;
+    }
+    try {
+      setStatus("⏳ Authenticating (username + payments)...");
+      const authResult = await window.Pi.authenticate(["username", "payments"], onIncompletePaymentFound);
+      console.log("✅ Auth+payments success:", authResult);
+      setUser(authResult.user || authResult);
+      setStatus("✅ Logged in with payments!");
+    } catch (err) {
+      console.error("❌ Auth with payments failed:", err);
+      setStatus("❌ Payments scope failed. Try username-only first and confirm your Testnet wallet + permissions.");
     }
   }
 
@@ -36,16 +48,19 @@ function App() {
       <p>{status}</p>
 
       {!user && (
-        <button onClick={handleLogin} style={{ padding: 10, fontSize: 16 }}>
-          Login with Pi
-        </button>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <button onClick={handleLoginUsernameOnly} style={{ padding: 10, fontSize: 16 }}>
+            Login (username only)
+          </button>
+          <button onClick={handleLoginWithPayments} style={{ padding: 10, fontSize: 16 }}>
+            Login (username + payments)
+          </button>
+        </div>
       )}
 
       {user && (
         <div style={{ marginTop: 16 }}>
-          <p>
-            <strong>Logged in as:</strong> {user.username}
-          </p>
+          <p><strong>Logged in as:</strong> {user.username || "(no username?)"}</p>
           <pre
             style={{
               textAlign: "left",
