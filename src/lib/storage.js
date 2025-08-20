@@ -196,6 +196,46 @@ export async function listMyLeagues(username) {
   if (!username) return [];
 
   const leaguesCol = collection(db, "leagues");
+// Create a new league (owner auto-added to members)
+export async function createLeague({ name, owner, id }) {
+  const leagueId = id || crypto.randomUUID();
+  const ref = doc(db, "leagues", leagueId);
+  await setDoc(ref, {
+    id: leagueId,
+    name: name || "New League",
+    owner,
+    members: [owner],
+    draft: { status: "unscheduled", scheduledAt: null, startedAt: null },
+    settings: {
+      maxTeams: 10,
+      rosterSlots: { QB:1, RB:2, WR:2, TE:1, FLEX:1, K:1, DEF:1 },
+      bench: 5,
+      scoring: {
+        passYds: 0.04, passTD: 4,
+        rushYds: 0.1,  rushTD: 6,
+        recYds: 0.1,   recTD: 6,
+        reception: 0,
+        int: -2, fumble: -2,
+      },
+    },
+    createdAt: Date.now(),
+  });
+  return (await getDoc(ref)).data();
+}
+
+// Join an existing league by ID
+export async function joinLeague({ leagueId, username }) {
+  const ref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error("League not found");
+  const data = snap.data() || {};
+  const members = Array.isArray(data.members) ? data.members : [];
+  if (!members.includes(username)) {
+    members.push(username);
+    await updateDoc(ref, { members });
+  }
+  return (await getDoc(ref)).data();
+}
 
   // Owner leagues
   const ownerQ = query(leaguesCol, where("owner", "==", username));
