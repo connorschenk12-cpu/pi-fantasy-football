@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  <meta charset="utf-8" />
+  <title>Firestore Probe</title>
+  <script type="module">
+    import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { initializeFirestore, getFirestore, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+    // ⬇️ paste the same config you used in src/lib/firebase.js
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID",
+    };
+
+    const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+    let db;
+    try {
+      db = initializeFirestore(app, { experimentalForceLongPolling: true, useFetchStreams: false });
+    } catch {
+      db = getFirestore(app);
+    }
+
+    const log = (msg) => {
+      const pre = document.getElementById("out");
+      pre.textContent += msg + "\n";
+    };
+
+    log("projectId: " + (app.options.projectId || "(unknown)"));
+    try {
+      const snap = await getDocs(collection(db, "players"));
+      log("players count: " + snap.size);
+      log("OK ✅ Firestore reachable");
+    } catch (e) {
+      log("ERR ❌ " + (e && e.message ? e.message : String(e)));
+      if (e && e.code) log("code: " + e.code);
+    }
+  </script>
+  <pre id="out" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 12px; background:#f7f7f7; border:1px solid #ddd; border-radius:8px;"></pre>
+</html>
