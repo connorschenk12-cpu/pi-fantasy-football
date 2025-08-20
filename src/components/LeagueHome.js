@@ -1,6 +1,9 @@
 import React, { useMemo, useState } from "react";
 import MyTeam from "./MyTeam";
 import Players from "./Players";
+// ...
+<Players leagueId={league.id} username={me} />
+
 
 
 export default function LeagueHome({ league, me, onBack }) {
