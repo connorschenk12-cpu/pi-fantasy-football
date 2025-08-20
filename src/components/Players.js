@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { listPlayers, getLeagueClaims, claimPlayerAndAssignSlot } from "../lib/storage";
+import { listPlayers, getLeagueClaims, claimPlayerAndAssignSlot, listenLeagueClaims } from "../lib/storage";
 
 const SLOTS = ["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"];
 
@@ -11,18 +11,23 @@ export default function Players({ leagueId, username }) {
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
+    let unsub = null;
     (async () => {
       try {
-        const [p, c] = await Promise.all([listPlayers(), getLeagueClaims(leagueId)]);
+        const p = await listPlayers();
         setPlayers(p);
-        setClaims(c);
+        // initial claims pull + subscribe for live updates
+        const initial = await getLeagueClaims(leagueId);
+        setClaims(initial);
+        unsub = listenLeagueClaims(leagueId, (map) => setClaims(map));
       } catch (e) {
         console.error(e);
-        setMsg("❌ Failed to load players or claims");
+        setMsg("❌ Failed to load players/claims");
       } finally {
         setLoading(false);
       }
     })();
+    return () => unsub && unsub();
   }, [leagueId]);
 
   const availability = useMemo(() => {
@@ -40,9 +45,6 @@ export default function Players({ leagueId, username }) {
     try {
       setMsg(`⏳ Claiming ${p.name} to ${slot}...`);
       await claimPlayerAndAssignSlot({ leagueId, username, playerId: p.id, slot });
-      // refresh claims after success
-      const c = await getLeagueClaims(leagueId);
-      setClaims(c);
       setMsg(`✅ Added ${p.name} to ${slot}`);
     } catch (e) {
       console.error(e);
@@ -83,16 +85,12 @@ export default function Players({ leagueId, username }) {
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <select
                       value={slotByPlayer[p.id] || ""}
-                      onChange={(e) =>
-                        setSlotByPlayer((s) => ({ ...s, [p.id]: e.target.value }))
-                      }
+                      onChange={(e) => setSlotByPlayer((s) => ({ ...s, [p.id]: e.target.value }))}
                       style={{ padding: 8 }}
                     >
                       <option value="">Select slot</option>
                       {SLOTS.map((s) => (
-                        <option key={s} value={s}>
-                          {s}
-                        </option>
+                        <option key={s} value={s}>{s}</option>
                       ))}
                     </select>
                     <button onClick={() => handleClaim(p)} style={{ padding: 8 }}>
