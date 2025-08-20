@@ -3,322 +3,124 @@ import { db } from "./firebase";
 import {
   collection,
   doc,
-  setDoc,
-  addDoc,
   getDoc,
   getDocs,
-  query,
-  where,
-  serverTimestamp,
+  setDoc,
   updateDoc,
-  arrayUnion,
-  runTransaction,
   onSnapshot,
+  serverTimestamp,
+  runTransaction,
+  query,
 } from "firebase/firestore";
 
-/** ----------------------
- *  Helpers
- *  ---------------------- */
-function arr(x) {
-  return Array.isArray(x) ? x : [];
-}
-function obj(x) {
-  return x && typeof x === "object" ? x : {};
-}
-
-/** ----------------------
- *  Leagues
- *  ---------------------- */
-export async function createLeague({ name, owner }) {
-  const leaguesCol = collection(db, "leagues");
-  const newDocRef = await addDoc(leaguesCol, {
-    name,
-    owner,
-    members: [owner],
-    createdAt: serverTimestamp(),
-  });
-  await updateDoc(newDocRef, { id: newDocRef.id });
-  return newDocRef.id;
-}
-
-export async function joinLeague({ leagueId, username }) {
-  const ref = doc(db, "leagues", leagueId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("League not found");
-  const data = obj(snap.data());
-  const members = new Set(arr(data.members));
-  members.add(username);
-  await updateDoc(ref, { members: Array.from(members) });
-  const updated = await getDoc(ref);
-  return obj(updated.data());
-}
-
-export async function listMyLeagues(username) {
-  const leaguesCol = collection(db, "leagues");
-  const q = query(leaguesCol, where("members", "array-contains", username));
-  const qs = await getDocs(q);
-  return qs.docs.map((d) => {
-    const data = obj(d.data());
-    return { ...data, id: data.id || d.id, members: arr(data.members) };
-  });
-}
-
-/** ----------------------
- *  Players (read-only)
- *  ---------------------- */
-/**
- * Load players for a league if present (leagues/{leagueId}/players).
- * If none, fall back to global collection "players".
- * Returns array of { id, name, position/pos, team? }
+/** ---------------------------
+ *  Players
+ *  ---------------------------
  */
-export async function listPlayers({ leagueId } = {}) {
-  async function load(colRef) {
-    const qs = await getDocs(colRef);
-    return qs.docs.map((d) => {
-      const data = obj(d.data());
-      return {
-        id: d.id,
-        name: data.name || "",
-        position: data.position || data.pos || "", // accept either key
-        team: data.team || "",
-        ...data,
-      };
-    });
-  }
 
-  // Try league-scoped first
-  if (leagueId) {
-    const leagueScoped = collection(db, "leagues", leagueId, "players");
-    const got = await getDocs(leagueScoped);
-    if (!got.empty) {
-      return load(leagueScoped);
+// Try league-scoped players first; if empty, fall back to global players
+export async function listPlayers({ leagueId }) {
+  try {
+    const leagueCol = collection(db, "leagues", leagueId, "players");
+    const leagueSnap = await getDocs(leagueCol);
+    if (!leagueSnap.empty) {
+      return leagueSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
     }
+  } catch {
+    // ignore and fall through to global
   }
-
-  // Fallback: global
   const globalCol = collection(db, "players");
-  return load(globalCol);
+  const globalSnap = await getDocs(globalCol);
+  return globalSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
-/** ----------------------
- *  Teams / Rosters
- *  ---------------------- */
+/** ---------------------------
+ *  Claims (availability)
+ *  ---------------------------
+ */
+
+export async function getLeagueClaims(leagueId) {
+  const claimsCol = collection(db, "leagues", leagueId, "claims");
+  const snap = await getDocs(claimsCol);
+  const map = new Map();
+  snap.forEach((d) => map.set(d.id, d.data()));
+  return map;
+}
+
+export function listenLeagueClaims(leagueId, onChange) {
+  const claimsCol = collection(db, "leagues", leagueId, "claims");
+  return onSnapshot(claimsCol, (qs) => {
+    const map = new Map();
+    qs.forEach((d) => map.set(d.id, d.data()));
+    onChange(map);
+  });
+}
+
+/** ---------------------------
+ *  Teams
+ *  ---------------------------
+ */
+
 export async function ensureTeam({ leagueId, username }) {
-  const ref = doc(db, "leagues", leagueId, "teams", username);
-  const snap = await getDoc(ref);
+  const teamRef = doc(db, "leagues", leagueId, "teams", username);
+  const snap = await getDoc(teamRef);
   if (!snap.exists()) {
-    await setDoc(ref, {
+    await setDoc(teamRef, {
       username,
       roster: { QB: null, RB: null, WR: null, TE: null, FLEX: null, K: null, DEF: null },
       bench: [],
       createdAt: Date.now(),
     });
   }
-  return ref.id;
+  return teamRef;
 }
 
-export async function getTeam({ leagueId, username }) {
-  const ref = doc(db, "leagues", leagueId, "teams", username);
-  const snap = await getDoc(ref);
-  return snap.exists() ? obj(snap.data()) : null;
-}
-
-export async function setRosterSlot({ leagueId, username, slot, playerId }) {
-  const ref = doc(db, "leagues", leagueId, "teams", username);
-  const teamSnap = await getDoc(ref);
-  if (!teamSnap.exists()) throw new Error("Team not found");
-  const team = obj(teamSnap.data());
-  const slotUpper = String(slot).toUpperCase();
-  const newRoster = { ...obj(team.roster) };
-  newRoster[slotUpper] = playerId || null;
-  await updateDoc(ref, { roster: newRoster });
-  const updated = await getDoc(ref);
-  return obj(updated.data());
-}
-
-/** ----------------------
- *  Claims (prevent duplicates per league)
- *  ---------------------- */
-export async function getLeagueClaims(leagueId) {
-  const qs = await getDocs(collection(db, "leagues", leagueId, "claims"));
-  const map = new Map();
-  qs.docs.forEach((d) => map.set(d.id, obj(d.data())));
-  return map;
-}
-
-/**
- * Atomically claim + assign to a roster slot.
- * Requires playerId format like "qb_xxx", "rb_xxx", etc for quick validation.
- */
-export async function claimPlayerAndAssignSlot({ leagueId, username, playerId, slot }) {
-  const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
-  const teamRef  = doc(db, "leagues", leagueId, "teams", username);
-
-  await runTransaction(db, async (tx) => {
-    // claim check
-    const claimSnap = await tx.get(claimRef);
-    if (claimSnap.exists()) {
-      const { claimedBy } = obj(claimSnap.data());
-      throw new Error(`Player already claimed by ${claimedBy}`);
-    }
-
-    // --- LEAGUE CORE --- //
-export async function getLeague(leagueId) {
-  const ref = doc(db, "leagues", leagueId);
-  const snap = await getDoc(ref);
-  return snap.exists() ? (snap.data() || null) : null;
-}
-
-export function listenLeague(leagueId, onChange) {
-  const ref = doc(db, "leagues", leagueId);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? (snap.data() || null) : null);
-  });
-}
-
-// Initialize league defaults (call after league creation or lazily on open)
-export async function initLeagueDefaults(leagueId) {
-  const ref = doc(db, "leagues", leagueId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("League not found");
-  const data = snap.data() || {};
-
-  const defaults = {
-    draft: data.draft || { status: "unscheduled", scheduledAt: null, startedAt: null },
-    settings: data.settings || {
-      maxTeams: 10,
-      rosterSlots: { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1, K: 1, DEF: 1 },
-      bench: 5,
-      scoring: {
-        passYds: 0.04,
-        passTD: 4,
-        rushYds: 0.1,
-        rushTD: 6,
-        recYds: 0.1,
-        recTD: 6,
-        reception: 0, // PPR: set to 1 later if you want
-        int: -2,
-        fumble: -2,
-      },
-    },
-  };
-
-  // Only set keys that are missing, don’t overwrite if already there
-  await updateDoc(ref, {
-    draft: defaults.draft,
-    settings: defaults.settings,
-  });
-  const updated = await getDoc(ref);
-  return updated.data();
-}
-
-// --- DRAFT SCHEDULING --- //
-export async function scheduleDraft(leagueId, isoDateString) {
-  const when = new Date(isoDateString);
-  if (isNaN(+when)) throw new Error("Invalid date/time");
-  const ref = doc(db, "leagues", leagueId);
-  await updateDoc(ref, {
-    draft: {
-      status: "scheduled",
-      scheduledAt: when.toISOString(),
-      startedAt: null,
-    },
-  });
-}
-
-export async function setDraftStatus(leagueId, status) {
-  if (!["unscheduled", "scheduled", "live", "complete"].includes(status)) {
-    throw new Error("Invalid draft status");
-  }
-  const ref = doc(db, "leagues", leagueId);
-  const patch = status === "live"
-    ? { draft: { status: "live", scheduledAt: null, startedAt: new Date().toISOString() } }
-    : { draft: { status } };
-  await updateDoc(ref, patch);
-}
-
-// Helper used by Draft UI to gate picks
-export function canDraft(league) {
-  const st = league?.draft?.status;
-  return st === "live";
-}
-
-
-    // ensure team exists
-    let teamSnap = await tx.get(teamRef);
-    if (!teamSnap.exists()) {
-      tx.set(teamRef, {
-        username,
-        roster: { QB: null, RB: null, WR: null, TE: null, FLEX: null, K: null, DEF: null },
-        bench: [],
-        createdAt: Date.now(),
-      });
-      teamSnap = await tx.get(teamRef);
-    }
-
-    const team = obj(teamSnap.data());
-    const upper = String(slot).toUpperCase();
-    const newRoster = { ...obj(team.roster) };
-
-    // validate slot by id prefix (qb_, rb_, wr_, te_, k_, def_)
-    const posPrefix = String(playerId).split("_")[0].toUpperCase();
-    const isFlex = upper === "FLEX";
-    const validForFlex = posPrefix === "RB" || posPrefix === "WR" || posPrefix === "TE";
-    if (!isFlex && upper !== posPrefix) throw new Error(`Player ${playerId} cannot be assigned to ${upper}`);
-    if (isFlex && !validForFlex) throw new Error(`Only RB/WR/TE can be assigned to FLEX`);
-
-    newRoster[upper] = playerId;
-
-    // write claim + roster
-    tx.set(claimRef, { claimedBy: username, claimedAt: serverTimestamp() });
-    tx.update(teamRef, { roster: newRoster });
+export function listenTeam({ leagueId, username, onChange }) {
+  const teamRef = doc(db, "leagues", leagueId, "teams", username);
+  return onSnapshot(teamRef, (snap) => {
+    onChange(snap.exists() ? snap.data() : null);
   });
 }
 
 export async function releasePlayerAndClearSlot({ leagueId, username, playerId, slot }) {
   const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
-  const teamRef  = doc(db, "leagues", leagueId, "teams", username);
+  const teamRef = doc(db, "leagues", leagueId, "teams", username);
 
   await runTransaction(db, async (tx) => {
-    const claimSnap = await tx.get(claimRef);
-    if (!claimSnap.exists()) return;
-    const { claimedBy } = obj(claimSnap.data());
-    if (claimedBy !== username) throw new Error("You do not own this player");
+    // Only the drafter can release (or you can relax this)
+    const cSnap = await tx.get(claimRef);
+    if (!cSnap.exists()) return; // nothing to do
+    const c = cSnap.data() || {};
+    if (c.claimedBy && c.claimedBy !== username) {
+      throw new Error(`Only ${c.claimedBy} can release this player`);
+    }
 
-    const teamSnap = await tx.get(teamRef);
-    if (teamSnap.exists()) {
-      const data = obj(teamSnap.data());
-      const upper = String(slot).toUpperCase();
-      const newRoster = { ...obj(data.roster) };
-      if (newRoster[upper] === playerId) {
-        newRoster[upper] = null;
-        tx.update(teamRef, { roster: newRoster });
-      }
+    const tSnap = await tx.get(teamRef);
+    if (!tSnap.exists()) return;
+    const data = tSnap.data() || {};
+    const roster = { ...(data.roster || {}) };
+
+    const upper = String(slot).toUpperCase();
+    const current = roster[upper];
+    const currentId = typeof current === "object" ? (current.id || current.playerId) : current;
+
+    if (currentId === playerId) {
+      roster[upper] = null;
+      tx.update(teamRef, { roster });
     }
     tx.delete(claimRef);
   });
 }
 
-/** ----------------------
- *  Live listeners
- *  ---------------------- */
-export function listenLeagueClaims(leagueId, onChange) {
-  const colRef = collection(db, "leagues", leagueId, "claims");
-  return onSnapshot(colRef, (qs) => {
-    const map = new Map();
-    qs.docs.forEach((d) => map.set(d.id, obj(d.data())));
-    onChange(map);
-  });
+/** ---------------------------
+ *  Draft gating + claims
+ *  ---------------------------
+ */
+
+export function canDraft(league) {
+  return (league?.draft?.status || "unscheduled") === "live";
 }
 
-export function listenTeam({ leagueId, username, onChange }) {
-  const ref = doc(db, "leagues", leagueId, "teams", username);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? obj(snap.data()) : null);
-  });
-}
-
-// ✅ New: claim by explicit position (doesn't rely on playerId prefix)
 export async function claimPlayerToSlot({
   leagueId,
   username,
@@ -328,8 +130,15 @@ export async function claimPlayerToSlot({
 }) {
   const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
   const teamRef  = doc(db, "leagues", leagueId, "teams", username);
+  const leagueRef = doc(db, "leagues", leagueId);
 
   await runTransaction(db, async (tx) => {
+    // Gate: only allow while draft is live
+    const leagueSnap = await tx.get(leagueRef);
+    if (!leagueSnap.exists()) throw new Error("League not found");
+    const status = leagueSnap.data()?.draft?.status;
+    if (status !== "live") throw new Error("Draft is not live yet. You cannot draft players.");
+
     // Already claimed?
     const claimSnap = await tx.get(claimRef);
     if (claimSnap.exists()) {
@@ -353,7 +162,7 @@ export async function claimPlayerToSlot({
     const upperPos  = String(playerPosition || "").toUpperCase();
     const roster    = { ...((teamSnap.data() && teamSnap.data().roster) || {}) };
 
-    // Validate slot compatibility (by position)
+    // Validate slot compatibility
     const isFlex = upperSlot === "FLEX";
     const validForFlex = upperPos === "RB" || upperPos === "WR" || upperPos === "TE";
     if (!isFlex && upperSlot !== upperPos) {
@@ -370,3 +179,75 @@ export async function claimPlayerToSlot({
   });
 }
 
+/** ---------------------------
+ *  League (core + draft)
+ *  ---------------------------
+ */
+
+export async function getLeague(leagueId) {
+  const ref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(ref);
+  return snap.exists() ? (snap.data() || null) : null;
+}
+
+export function listenLeague(leagueId, onChange) {
+  const ref = doc(db, "leagues", leagueId);
+  return onSnapshot(ref, (snap) => onChange(snap.exists() ? (snap.data() || null) : null));
+}
+
+// Initialize default settings/draft fields if missing
+export async function initLeagueDefaults(leagueId) {
+  const ref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error("League not found");
+  const data = snap.data() || {};
+
+  const defaults = {
+    draft: data.draft || { status: "unscheduled", scheduledAt: null, startedAt: null },
+    settings: data.settings || {
+      maxTeams: 10,
+      rosterSlots: { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1, K: 1, DEF: 1 },
+      bench: 5,
+      scoring: {
+        passYds: 0.04, passTD: 4,
+        rushYds: 0.1,  rushTD: 6,
+        recYds: 0.1,   recTD: 6,
+        reception: 0,  // set to 1 later for PPR
+        int: -2, fumble: -2,
+      },
+    },
+  };
+
+  await updateDoc(ref, {
+    draft: defaults.draft,
+    settings: defaults.settings,
+  });
+
+  const updated = await getDoc(ref);
+  return updated.data();
+}
+
+export async function scheduleDraft(leagueId, isoDateString) {
+  const when = new Date(isoDateString);
+  if (isNaN(+when)) throw new Error("Invalid date/time");
+  const ref = doc(db, "leagues", leagueId);
+  await updateDoc(ref, {
+    draft: {
+      status: "scheduled",
+      scheduledAt: when.toISOString(),
+      startedAt: null,
+    },
+  });
+}
+
+export async function setDraftStatus(leagueId, status) {
+  if (!["unscheduled", "scheduled", "live", "complete"].includes(status)) {
+    throw new Error("Invalid draft status");
+    }
+  const ref = doc(db, "leagues", leagueId);
+  const patch =
+    status === "live"
+      ? { draft: { status: "live", scheduledAt: null, startedAt: new Date().toISOString() } }
+      : { draft: { status } };
+  await updateDoc(ref, patch);
+}
