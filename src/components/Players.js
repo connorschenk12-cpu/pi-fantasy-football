@@ -1,7 +1,14 @@
+// src/components/Players.js
 import React, { useEffect, useMemo, useState } from "react";
-import { listPlayers, getLeagueClaims, claimPlayerAndAssignSlot, listenLeagueClaims } from "../lib/storage";
+import {
+  listPlayers,
+  getLeagueClaims,
+  listenLeagueClaims,
+  claimPlayerAndAssignSlot,
+} from "../lib/storage";
 
 const SLOTS = ["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"];
+const asMap = (x) => (x instanceof Map ? x : new Map());
 
 export default function Players({ leagueId, username }) {
   const [players, setPlayers] = useState([]);
@@ -14,12 +21,13 @@ export default function Players({ leagueId, username }) {
     let unsub = null;
     (async () => {
       try {
-        const p = await listPlayers();
-        setPlayers(p);
-        // initial claims pull + subscribe for live updates
+        // Load players (league-scoped first, fallback to global)
+        const p = await listPlayers({ leagueId });
+        setPlayers(Array.isArray(p) ? p : []);
+        // Initial claims + live updates
         const initial = await getLeagueClaims(leagueId);
-        setClaims(initial);
-        unsub = listenLeagueClaims(leagueId, (map) => setClaims(map));
+        setClaims(asMap(initial));
+        unsub = listenLeagueClaims(leagueId, (map) => setClaims(asMap(map)));
       } catch (e) {
         console.error(e);
         setMsg("❌ Failed to load players/claims");
@@ -32,19 +40,24 @@ export default function Players({ leagueId, username }) {
 
   const availability = useMemo(() => {
     const map = new Map();
-    players.forEach((p) => {
-      const claim = claims.get(p.id);
+    (players || []).forEach((p) => {
+      const claim = asMap(claims).get(p.id);
       map.set(p.id, claim ? claim.claimedBy : null);
     });
     return map;
   }, [players, claims]);
 
   async function handleClaim(p) {
-    const slot = slotByPlayer[p.id] || "";
+    const slot = (slotByPlayer && slotByPlayer[p.id]) || "";
     if (!slot) return setMsg("Pick a slot first.");
     try {
       setMsg(`⏳ Claiming ${p.name} to ${slot}...`);
-      await claimPlayerAndAssignSlot({ leagueId, username, playerId: p.id, slot });
+      await claimPlayerAndAssignSlot({
+        leagueId,
+        username,
+        playerId: p.id,
+        slot,
+      });
       setMsg(`✅ Added ${p.name} to ${slot}`);
     } catch (e) {
       console.error(e);
@@ -54,13 +67,25 @@ export default function Players({ leagueId, username }) {
 
   if (loading) return <p>Loading players…</p>;
 
+  if (!players.length) {
+    return (
+      <div style={{ marginTop: 16 }}>
+        <h3>Available Players</h3>
+        <p>No players found. Add players to Firestore:
+          <code> leagues/{leagueId}/players </code> or global <code>players</code>.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div style={{ marginTop: 16 }}>
       <h3>Available Players</h3>
       {msg && <p>{msg}</p>}
       <ul style={{ listStyle: "none", padding: 0 }}>
         {players.map((p) => {
-          const claimedBy = availability.get(p.id);
+          const position = p.position || p.pos || "";
+          const claimedBy = availability.get(p.id) || null;
           const mine = claimedBy && claimedBy === username;
           return (
             <li
@@ -75,7 +100,8 @@ export default function Players({ leagueId, username }) {
             >
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
                 <div>
-                  <strong>{p.name}</strong> <span style={{ opacity: 0.7 }}>({p.position || p.pos})</span>
+                  <strong>{p.name || p.id}</strong>{" "}
+                  <span style={{ opacity: 0.7 }}>({position})</span>
                   <div style={{ fontSize: 12, opacity: 0.8 }}>
                     {claimedBy ? (mine ? "You own this player" : `Claimed by ${claimedBy}`) : "Available"}
                   </div>
@@ -84,8 +110,10 @@ export default function Players({ leagueId, username }) {
                 {!claimedBy && (
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <select
-                      value={slotByPlayer[p.id] || ""}
-                      onChange={(e) => setSlotByPlayer((s) => ({ ...s, [p.id]: e.target.value }))}
+                      value={(slotByPlayer && slotByPlayer[p.id]) || ""}
+                      onChange={(e) =>
+                        setSlotByPlayer((s) => ({ ...(s || {}), [p.id]: e.target.value }))
+                      }
                       style={{ padding: 8 }}
                     >
                       <option value="">Select slot</option>
