@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from "react";
 import MyTeam from "./MyTeam";
+import Players from "./Players";
+
 
 export default function LeagueHome({ league, me, onBack }) {
   const [showTeam, setShowTeam] = useState(false);
@@ -22,6 +24,7 @@ export default function LeagueHome({ league, me, onBack }) {
       </button>
 
       <h2>{league.name}</h2>
+      <Players />
       <p><strong>League ID:</strong> <code>{league.id}</code></p>
       <p><strong>Owner:</strong> {league.owner}</p>
 
