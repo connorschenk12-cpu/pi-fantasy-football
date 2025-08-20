@@ -13,7 +13,7 @@ import App from "./App";
 
       window.Pi.init({
         version: "2.0",
-        appId: APP_ID,   // <- critical for auth to succeed
+        appId: fantasy-football-f6a0c6cf6115e138,   // <- critical for auth to succeed
       });
 
       console.log("✅ Pi SDK initialized with appId:", APP_ID);
