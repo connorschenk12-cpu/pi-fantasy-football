@@ -1,11 +1,35 @@
 import React, { useState } from "react";
 import Leagues from "./components/Leagues";
+import { useEffect } from "react";
+import { joinLeague } from "./lib/storage";
+
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [status, setStatus] = useState("Not logged in.");
   const [view, setView] = useState("home"); // "home" | "leagues" | "league"
   const [activeLeague, setActiveLeague] = useState(null);
+  useEffect(() => {
+  const params = new URLSearchParams(window.location.search);
+  const toJoin = params.get("join");
+  if (!toJoin || !user) return;
+
+  (async () => {
+    try {
+      await joinLeague({ leagueId: toJoin, username: user.username });
+      setStatus(`✅ Joined league ${toJoin}`);
+      // Clean the URL so the join param doesn't repeat
+      const url = new URL(window.location.href);
+      url.searchParams.delete("join");
+      window.history.replaceState({}, "", url.toString());
+      setView("leagues");
+    } catch (e) {
+      console.error(e);
+      setStatus("❌ League not found for join link.");
+    }
+  })();
+}, [user]);
+
 
   function onIncompletePaymentFound(payment) {
     console.log("⚠️ Incomplete payment found:", payment);
