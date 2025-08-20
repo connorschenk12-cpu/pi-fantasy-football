@@ -2,6 +2,8 @@
 import React, { useMemo, useState } from "react";
 import MyTeam from "./MyTeam";
 import PlayersList from "./PlayersList";
+import DraftBoard from "./DraftBoard";
+
 
 export default function LeagueHome({ league, me, onBack }) {
   // Guard against missing prop so we never crash
@@ -67,6 +69,8 @@ export default function LeagueHome({ league, me, onBack }) {
             Start Season (owner)
           </button>
         )}
+          <DraftBoard leagueId={league.id} username={me} />
+
       </div>
 
       {/* 🔎 Debug-friendly players list (global players + projectId/counts) */}
