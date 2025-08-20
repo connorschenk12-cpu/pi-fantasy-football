@@ -1,25 +1,34 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 function App() {
-  const [user, setUser] = useState(null);
+  const [piUser, setPiUser] = useState(null);
 
-  const login = async () => {
-    try {
-      const Pi = window.Pi;
-      const authResult = await Pi.authenticate(["username", "payments"]);
-      setUser(authResult.user);
-    } catch (err) {
-      console.error("Pi login error:", err);
-      alert("Login failed. Use Pi Browser.");
+  useEffect(() => {
+    // Initialize Pi SDK
+    if (window.Pi) {
+      window.Pi.init({ version: "2.0" });
+
+      // Example auth flow
+      window.Pi.authenticate(
+        ["username", "payments"], // permissions
+        (authResult) => {
+          console.log("Auth result:", authResult);
+          setPiUser(authResult.user);
+        },
+        (error) => {
+          console.error("Auth failed:", error);
+        }
+      );
     }
-  };
+  }, []);
 
   return (
-    <div>
-      {!user ? (
-        <button onClick={login}>Login with Pi</button>
+    <div style={{ padding: "20px", fontFamily: "Arial" }}>
+      <h1>Pi Fantasy Football</h1>
+      {piUser ? (
+        <p>Welcome, {piUser.username}!</p>
       ) : (
-        <p>Welcome, {user.username}!</p>
+        <p>Loading Pi user...</p>
       )}
     </div>
   );
