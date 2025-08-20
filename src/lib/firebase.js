@@ -1,44 +1,28 @@
-// src/lib/firebase.js
-import { initializeApp, getApps, getApp } from "firebase/app";
-import {
-  getFirestore,
-  initializeFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
-} from "firebase/firestore";
+// src/firebase.js
 
-// ⬇️ REPLACE with your real values
+// Import the functions you need
+import { initializeApp } from "firebase/app";
+import { getFirestore } from "firebase/firestore";
+import { getAuth } from "firebase/auth";
+import { getAnalytics } from "firebase/analytics";
+
+// Your Firebase configuration
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID",
-  // measurementId: "G-XXXXXXX" // optional
+  apiKey: "AIzaSyBWEBHSEPR8JummZhprqMS80DOptQHoYKg",
+  authDomain: "pi-fantasy-football.firebaseapp.com",
+  projectId: "pi-fantasy-football",
+  storageBucket: "pi-fantasy-football.appspot.com", // 👈 corrected `.appspot.com`
+  messagingSenderId: "133234554090",
+  appId: "1:133234554090:web:254d166d2b13640440d393",
+  measurementId: "G-BWFGWS5XWG"
 };
 
-const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
 
-// 🚑 Important for WebViews (Pi Browser): force long-polling + use modern cache
-// - experimentalForceLongPolling: avoids WebSocket issues in webviews
-// - useFetchStreams: false for compatibility
-// - local cache: keeps app usable if network temporarily blips
-export const db =
-  // If Firestore already created (hot reload), reuse it; otherwise init with options
-  (() => {
-    try {
-      return initializeFirestore(app, {
-        experimentalForceLongPolling: true,
-        useFetchStreams: false,
-        localCache: persistentLocalCache({
-          tabManager: persistentMultipleTabManager(),
-        }),
-      });
-    } catch {
-      // fallback if already initialized
-      return getFirestore(app);
-    }
-  })();
+// Initialize services
+export const db = getFirestore(app);
+export const auth = getAuth(app);
+export const analytics = getAnalytics(app);
 
 export default app;
