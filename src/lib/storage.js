@@ -11,6 +11,7 @@ import {
   serverTimestamp,
   runTransaction,
   query,
+  where,
 } from "firebase/firestore";
 
 /** ---------------------------
@@ -189,6 +190,36 @@ export async function getLeague(leagueId) {
   const snap = await getDoc(ref);
   return snap.exists() ? (snap.data() || null) : null;
 }
+
+// List leagues this user belongs to (owner or member)
+export async function listMyLeagues(username) {
+  if (!username) return [];
+
+  const leaguesCol = collection(db, "leagues");
+
+  // Owner leagues
+  const ownerQ = query(leaguesCol, where("owner", "==", username));
+  const ownerSnap = await getDocs(ownerQ);
+
+  // Member leagues
+  const memberQ = query(leaguesCol, where("members", "array-contains", username));
+  const memberSnap = await getDocs(memberQ);
+
+  const map = new Map();
+  ownerSnap.forEach((d) => map.set(d.id, { id: d.id, ...d.data() }));
+  memberSnap.forEach((d) => map.set(d.id, { id: d.id, ...d.data() }));
+
+  // If a league doc is missing fields, normalize a bit
+  return Array.from(map.values()).map((l) => ({
+    id: l.id,
+    name: l.name || "Untitled League",
+    owner: l.owner || "",
+    members: Array.isArray(l.members) ? l.members : [],
+    draft: l.draft || { status: "unscheduled", scheduledAt: null, startedAt: null },
+    settings: l.settings || {},
+  }));
+}
+
 
 export function listenLeague(leagueId, onChange) {
   const ref = doc(db, "leagues", leagueId);
