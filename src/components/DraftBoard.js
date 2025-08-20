@@ -6,6 +6,7 @@ import {
   listenLeagueClaims,
   ensureTeam,
   claimPlayerToSlot,
+  listenLeague,
 } from "../lib/storage";
 
 const SLOTS = ["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"];
@@ -13,23 +14,31 @@ const asMap = (x) => (x instanceof Map ? x : new Map());
 
 export default function DraftBoard({ leagueId, username }) {
   const [players, setPlayers] = useState([]);
-  const [claims, setClaims]   = useState(new Map());
+  const [claims, setClaims] = useState(new Map());
   const [slotByPlayer, setSlotByPlayer] = useState({});
   const [loading, setLoading] = useState(true);
-  const [msg, setMsg]         = useState("");
+  const [msg, setMsg] = useState("");
+  const [league, setLeague] = useState(null);
 
   useEffect(() => {
-    let unsub = null;
+    let unsubClaims = null;
+    let unsubLeague = null;
+
     (async () => {
       try {
-        // load players (league-scoped first, fallback to global)
+        // Load players (league-scoped first, then global)
         const p = await listPlayers({ leagueId });
         setPlayers(Array.isArray(p) ? p : []);
-        // initial claims + live updates
+
+        // Initial claims + live updates
         const initial = await getLeagueClaims(leagueId);
         setClaims(asMap(initial));
-        unsub = listenLeagueClaims(leagueId, (map) => setClaims(asMap(map)));
-        // ensure my team doc exists
+        unsubClaims = listenLeagueClaims(leagueId, (map) => setClaims(asMap(map)));
+
+        // Live league doc (draft status, settings, etc.)
+        unsubLeague = listenLeague(leagueId, (l) => setLeague(l || null));
+
+        // Ensure my team doc exists
         await ensureTeam({ leagueId, username });
       } catch (e) {
         console.error(e);
@@ -38,8 +47,15 @@ export default function DraftBoard({ leagueId, username }) {
         setLoading(false);
       }
     })();
-    return () => unsub && unsub();
+
+    return () => {
+      unsubClaims && unsubClaims();
+      unsubLeague && unsubLeague();
+    };
   }, [leagueId, username]);
+
+  const draftStatus = league?.draft?.status || "unscheduled";
+  const draftingEnabled = draftStatus === "live";
 
   const availability = useMemo(() => {
     const map = new Map();
@@ -77,10 +93,17 @@ export default function DraftBoard({ leagueId, username }) {
   return (
     <div style={{ marginTop: 16 }}>
       <h3>Draft Board</h3>
+      <p style={{ marginTop: -6, opacity: 0.8 }}>
+        Draft status: <strong>{draftStatus}</strong>
+        {!draftingEnabled && " — drafting is disabled until the draft is LIVE"}
+      </p>
       {msg && <p>{msg}</p>}
 
       {!players.length ? (
-        <p>No players found. Add to global <code>players</code> or <code>leagues/{leagueId}/players</code>.</p>
+        <p>
+          No players found. Add to global <code>players</code> or{" "}
+          <code>leagues/{leagueId}/players</code>.
+        </p>
       ) : (
         <ul style={{ listStyle: "none", padding: 0 }}>
           {players.map((p) => {
@@ -99,12 +122,26 @@ export default function DraftBoard({ leagueId, username }) {
                   background: mine ? "#eefbf0" : claimedBy ? "#f8f9fb" : "#fff",
                 }}
               >
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 12,
+                    alignItems: "center",
+                  }}
+                >
                   <div>
                     <strong>{p.name || p.id}</strong>{" "}
-                    <span style={{ opacity: 0.7 }}>({pos}{p.team ? ` – ${p.team}` : ""})</span>
+                    <span style={{ opacity: 0.7 }}>
+                      ({pos}
+                      {p.team ? ` – ${p.team}` : ""})
+                    </span>
                     <div style={{ fontSize: 12, opacity: 0.8 }}>
-                      {claimedBy ? (mine ? "You drafted this player" : `Drafted by ${claimedBy}`) : "Available"}
+                      {claimedBy
+                        ? mine
+                          ? "You drafted this player"
+                          : `Drafted by ${claimedBy}`
+                        : "Available"}
                     </div>
                   </div>
 
@@ -116,13 +153,22 @@ export default function DraftBoard({ leagueId, username }) {
                           setSlotByPlayer((s) => ({ ...(s || {}), [p.id]: e.target.value }))
                         }
                         style={{ padding: 8 }}
+                        disabled={!draftingEnabled}
                       >
-                        <option value="">Select slot</option>
+                        <option value="">
+                          {draftingEnabled ? "Select slot" : `Draft ${draftStatus}`}
+                        </option>
                         {SLOTS.map((s) => (
-                          <option key={s} value={s}>{s}</option>
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
                         ))}
                       </select>
-                      <button onClick={() => handleDraft(p)} style={{ padding: 8 }}>
+                      <button
+                        onClick={() => handleDraft(p)}
+                        style={{ padding: 8 }}
+                        disabled={!draftingEnabled}
+                      >
                         Draft
                       </button>
                     </div>
