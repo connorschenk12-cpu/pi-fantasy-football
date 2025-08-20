@@ -2,18 +2,15 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 
-// --- Initialize the Pi SDK as early as possible ---
+// --- Initialize the Pi SDK ---
 (function initPi() {
-  // Only run if the SDK is present (Pi Browser)
   if (typeof window !== "undefined" && window.Pi) {
     try {
-      // ⬇️ REPLACE THIS with your real App ID from the Pi Developer Portal
-      // Portal → Your App → General Settings → "App ID"
-      const APP_ID = "<REPLACE_WITH_YOUR_APP_ID>";
+      const APP_ID = "fantasy-football-f6a0c6cf6115e138"; // 👈 Your slug from portal
 
       window.Pi.init({
         version: "2.0",
-        appId: fantasy-football-f6a0c6cf6115e138,   // <- critical for auth to succeed
+        appId: APP_ID,
       });
 
       console.log("✅ Pi SDK initialized with appId:", APP_ID);
@@ -21,7 +18,7 @@ import App from "./App";
       console.error("❌ Pi SDK init error:", e);
     }
   } else {
-    console.warn("⚠️ Pi SDK not found (open in Pi Browser).");
+    console.warn("⚠️ Pi SDK not found (must open in Pi Browser).");
   }
 })();
 
