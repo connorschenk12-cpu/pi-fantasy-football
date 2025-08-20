@@ -5,32 +5,35 @@ function App() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    async function initPi() {
-      if (!window.Pi) {
-        setError("Pi SDK not found. Please open in Pi Browser.");
-        return;
-      }
+  async function initPi() {
+    console.log("Pi SDK check:", window.Pi);
 
-      try {
-        // Initialize Pi SDK
-        window.Pi.init({ version: "2.0" });
-
-        // Authenticate user
-        const scopes = ["username", "payments"];
-        const user = await window.Pi.authenticate(
-          scopes,
-          (payment) => console.log("Payment callback:", payment)
-        );
-
-        setPiUser(user);
-      } catch (err) {
-        console.error("Pi Authentication failed:", err);
-        setError(err.message);
-      }
+    if (!window.Pi) {
+      setError("Pi SDK not found. Please open in Pi Browser.");
+      return;
     }
 
-    initPi();
-  }, []);
+    try {
+      window.Pi.init({ version: "2.0" });
+      console.log("Pi SDK initialized");
+
+      const scopes = ["username", "payments"];
+      const user = await window.Pi.authenticate(
+        scopes,
+        (payment) => console.log("Payment callback:", payment)
+      );
+
+      console.log("Pi user object:", user);
+      setPiUser(user);
+    } catch (err) {
+      console.error("Pi Authentication failed:", err);
+      setError(err.message);
+    }
+  }
+
+  initPi();
+}, []);
+
 
   return (
     <div style={{ textAlign: "center", padding: "20px" }}>
