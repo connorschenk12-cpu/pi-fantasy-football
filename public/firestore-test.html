@@ -6,7 +6,7 @@
     import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
     import { initializeFirestore, getFirestore, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
-    // ⬇️ paste the same config you used in src/lib/firebase.js
+    // ⬇️ paste YOUR real config (same as src/lib/firebase.js)
     const firebaseConfig = {
       apiKey: "YOUR_API_KEY",
       authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
@@ -24,10 +24,7 @@
       db = getFirestore(app);
     }
 
-    const log = (msg) => {
-      const pre = document.getElementById("out");
-      pre.textContent += msg + "\n";
-    };
+    const log = (msg) => { document.getElementById("out").textContent += msg + "\n"; };
 
     log("projectId: " + (app.options.projectId || "(unknown)"));
     try {
@@ -35,8 +32,8 @@
       log("players count: " + snap.size);
       log("OK ✅ Firestore reachable");
     } catch (e) {
-      log("ERR ❌ " + (e && e.message ? e.message : String(e)));
-      if (e && e.code) log("code: " + e.code);
+      log("ERR ❌ " + (e?.message || String(e)));
+      if (e?.code) log("code: " + e.code);
     }
   </script>
   <pre id="out" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 12px; background:#f7f7f7; border:1px solid #ddd; border-radius:8px;"></pre>
