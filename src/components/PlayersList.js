@@ -1,62 +1,84 @@
+/* eslint-disable react-hooks/rules-of-hooks */
 /* eslint-disable react-hooks/exhaustive-deps */
 // src/components/PlayersList.js
 import React, { useEffect, useMemo, useState } from "react";
-import { listPlayers, listenLeagueClaims, ensureTeam, addDropPlayer } from "../lib/storage";
+import { listPlayers, projForWeek, addDropPlayer } from "../lib/storage";
 
-export default function PlayersList({ leagueId, username, onShowNews, currentWeek = 1, onChangeWeek }) {
+const th = { textAlign: "left", padding: "6px 8px", borderBottom: "1px solid #eee" };
+const td = { padding: "6px 8px", borderBottom: "1px solid #f3f3f3" };
+
+export default function PlayersList({
+  leagueId,
+  username,
+  currentWeek = 1,
+  onChangeWeek,
+  addLocked = false
+}) {
   const [players, setPlayers] = useState([]);
-  const [claims, setClaims] = useState(new Map());
+  const [search, setSearch] = useState("");
   const [teamFilter, setTeamFilter] = useState("ALL");
-  const [q, setQ] = useState("");
-
-  useEffect(() => {
-    let canceled = false;
-    (async () => {
-      const p = await listPlayers({ leagueId });
-      if (!canceled) setPlayers(p || []);
-    })();
-    return () => { canceled = true; };
-  }, [leagueId]);
+  const [posFilter, setPosFilter] = useState("ALL");
 
   useEffect(() => {
     if (!leagueId) return;
-    const un = listenLeagueClaims(leagueId, (m) => setClaims(m || new Map()));
-    return () => un && un();
+    (async () => {
+      const arr = await listPlayers({ leagueId });
+      setPlayers(arr);
+    })();
   }, [leagueId]);
 
   const teams = useMemo(() => {
     const s = new Set();
-    players.forEach(p => { if (p.team) s.add(p.team); });
+    players.forEach((p) => { if (p.team) s.add(p.team); });
     return ["ALL", ...Array.from(s).sort()];
   }, [players]);
 
   const filtered = useMemo(() => {
-    let list = players.slice();
-    if (teamFilter !== "ALL") {
-      list = list.filter(p => p.team === teamFilter);
-    }
-    const nq = q.trim().toLowerCase();
-    if (nq) {
-      list = list.filter(p => (p.displayName || p.name || "").toLowerCase().includes(nq));
-    }
-    // sort by projected points (selected week) desc
-    list.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
-    return list;
-  }, [players, teamFilter, q, currentWeek]);
+    const q = (search || "").trim().toLowerCase();
+    return players
+      .filter((p) => (teamFilter === "ALL" ? true : (p.team === teamFilter)))
+      .filter((p) => (posFilter === "ALL" ? true : (String(p.position||"").toUpperCase() === posFilter)))
+      .filter((p) => {
+        if (!q) return true;
+        const name = (p.displayName || p.name || p.id || "").toLowerCase();
+        const pid  = (p.id || "").toLowerCase();
+        return name.includes(q) || pid.includes(q);
+      })
+      .sort((a,b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
+  }, [players, search, teamFilter, posFilter, currentWeek]);
 
   async function addToBench(p) {
     try {
-      await ensureTeam({ leagueId, username });
       await addDropPlayer({ leagueId, username, addId: p.id, dropId: null });
-      alert(`${p.displayName || p.name} added to your bench`);
+      alert(`Added ${p.displayName || p.name || p.id} to your bench.`);
     } catch (e) {
-      alert(e.message || "Failed to add player");
+      alert(e.message || "Add failed");
     }
   }
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+        <input
+          value={search}
+          onChange={(e)=>setSearch(e.target.value)}
+          placeholder="Search by player name or id…"
+          style={{ padding: 8, minWidth: 220 }}
+        />
+        <label>
+          Team:&nbsp;
+          <select value={teamFilter} onChange={(e)=>setTeamFilter(e.target.value)}>
+            {teams.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
+        <label>
+          Pos:&nbsp;
+          <select value={posFilter} onChange={(e)=>setPosFilter(e.target.value)}>
+            {["ALL","QB","RB","WR","TE","K","DEF"].map((p)=>(
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+        </label>
         <label>
           Week:&nbsp;
           <select value={currentWeek} onChange={(e)=>onChangeWeek && onChangeWeek(Number(e.target.value))}>
@@ -65,84 +87,40 @@ export default function PlayersList({ leagueId, username, onShowNews, currentWee
             ))}
           </select>
         </label>
-        <label>
-          Team:&nbsp;
-          <select value={teamFilter} onChange={(e)=>setTeamFilter(e.target.value)}>
-            {teams.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </label>
-        <label style={{ flex: "1 1 240px" }}>
-          Search name:&nbsp;
-          <input value={q} onChange={(e)=>setQ(e.target.value)} placeholder="Type a player name" style={{ width: 240 }} />
-        </label>
       </div>
 
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr>
-            <th style={th}>Name</th>
-            <th style={th}>Team</th>
+            <th style={th}>Player</th>
             <th style={th}>Pos</th>
+            <th style={th}>NFL</th>
             <th style={th}>Proj (W{currentWeek})</th>
-            <th style={th}>Status</th>
             <th style={th}></th>
           </tr>
         </thead>
         <tbody>
           {filtered.map((p) => {
-            const name = p.displayName || p.name || p.id;
-            const claimedBy = claims.get(p.id)?.claimedBy || null;
-            const available = !claimedBy;
             const proj = projForWeek(p, currentWeek);
             return (
               <tr key={p.id}>
+                <td style={td}>{p.displayName || p.name || p.id}</td>
+                <td style={td}>{p.position || ""}</td>
+                <td style={td}>{p.team || ""}</td>
+                <td style={td}>{Number.isFinite(proj) ? proj.toFixed(1) : "0.0"}</td>
                 <td style={td}>
-                  <span style={{ fontWeight: 600 }}>{name}</span>{" "}
-                  <button onClick={() => onShowNews && onShowNews(name)} style={{ marginLeft: 6, padding: "2px 6px" }}>
-                    News
+                  <button onClick={() => addToBench(p)} style={{ padding: 6 }} disabled={addLocked}>
+                    {addLocked ? "Locked (draft)" : "Add"}
                   </button>
-                </td>
-                <td style={td}>{p.team || "—"}</td>
-                <td style={td}>{p.position || "—"}</td>
-                <td style={td}>{proj.toFixed(1)}</td>
-                <td style={td} title={claimedBy ? `Owned by ${claimedBy}` : "Available"}>
-                  {available ? "Available" : `Owned by ${claimedBy}`}
-                </td>
-                <td style={td}>
-                  {available ? (
-                    <button onClick={() => addToBench(p)} style={{ padding: 6 }}>
-                      Add
-                    </button>
-                  ) : (
-                    <span style={{ opacity: 0.5 }}>—</span>
-                  )}
                 </td>
               </tr>
             );
           })}
           {filtered.length === 0 && (
-            <tr>
-              <td colSpan={6} style={{ ...td, textAlign: "center", opacity: 0.6 }}>
-                No players match your filters.
-              </td>
-            </tr>
+            <tr><td style={td} colSpan={5}>(No players match your filters.)</td></tr>
           )}
         </tbody>
       </table>
     </div>
   );
 }
-
-function projForWeek(p, week) {
-  const wStr = String(week);
-  if (p?.projections && p.projections[wStr] != null) return Number(p.projections[wStr]) || 0;
-  if (p?.projections && p.projections[week] != null) return Number(p.projections[week]) || 0;
-  if (p?.projByWeek && p.projByWeek[wStr] != null) return Number(p.projByWeek[wStr]) || 0;
-  if (p?.projByWeek && p.projByWeek[week] != null) return Number(p.projByWeek[week]) || 0;
-  const keyed = p?.[`projW${week}`];
-  if (keyed != null) return Number(keyed) || 0;
-  return 0;
-}
-
-const th = { textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" };
-const td = { borderBottom: "1px solid #f5f5f5", padding: "6px 4px" };
