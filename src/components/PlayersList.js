@@ -1,8 +1,9 @@
+// src/components/PlayersList.js
 import React, { useEffect, useMemo, useState } from "react";
 import { listPlayers, getLeagueClaims, addDropPlayer, fetchProjections, fetchNextGames } from "../lib/storage";
 import { computeFantasyPoints, DEFAULT_SCORING } from "../lib/scoring";
 
-export default function PlayersList({ leagueId, username }) {
+export default function PlayersList({ leagueId, username, onShowNews }) {
   const [players, setPlayers] = useState([]);
   const [claims, setClaims] = useState(new Map());
   const [projections, setProjections] = useState({});
@@ -16,32 +17,29 @@ export default function PlayersList({ leagueId, username }) {
       setPlayers(p || []);
       const c = await getLeagueClaims(leagueId);
       setClaims(c || new Map());
-      const week = 1; // could read league currentWeek if passed
+      const week = 1; // could be league.currentWeek
       setProjections(await fetchProjections(week));
       setNextGames(await fetchNextGames());
     })();
   }, [leagueId]);
 
-  const byId = useMemo(() => {
-    const m = new Map(); players.forEach(p => m.set(p.id, p)); return m;
-  }, [players]);
-
   const rows = useMemo(() => {
+    const by = (p) => (p.displayName || p.name || "").toLowerCase();
     const q = search.trim().toLowerCase();
-    return players
+    const filtered = players
       .filter(p => (filter === "ALL" || p.position === filter))
-      .filter(p => (q ? (p.displayName || p.name || "").toLowerCase().includes(q) : true))
+      .filter(p => (q ? by(p).includes(q) : true))
       .map(p => {
         const proj = projections[p.id] || null;
-        const opp = p.position === "DEF" ? "" : (nextGames[p.team]?.opponent || "");
-        const oppText = p.position === "DEF"
-          ? (nextGames[p.team]?.opponent ? `vs ${nextGames[p.team]?.opponent}` : "")
-          : (opp ? `@ ${opp === p.team ? "??" : opp}` : "");
-        const kickoff = nextGames[p.team]?.kickoff ? new Date(nextGames[p.team].kickoff).toLocaleString() : "";
+        const ng = nextGames[p.team] || {};
+        const opp = p.position === "DEF" ? "" : (ng.opponent || "");
+        const oppText = p.position === "DEF" ? (ng.opponent ? `vs ${ng.opponent}` : "") : (opp ? `@ ${opp}` : "");
+        const kickoff = ng.kickoff ? new Date(ng.kickoff).toLocaleString() : "";
         const points = proj ? computeFantasyPoints(proj, DEFAULT_SCORING) : 0;
         return { ...p, points, oppText, kickoff };
       })
       .sort((a, b) => b.points - a.points);
+    return filtered;
   }, [players, filter, search, projections, nextGames]);
 
   async function handleAdd(p) {
@@ -51,11 +49,6 @@ export default function PlayersList({ leagueId, username }) {
     } catch (e) {
       alert(e.message || "Failed to add");
     }
-  }
-
-  function newsUrl(p) {
-    const nm = encodeURIComponent((p.displayName || p.name || "").trim());
-    return `/news?name=${nm}`; // handled by PlayerNews route below (or use modal)
   }
 
   return (
@@ -80,7 +73,9 @@ export default function PlayersList({ leagueId, username }) {
                 </div>
                 <div style={{ fontWeight: 700, fontSize: 18 }}>{p.points.toFixed(1)}</div>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <a href={newsUrl(p)} style={{ textDecoration: "none" }}>📰 News</a>
+                  <button onClick={() => onShowNews?.(p.displayName || p.name)} style={{ padding: 6 }}>
+                    📰 News
+                  </button>
                   <button disabled={isClaimed} onClick={() => handleAdd(p)} style={{ padding: 6 }}>
                     {isClaimed ? "Taken" : "Add"}
                   </button>
