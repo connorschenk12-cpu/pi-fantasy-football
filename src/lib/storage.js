@@ -138,37 +138,42 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   });
 }
 
-/* Move bench -> starter (with pos/FLEX validation) */
+/* Move bench -> starter (self-heals claim; validates slot/FLEX) */
 export async function moveToStarter({ leagueId, username, playerId, slot }) {
   if (!leagueId || !username || !playerId || !slot) throw new Error("leagueId, username, playerId, slot required");
-  const teamRef = doc(db, "leagues", leagueId, "teams", username);
-  const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
+  const teamRef   = doc(db, "leagues", leagueId, "teams", username);
+  const claimRef  = doc(db, "leagues", leagueId, "claims", playerId);
+  const playerRef = doc(db, "players", playerId);
 
   await runTransaction(db, async (tx) => {
-    const [teamSnap, claimSnap] = await Promise.all([tx.get(teamRef), tx.get(claimRef)]);
+    const [teamSnap, claimSnap, playerSnap] = await Promise.all([
+      tx.get(teamRef),
+      tx.get(claimRef),
+      tx.get(playerRef),
+    ]);
     if (!teamSnap.exists()) throw new Error("Team not found");
     const team = teamSnap.data() || {};
     if (!Array.isArray(team.bench)) team.bench = [];
     const roster = { ...(team.roster || {}) };
 
-    if (!claimSnap.exists() || (claimSnap.data()?.claimedBy !== username)) {
-      throw new Error("You don’t own this player");
+    if (!claimSnap.exists()) {
+      tx.set(claimRef, { claimedBy: username, claimedAt: serverTimestamp() });
+    } else if (claimSnap.data()?.claimedBy !== username) {
+      throw new Error("Another manager owns this player");
     }
 
-    const pSnap = await tx.get(doc(db, "players", playerId));
-    const p = pSnap.exists() ? pSnap.data() : null;
-    const pos = (p?.position || "").toUpperCase();
-    const upperSlot = String(slot).toUpperCase();
-    const eligible = upperSlot === pos || (upperSlot === "FLEX" && ["RB", "WR", "TE"].includes(pos));
-    if (!eligible) throw new Error(`Cannot place ${pos} into ${upperSlot}`);
-    if (roster[upperSlot]) throw new Error(`${upperSlot} already filled`);
+    const p = playerSnap.exists() ? playerSnap.data() : null;
+    const pos = String(p?.position || "").toUpperCase();
+    const target = String(slot).toUpperCase();
+    const eligible = target === pos || (target === "FLEX" && ["RB", "WR", "TE"].includes(pos));
+    if (!eligible) throw new Error(`Cannot place ${pos} into ${target}`);
+    if (roster[target]) throw new Error(`${target} already filled`);
 
     // Remove from any other slot & bench
     for (const s of Object.keys(roster)) if (roster[s] === playerId) roster[s] = null;
     team.bench = team.bench.filter((id) => id !== playerId);
 
-    roster[upperSlot] = playerId;
-
+    roster[target] = playerId;
     tx.update(teamRef, { roster, bench: team.bench });
   });
 }
@@ -213,6 +218,7 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
     const pointer = Number.isInteger(draft.pointer) ? draft.pointer : 0;
     const currentUser = order[pointer];
     if (currentUser !== username) throw new Error(`It's ${currentUser}'s turn to pick.`);
+
     const existingClaim = await tx.get(claimRef);
     if (existingClaim.exists()) throw new Error("Player already drafted");
 
@@ -242,6 +248,7 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
     const overall = (round - 1) * teamCount + pickInRound;
     const newPicks = Array.isArray(draft.picks) ? draft.picks.slice() : [];
     newPicks.push({ overall, round, pickInRound, username, playerId, slot: upperSlot, ts: Date.now() });
+
     let newPointer = pointer + direction;
     let newRound = round;
     let newDirection = direction;
@@ -355,4 +362,26 @@ export function totalPointsForLineup({ lineup, statsByPlayer, scoring = DEFAULT_
     sum += computeFantasyPoints(stat, scoring);
   });
   return Number(sum.toFixed(2));
+}
+
+/* ========= Entry fee / payments ========= */
+export async function setEntryFee(leagueId, enabled, feePi) {
+  const ref = doc(db, "leagues", leagueId);
+  await updateDoc(ref, { entry: { enabled: !!enabled, feePi: Number(feePi) || 0, paid: [] } });
+}
+export async function markEntryPaid(leagueId, username, paymentId, amountPi) {
+  const ref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error("League not found");
+  const data = snap.data() || {};
+  const entry = data.entry || {};
+  const paid = Array.isArray(entry.paid) ? entry.paid.slice() : [];
+  if (!paid.find(p => p.username === username)) {
+    paid.push({ username, paymentId, amountPi, ts: Date.now() });
+    await updateDoc(ref, { entry: { ...entry, paid } });
+  }
+}
+export function hasPaidEntry(league, username) {
+  const paid = Array.isArray(league?.entry?.paid) ? league.entry.paid : [];
+  return !!paid.find(p => p.username === username);
 }
