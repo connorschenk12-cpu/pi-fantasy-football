@@ -1,421 +1,249 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 // src/components/LeagueHome.js
 import React, { useEffect, useMemo, useState } from "react";
-import PlayersList from "./PlayersList";
-import LeagueAdmin from "./LeagueAdmin";
-import EntryFeeButton from "./EntryFeeButton";
-import DevPanel from "./DevPanel";
-import DraftBoard from "./DraftBoard";
-import ProjectionsSeeder from "./ProjectionsSeeder";
-import WeekScheduleAdmin from "./WeekScheduleAdmin";
 import {
   listenLeague,
   listenTeam,
   listPlayers,
-  listenLeagueClaims,
+  projForWeek,
+  isMyTurn,
   canDraft,
-  draftPick,
-  releasePlayerAndClearSlot,
   moveToBench,
   moveToStarter,
-  hasPaidEntry,
+  addDropPlayer,
 } from "../lib/storage";
+import DraftBoard from "./DraftBoard";
+import PlayersList from "./PlayersList";
+import AdminDraftSetup from "./AdminDraftSetup";
 
-export default function LeagueHome({ league, me, onBack, onShowNews }) {
-  const leagueId = league?.id;
+const box = { border: "1px solid #eee", borderRadius: 8, padding: 10, marginBottom: 12 };
+const h2 = { margin: "8px 0 4px 0" };
+const th = { textAlign: "left", padding: "6px 8px", borderBottom: "1px solid #eee" };
+const td = { padding: "6px 8px", borderBottom: "1px solid #f3f3f3" };
 
-  const [activeTab, setActiveTab] = useState("myteam"); // 'myteam' | 'players' | 'draft' | 'admin'
-  const [leagueState, setLeagueState] = useState(league || null);
+export default function LeagueHome({ leagueId, username }) {
+  const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
   const [players, setPlayers] = useState([]);
-  const [claims, setClaims] = useState(new Map());
+  const [tab, setTab] = useState("myteam");
+  const [weekOverride, setWeekOverride] = useState(null); // allow manual week switch in UI
 
-  // Draft state
-  const [pickSlot, setPickSlot] = useState("FLEX");
-  const [pickQuery, setPickQuery] = useState("");
-
-  // Bench → starter UI state
-  const [slotChoiceByPlayer, setSlotChoiceByPlayer] = useState({});
-
-  // Week selection (shared across tabs)
-  const initialWeek = getInitialWeek(league?.settings);
-  const [currentWeek, setCurrentWeek] = useState(initialWeek);
-
-  /* ---------- live league + team ---------- */
+  // live league
   useEffect(() => {
     if (!leagueId) return;
-    const un = listenLeague(leagueId, (lg) => {
-      setLeagueState(lg);
-      // optional auto-advance if schedule exists
-      const wk = getInitialWeek(lg?.settings);
-      setCurrentWeek((prev) => (prev !== wk ? wk : prev));
-    });
+    const un = listenLeague(leagueId, (lg) => setLeague(lg));
     return () => un && un();
   }, [leagueId]);
 
+  // live team
   useEffect(() => {
-    if (!leagueId || !me) return;
-    const un = listenTeam({ leagueId, username: me, onChange: setTeam });
+    if (!leagueId || !username) return;
+    const un = listenTeam({ leagueId, username, onChange: (t) => setTeam(t) });
     return () => un && un();
-  }, [leagueId, me]);
+  }, [leagueId, username]);
 
-  /* ---------- players + claims (live) ---------- */
+  // load players (global or league-scoped)
   useEffect(() => {
-    let cancelled = false;
+    if (!leagueId) return;
     (async () => {
-      if (!leagueId) return;
-      const p = await listPlayers({ leagueId });
-      if (!cancelled) setPlayers(p || []);
+      const arr = await listPlayers({ leagueId });
+      setPlayers(arr);
     })();
-    return () => { cancelled = true; };
   }, [leagueId]);
 
-  useEffect(() => {
-    if (!leagueId) return;
-    const un = listenLeagueClaims(leagueId, (map) => setClaims(map || new Map()));
-    return () => un && un();
-  }, [leagueId]);
-
-  /* ---------- maps + derived ---------- */
   const playersById = useMemo(() => {
     const m = new Map();
-    (players || []).forEach((p) => m.set(p.id, p));
+    players.forEach((p) => m.set(p.id, p));
     return m;
   }, [players]);
 
-  const rosterDisplay = useMemo(() => {
+  const currentWeek = useMemo(() => {
+    if (weekOverride) return weekOverride;
+    const w = Number(league?.settings?.currentWeek || 1);
+    return w >= 1 ? w : 1;
+  }, [league?.settings?.currentWeek, weekOverride]);
+
+  const draft = league?.draft || {};
+  const addLocked = !!league?.settings?.lockAddDuringDraft && draft?.status === "live";
+
+  // --------- My Team helpers ----------
+  const rosterRows = useMemo(() => {
     const r = team?.roster || {};
     const toRow = (slot) => {
       const id = r[slot];
       const p = id ? playersById.get(id) : null;
-      return { slot, id, name: p?.displayName || p?.name || (id ? id : "—"), team: p?.team || "", pos: p?.position || "" };
+      return {
+        slot,
+        id,
+        name: p?.displayName || p?.name || (id ? id : "—"),
+        pos: p?.position || "",
+        nfl: p?.team || "",
+        proj: id ? projForWeek(p, currentWeek) : 0
+      };
     };
-    return ["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"].map(toRow);
-  }, [team, playersById]);
+    return ["QB","WR1","WR2","RB1","RB2","TE","FLEX","K","DEF"].map(toRow);
+  }, [team, playersById, currentWeek]);
 
-  const isMyTurnToDraft = useMemo(() => {
-    if (!leagueState) return false;
-    const d = leagueState.draft || {};
-    const order = Array.isArray(d.order) ? d.order : [];
-    const pointer = Number.isInteger(d.pointer) ? d.pointer : 0;
-    const current = order[pointer];
-    return canDraft(leagueState) && current === me;
-  }, [leagueState, me]);
-
-  const draftIsFreeOrPaid = useMemo(() => {
-    const entryEnabled = !!leagueState?.entry?.enabled;
-    if (!entryEnabled) return true;          // free leagues -> draft allowed
-    return hasPaidEntry(leagueState, me);    // paid leagues -> must have paid
-  }, [leagueState, me]);
-
-  function defaultSlotForPosition(pos) {
-    const p = String(pos || "").toUpperCase();
-    if (["QB","RB","WR","TE","K","DEF"].includes(p)) return p;
-    return "FLEX";
-  }
-
-  const availablePlayers = useMemo(() => {
-    const out = [];
-    for (const p of players) {
-      if (!claims.has(p.id)) out.push(p);
-    }
-    return out;
-  }, [players, claims]);
-
-  // Name/team search suggestions (sorted by weekly projection)
-  const normalizedQuery = pickQuery.trim().toLowerCase();
-  const nameMatches = useMemo(() => {
-    if (!normalizedQuery) return [];
-    const max = 10;
-    const arr = [];
-    for (const p of availablePlayers) {
-      const name = (p.displayName || p.name || "").toLowerCase();
-      const teamName = (p.team || "").toLowerCase();
-      if (name.includes(normalizedQuery) || teamName.includes(normalizedQuery)) {
-        arr.push(p);
-        if (arr.length >= max) break;
-      }
-    }
-    arr.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
-    return arr;
-  }, [normalizedQuery, availablePlayers, currentWeek]);
-
-  const recommendedTop = useMemo(() => {
-    const top = [...availablePlayers];
-    top.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
-    return top.slice(0, 12);
-  }, [availablePlayers, currentWeek]);
-
-  async function draftThisPlayer(p, slotOverride) {
+  async function benchSlot(slot) {
     try {
-      await draftPick({
-        leagueId,
-        username: me,
-        playerId: p.id,
-        playerPosition: p.position,
-        slot: slotOverride || defaultSlotForPosition(p.position),
-      });
-      setPickQuery("");
+      await moveToBench({ leagueId, username, slot });
     } catch (e) {
-      alert(e.message || "Draft pick failed");
+      alert(e.message || "Failed to move to bench");
     }
   }
 
-  async function handleRelease(playerId) {
+  async function startFromBench(playerId, slot) {
     try {
-      await releasePlayerAndClearSlot({ leagueId, username: me, playerId });
+      await moveToStarter({ leagueId, username, playerId, slot });
     } catch (e) {
-      alert(e.message || "Release failed");
+      alert(e.message || "Failed to start player");
     }
   }
 
-  /* ---------- render sections ---------- */
-  function renderMyTeam() {
-    return (
-      <div>
-        <h3 style={{ marginTop: 0 }}>My Team</h3>
-        {team ? (
-          <>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={th}>Slot</th>
-                  <th style={th}>Player</th>
-                  <th style={th}>Team</th>
-                  <th style={th}>Pos</th>
-                  <th style={th}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {rosterDisplay.map((row) => (
-                  <tr key={row.slot}>
-                    <td style={td}>{row.slot}</td>
-                    <td style={td}>{row.name}</td>
-                    <td style={td}>{row.team}</td>
-                    <td style={td}>{row.pos}</td>
-                    <td style={td}>
-                      {row.id ? (
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          <button onClick={() => handleRelease(row.id)} style={{ padding: 6 }}>
-                            Release
-                          </button>
-                          <button onClick={() => moveToBench({ leagueId, username: me, slot: row.slot })} style={{ padding: 6 }}>
-                            Bench
-                          </button>
-                        </div>
-                      ) : (
-                        <span style={{ opacity: 0.5 }}>—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+  // --------- UI ---------
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: 12 }}>
+      <h1 style={{ margin: "8px 0 12px 0" }}>{league?.name || "League"}</h1>
 
-            <h4 style={{ marginTop: 16 }}>Bench</h4>
-            <ul style={{ listStyle: "none", padding: 0 }}>
-              {(team.bench || []).map((id) => {
-                const p = playersById.get(id);
-                const label = p?.displayName || p?.name || id;
-                const chosen = slotChoiceByPlayer[id] ?? defaultSlotForPosition(p?.position);
-                return (
-                  <li key={id} style={{ marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <span>{label} · {p?.team} · {p?.position}</span>
-                    <select
-                      value={chosen}
-                      onChange={(e) => setSlotChoiceByPlayer((prev) => ({ ...prev, [id]: e.target.value }))}
-                      style={{ padding: 4 }}
-                    >
-                      {["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"].map((s) => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
-                    </select>
-                    <button
-                      onClick={async () => {
-                        try {
-                          await moveToStarter({ leagueId, username: me, playerId: id, slot: slotChoiceByPlayer[id] ?? defaultSlotForPosition(p?.position) });
-                        } catch (e) {
-                          alert(e.message || "Failed to start player");
-                        }
-                      }}
-                      style={{ padding: 6 }}
-                    >
-                      Start
-                    </button>
-                  </li>
-                );
-              })}
-              {(team.bench || []).length === 0 && <li style={{ opacity: 0.6 }}>No bench players yet</li>}
-            </ul>
-          </>
-        ) : (
-          <p>Loading team…</p>
-        )}
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+        <TabButton id="myteam" tab={tab} setTab={setTab} label="My Team" />
+        <TabButton id="players" tab={tab} setTab={setTab} label="Players" />
+        <TabButton id="draft" tab={tab} setTab={setTab} label="Draft" />
+        <TabButton id="admin" tab={tab} setTab={setTab} label="Admin" />
       </div>
-    );
-  }
 
-  function renderPlayers() {
-    return (
-      <div>
-        <h3 style={{ marginTop: 0 }}>Players</h3>
-        <PlayersList
-          leagueId={leagueId}
-          username={me}
-          onShowNews={onShowNews}
-          currentWeek={currentWeek}
-          onChangeWeek={setCurrentWeek}
-        />
-      </div>
-    );
-  }
-
-  function renderDraft() {
-    const d = leagueState?.draft || {};
-    const order = Array.isArray(d.order) ? d.order : [];
-
-    return (
-      <div>
-        <h3 style={{ marginTop: 0 }}>Draft</h3>
-        <p>
-          Status: <b>{d.status || "unscheduled"}</b>
-          {order.length > 0 && <> · Round {d.round || 1} · Direction {d.direction === -1 ? "⬅︎ (reverse)" : "➜ (forward)"} · On the clock: <b>{order[(Number.isInteger(d.pointer) ? d.pointer : 0)] || "—"}</b></>}
-        </p>
-
-        <DraftBoard league={leagueState} playersById={playersById} />
-
-        {canDraft(leagueState) && draftIsFreeOrPaid ? (
-          isMyTurnToDraft ? (
-            <>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "12px 0" }}>
-                <label>
-                  Slot:&nbsp;
-                  <select value={pickSlot} onChange={(e) => setPickSlot(e.target.value)}>
-                    {["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"].map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                </label>
-                <label style={{ flex: "1 1 320px" }}>
-                  Search name/team:&nbsp;
-                  <input
-                    value={pickQuery}
-                    onChange={(e) => setPickQuery(e.target.value)}
-                    placeholder="e.g. Patrick Mahomes, KC"
-                    style={{ width: 320 }}
-                  />
-                </label>
-              </div>
-
-              {/* suggestions with per-player Draft buttons */}
-              {pickQuery.trim() && (
-                <div style={{ border: "1px solid #eee", borderRadius: 6, padding: 8, marginBottom: 12 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 6 }}>Suggestions</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 8 }}>
-                    {nameMatches.map((p) => (
-                      <div key={p.id} style={{ padding: 8, border: "1px solid #ddd", borderRadius: 6 }}>
-                        <div style={{ fontWeight: 600 }}>{p.displayName || p.name}</div>
-                        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>
-                          {p.team} · {p.position} · Proj W{currentWeek} {projForWeek(p, currentWeek).toFixed(1)}
-                        </div>
-                        <button onClick={() => draftThisPlayer(p, pickSlot)} style={{ padding: 6 }}>
-                          Draft to {pickSlot}
-                        </button>
-                      </div>
-                    ))}
-                    {nameMatches.length === 0 && <div style={{ opacity: 0.6 }}>No matches</div>}
-                  </div>
-                </div>
-              )}
-
-              {/* recommended top available with per-player Draft buttons */}
-              <div style={{ border: "1px solid #eee", borderRadius: 6, padding: 8 }}>
-                <div style={{ fontWeight: 600, marginBottom: 6 }}>Recommended (top available W{currentWeek})</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 8 }}>
-                  {recommendedTop.map((p) => (
-                    <div key={p.id} style={{ padding: 8, border: "1px solid #ddd", borderRadius: 6 }}>
-                      <div style={{ fontWeight: 600 }}>{p.displayName || p.name}</div>
-                      <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>
-                        {p.team} · {p.position} · Proj W{currentWeek} {projForWeek(p, currentWeek).toFixed(1)}
-                      </div>
-                      <button onClick={() => draftThisPlayer(p)} style={{ padding: 6 }}>
-                        Draft to {defaultSlotForPosition(p.position)}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </>
-          ) : (
-            <p style={{ opacity: 0.7, marginTop: 12 }}>Waiting for your turn…</p>
-          )
-        ) : (
-          <p style={{ color: "#b00" }}>
-            {leagueState?.entry?.enabled
-              ? "Please pay the entry fee to participate in the draft."
-              : "Draft is not live yet."}
-          </p>
-        )}
-      </div>
-    );
-  }
-
-  function renderAdmin() {
-    return (
-      <div>
-        <h3 style={{ marginTop: 0 }}>League Admin</h3>
-        <LeagueAdmin isOwner={leagueState?.owner === me} league={leagueState} />
-        <WeekScheduleAdmin leagueId={leagueState?.id} currentSettings={leagueState?.settings} />
-        <ProjectionsSeeder />
-        {!hasPaidEntry(leagueState, me) && !!leagueState?.entry?.enabled && (
-          <div style={{ marginTop: 12 }}>
-            <EntryFeeButton league={leagueState} username={me} onPaid={() => {}} />
-          </div>
-        )}
-        <div style={{ marginTop: 12 }}>
-          <DevPanel me={me} setMe={() => {}} league={leagueState} onLeagueUpdate={() => {}} />
+      {/* Week switcher */}
+      <div style={{ ...box }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <b>Week:</b>
+          <select value={currentWeek} onChange={(e) => setWeekOverride(Number(e.target.value))}>
+            {Array.from({ length: 18 }).map((_, i) => (
+              <option key={i+1} value={i+1}>Week {i+1}</option>
+            ))}
+          </select>
+          <span style={{ opacity: 0.7 }}>
+            (Defaults to league’s currentWeek: {Number(league?.settings?.currentWeek || 1)})
+          </span>
         </div>
       </div>
-    );
-  }
 
-  return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-        <button onClick={onBack} style={{ padding: 6 }}>← Back</button>
-        <h2 style={{ margin: 0 }}>{leagueState?.name || "League"}</h2>
-      </div>
+      {tab === "myteam" && (
+        <section style={box}>
+          <h2 style={h2}>Starters</h2>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 10 }}>
+            <thead>
+              <tr>
+                <th style={th}>Slot</th>
+                <th style={th}>Player</th>
+                <th style={th}>Pos</th>
+                <th style={th}>NFL</th>
+                <th style={th}>Proj (W{currentWeek})</th>
+                <th style={th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rosterRows.map((r) => (
+                <tr key={r.slot}>
+                  <td style={td}><b>{r.slot}</b></td>
+                  <td style={td}>{r.name}</td>
+                  <td style={td}>{r.pos}</td>
+                  <td style={td}>{r.nfl}</td>
+                  <td style={td}>{r.proj.toFixed(1)}</td>
+                  <td style={td}>
+                    {r.id ? (
+                      <button onClick={() => benchSlot(r.slot)} style={{ padding: 6 }}>
+                        To Bench
+                      </button>
+                    ) : (
+                      <span style={{ opacity: 0.5 }}>—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
 
-      {/* Tabs */}
-      <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
-        <TabButton label="My Team"  id="myteam" active={activeTab} onClick={setActiveTab} />
-        <TabButton label="Players"  id="players" active={activeTab} onClick={setActiveTab} />
-        <TabButton label="Draft"    id="draft"   active={activeTab} onClick={setActiveTab} />
-        {leagueState?.owner === me && (
-          <TabButton label="Admin"  id="admin"   active={activeTab} onClick={setActiveTab} />
-        )}
-      </div>
+          <h2 style={h2}>Bench</h2>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={th}>Player</th>
+                <th style={th}>Pos</th>
+                <th style={th}>NFL</th>
+                <th style={th}>Proj</th>
+                <th style={th}>Start To…</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(team?.bench || []).map((id) => {
+                const p = playersById.get(id);
+                return (
+                  <tr key={id}>
+                    <td style={td}>{p?.displayName || p?.name || id}</td>
+                    <td style={td}>{p?.position || ""}</td>
+                    <td style={td}>{p?.team || ""}</td>
+                    <td style={td}>{projForWeek(p, currentWeek).toFixed(1)}</td>
+                    <td style={td}>
+                      <BenchStartMenu playerId={id} onStart={(slot) => startFromBench(id, slot)} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </section>
+      )}
 
-      {activeTab === "myteam" && renderMyTeam()}
-      {activeTab === "players" && renderPlayers()}
-      {activeTab === "draft" && renderDraft()}
-      {activeTab === "admin" && leagueState?.owner === me && renderAdmin()}
+      {tab === "players" && (
+        <section style={box}>
+          <PlayersList
+            leagueId={leagueId}
+            username={username}
+            currentWeek={currentWeek}
+            onChangeWeek={setWeekOverride}
+            addLocked={addLocked}
+          />
+        </section>
+      )}
+
+      {tab === "draft" && (
+        <section style={box}>
+          <DraftBoard league={league} playersById={playersById} />
+          <p style={{ marginTop: 6, opacity: 0.7 }}>
+            Draft status: <b>{draft?.status || "scheduled"}</b>
+            {Array.isArray(draft?.order) && draft.order.length > 0 && (
+              <> · Round {draft?.round || 1} of {draft?.roundsTotal || 12} · On the clock: <b>{draft?.order?.[draft?.pointer || 0] || "—"}</b></>
+            )}
+          </p>
+          {canDraft(league) && (
+            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
+              While draft is live, Adds are locked; picks auto-draft after the 5s clock.
+            </div>
+          )}
+        </section>
+      )}
+
+      {tab === "admin" && (
+        <section style={box}>
+          <h2 style={h2}>Admin</h2>
+          <AdminDraftSetup league={league} />
+        </section>
+      )}
     </div>
   );
 }
 
-/* ---------- helpers ---------- */
-function TabButton({ label, id, active, onClick }) {
-  const isActive = active === id;
+function TabButton({ id, tab, setTab, label }) {
+  const active = id === tab;
   return (
     <button
-      onClick={() => onClick(id)}
+      onClick={() => setTab(id)}
       style={{
         padding: "8px 12px",
-        borderRadius: 8,
+        borderRadius: 6,
         border: "1px solid #ddd",
-        background: isActive ? "#111" : "#fff",
-        color: isActive ? "#fff" : "#111",
+        background: active ? "#111" : "#fff",
+        color: active ? "#fff" : "#111",
         cursor: "pointer"
       }}
     >
@@ -424,44 +252,30 @@ function TabButton({ label, id, active, onClick }) {
   );
 }
 
-function projForWeek(p, week) {
-  // supports multiple shapes:
-  // p.projections = { "1": 12.3, "2": 10.1, ... }  OR numbers as keys
-  // p.projByWeek = { 1: 12.3, ... }  OR p["projW1"]
-  const wStr = String(week);
-  if (p?.projections && p.projections[wStr] != null) return Number(p.projections[wStr]) || 0;
-  if (p?.projections && p.projections[week] != null) return Number(p.projections[week]) || 0;
-  if (p?.projByWeek && p.projByWeek[wStr] != null) return Number(p.projByWeek[wStr]) || 0;
-  if (p?.projByWeek && p.projByWeek[week] != null) return Number(p.projByWeek[week]) || 0;
-  const keyed = p?.[`projW${week}`];
-  if (keyed != null) return Number(keyed) || 0;
-  return 0;
+function BenchStartMenu({ onStart }) {
+  const [open, setOpen] = useState(false);
+  const slots = ["QB","WR1","WR2","RB1","RB2","TE","FLEX","K","DEF"];
+  return (
+    <div style={{ position: "relative" }}>
+      <button onClick={() => setOpen((v) => !v)} style={{ padding: 6 }}>
+        Start…
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute", zIndex: 10, background: "#fff",
+            border: "1px solid #ddd", borderRadius: 6, padding: 6
+          }}
+        >
+          {slots.map((s) => (
+            <div key={s}>
+              <button onClick={() => { setOpen(false); onStart(s); }} style={{ padding: 6 }}>
+                {s}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
-
-function getInitialWeek(settings) {
-  // Priority:
-  // 1) If settings.weekSchedule exists (array of {start,end} timestamps ms),
-  //    auto-advance to the first week whose end is > now.
-  // 2) Else use settings.currentWeek if present.
-  // 3) Fallback to week 1.
-  try {
-    const now = Date.now();
-    const sch = Array.isArray(settings?.weekSchedule) ? settings.weekSchedule : null;
-    if (sch && sch.length > 0) {
-      for (let i = 0; i < sch.length; i++) {
-        const wk = sch[i];
-        if (!wk?.end || now <= wk.end) {
-          return i + 1; // weeks are 1-indexed
-        }
-      }
-      return sch.length; // after the last week, stick to the last
-    }
-    if (Number.isInteger(settings?.currentWeek) && settings.currentWeek >= 1) {
-      return settings.currentWeek;
-    }
-  } catch {}
-  return 1;
-}
-
-const th = { textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" };
-const td = { borderBottom: "1px solid #f5f5f5", padding: "6px 4px" };
