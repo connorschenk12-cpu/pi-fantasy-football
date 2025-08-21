@@ -1,4 +1,3 @@
-// src/components/LeagueAdmin.js
 import React, { useEffect, useState } from "react";
 import {
   listenLeague,
@@ -106,12 +105,7 @@ export default function LeagueAdmin({ leagueId, me, owner }) {
         <strong>Draft status:</strong> {status}
       </p>
       <p>
-        <strong>Round:</strong> {round}{" "}
-        {upNext ? (
-          <>
-            — <strong>Up:</strong> {upNext}
-          </>
-        ) : null}
+        <strong>Round:</strong> {round} {upNext ? <>— <strong>Up:</strong> {upNext}</> : null}
       </p>
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
@@ -134,9 +128,7 @@ export default function LeagueAdmin({ leagueId, me, owner }) {
 
       <div style={{ marginTop: 16 }}>
         <h4>Custom Draft Order</h4>
-        <p style={{ marginTop: -6, opacity: 0.8 }}>
-          Enter a comma-separated list of usernames (must be league members).
-        </p>
+        <p style={{ marginTop: -6, opacity: 0.8 }}>Comma-separated usernames (must be members).</p>
         <textarea
           value={customOrderText}
           onChange={(e) => setCustomOrderText(e.target.value)}
