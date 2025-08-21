@@ -10,7 +10,6 @@ import {
   listenLeague,
   listenTeam,
   listPlayers,
-  getLeagueClaims,
   listenLeagueClaims,
   canDraft,
   draftPick,
@@ -28,17 +27,27 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
   const [team, setTeam] = useState(null);
   const [players, setPlayers] = useState([]);
   const [claims, setClaims] = useState(new Map());
+
+  // Draft state
   const [pickSlot, setPickSlot] = useState("FLEX");
   const [pickQuery, setPickQuery] = useState("");
-  const [pickPlayerId, setPickPlayerId] = useState("");
 
-  // bench start-slot choices keyed by playerId
+  // Bench → starter UI state
   const [slotChoiceByPlayer, setSlotChoiceByPlayer] = useState({});
+
+  // Week selection (shared across tabs)
+  const initialWeek = getInitialWeek(league?.settings);
+  const [currentWeek, setCurrentWeek] = useState(initialWeek);
 
   /* ---------- live league + team ---------- */
   useEffect(() => {
     if (!leagueId) return;
-    const un = listenLeague(leagueId, setLeagueState);
+    const un = listenLeague(leagueId, (lg) => {
+      setLeagueState(lg);
+      // optional auto-advance if schedule exists
+      const wk = getInitialWeek(lg?.settings);
+      setCurrentWeek((prev) => (prev !== wk ? wk : prev));
+    });
     return () => un && un();
   }, [leagueId]);
 
@@ -103,7 +112,6 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
     return "FLEX";
   }
 
-  /* ---------- draft: suggestions & recommended ---------- */
   const availablePlayers = useMemo(() => {
     const out = [];
     for (const p of players) {
@@ -112,6 +120,7 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
     return out;
   }, [players, claims]);
 
+  // Name/team search suggestions (sorted by weekly projection)
   const normalizedQuery = pickQuery.trim().toLowerCase();
   const nameMatches = useMemo(() => {
     if (!normalizedQuery) return [];
@@ -119,43 +128,32 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
     const arr = [];
     for (const p of availablePlayers) {
       const name = (p.displayName || p.name || "").toLowerCase();
-      const team = (p.team || "").toLowerCase();
-      if (name.includes(normalizedQuery) || team.includes(normalizedQuery)) {
+      const teamName = (p.team || "").toLowerCase();
+      if (name.includes(normalizedQuery) || teamName.includes(normalizedQuery)) {
         arr.push(p);
         if (arr.length >= max) break;
       }
     }
-    // sort by projection desc if available
-    arr.sort((a, b) => Number(b.projPoints || 0) - Number(a.projPoints || 0));
+    arr.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
     return arr;
-  }, [normalizedQuery, availablePlayers]);
+  }, [normalizedQuery, availablePlayers, currentWeek]);
 
   const recommendedTop = useMemo(() => {
     const top = [...availablePlayers];
-    top.sort((a, b) => Number(b.projPoints || 0) - Number(a.projPoints || 0));
+    top.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
     return top.slice(0, 12);
-  }, [availablePlayers]);
+  }, [availablePlayers, currentWeek]);
 
-  async function handleDraftPick() {
+  async function draftThisPlayer(p, slotOverride) {
     try {
-      let chosenId = pickPlayerId;
-      if (!chosenId && nameMatches.length > 0) {
-        chosenId = nameMatches[0].id;
-      }
-      if (!chosenId) {
-        alert("Choose a player by clicking a suggestion or enter a name.");
-        return;
-      }
-      const pos = playersById.get(chosenId)?.position || "";
       await draftPick({
         leagueId,
         username: me,
-        playerId: chosenId,
-        playerPosition: pos,
-        slot: pickSlot || pos,
+        playerId: p.id,
+        playerPosition: p.position,
+        slot: slotOverride || defaultSlotForPosition(p.position),
       });
       setPickQuery("");
-      setPickPlayerId("");
     } catch (e) {
       alert(e.message || "Draft pick failed");
     }
@@ -263,6 +261,8 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
           leagueId={leagueId}
           username={me}
           onShowNews={onShowNews}
+          currentWeek={currentWeek}
+          onChangeWeek={setCurrentWeek}
         />
       </div>
     );
@@ -298,62 +298,48 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
                   Search name/team:&nbsp;
                   <input
                     value={pickQuery}
-                    onChange={(e) => {
-                      setPickQuery(e.target.value);
-                      setPickPlayerId(""); // reset manual selection when typing
-                    }}
+                    onChange={(e) => setPickQuery(e.target.value)}
                     placeholder="e.g. Patrick Mahomes, KC"
                     style={{ width: 320 }}
                   />
                 </label>
-                <button onClick={handleDraftPick} style={{ padding: 8 }}>Draft</button>
               </div>
 
-              {/* suggestions */}
+              {/* suggestions with per-player Draft buttons */}
               {pickQuery.trim() && (
                 <div style={{ border: "1px solid #eee", borderRadius: 6, padding: 8, marginBottom: 12 }}>
                   <div style={{ fontWeight: 600, marginBottom: 6 }}>Suggestions</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 8 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 8 }}>
                     {nameMatches.map((p) => (
-                      <button
-                        key={p.id}
-                        onClick={() => { setPickPlayerId(p.id); setPickQuery(p.displayName || p.name || ""); }}
-                        style={{ textAlign: "left", padding: 8, border: "1px solid #ddd", borderRadius: 6 }}
-                      >
+                      <div key={p.id} style={{ padding: 8, border: "1px solid #ddd", borderRadius: 6 }}>
                         <div style={{ fontWeight: 600 }}>{p.displayName || p.name}</div>
-                        <div style={{ fontSize: 12, opacity: 0.8 }}>{p.team} · {p.position} · Proj {Number(p.projPoints || 0).toFixed(1)}</div>
-                      </button>
+                        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>
+                          {p.team} · {p.position} · Proj W{currentWeek} {projForWeek(p, currentWeek).toFixed(1)}
+                        </div>
+                        <button onClick={() => draftThisPlayer(p, pickSlot)} style={{ padding: 6 }}>
+                          Draft to {pickSlot}
+                        </button>
+                      </div>
                     ))}
                     {nameMatches.length === 0 && <div style={{ opacity: 0.6 }}>No matches</div>}
                   </div>
                 </div>
               )}
 
-              {/* recommended top available */}
+              {/* recommended top available with per-player Draft buttons */}
               <div style={{ border: "1px solid #eee", borderRadius: 6, padding: 8 }}>
-                <div style={{ fontWeight: 600, marginBottom: 6 }}>Recommended (top available)</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 8 }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>Recommended (top available W{currentWeek})</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 8 }}>
                   {recommendedTop.map((p) => (
-                    <button
-                      key={p.id}
-                      onClick={async () => {
-                        try {
-                          await draftPick({
-                            leagueId,
-                            username: me,
-                            playerId: p.id,
-                            playerPosition: p.position,
-                            slot: defaultSlotForPosition(p.position),
-                          });
-                        } catch (e) {
-                          alert(e.message || "Draft pick failed");
-                        }
-                      }}
-                      style={{ textAlign: "left", padding: 8, border: "1px solid #ddd", borderRadius: 6 }}
-                    >
+                    <div key={p.id} style={{ padding: 8, border: "1px solid #ddd", borderRadius: 6 }}>
                       <div style={{ fontWeight: 600 }}>{p.displayName || p.name}</div>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>{p.team} · {p.position} · Proj {Number(p.projPoints || 0).toFixed(1)}</div>
-                    </button>
+                      <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>
+                        {p.team} · {p.position} · Proj W{currentWeek} {projForWeek(p, currentWeek).toFixed(1)}
+                      </div>
+                      <button onClick={() => draftThisPlayer(p)} style={{ padding: 6 }}>
+                        Draft to {defaultSlotForPosition(p.position)}
+                      </button>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -414,7 +400,7 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
   );
 }
 
-/* ---------- tiny UI helpers ---------- */
+/* ---------- helpers ---------- */
 function TabButton({ label, id, active, onClick }) {
   const isActive = active === id;
   return (
@@ -432,6 +418,45 @@ function TabButton({ label, id, active, onClick }) {
       {label}
     </button>
   );
+}
+
+function projForWeek(p, week) {
+  // supports multiple shapes:
+  // p.projections = { "1": 12.3, "2": 10.1, ... }  OR numbers as keys
+  // p.projByWeek = { 1: 12.3, ... }  OR p["projW1"]
+  const wStr = String(week);
+  if (p?.projections && p.projections[wStr] != null) return Number(p.projections[wStr]) || 0;
+  if (p?.projections && p.projections[week] != null) return Number(p.projections[week]) || 0;
+  if (p?.projByWeek && p.projByWeek[wStr] != null) return Number(p.projByWeek[wStr]) || 0;
+  if (p?.projByWeek && p.projByWeek[week] != null) return Number(p.projByWeek[week]) || 0;
+  const keyed = p?.[`projW${week}`];
+  if (keyed != null) return Number(keyed) || 0;
+  return 0;
+}
+
+function getInitialWeek(settings) {
+  // Priority:
+  // 1) If settings.weekSchedule exists (array of {start,end} timestamps ms),
+  //    auto-advance to the first week whose end is > now.
+  // 2) Else use settings.currentWeek if present.
+  // 3) Fallback to week 1.
+  try {
+    const now = Date.now();
+    const sch = Array.isArray(settings?.weekSchedule) ? settings.weekSchedule : null;
+    if (sch && sch.length > 0) {
+      for (let i = 0; i < sch.length; i++) {
+        const wk = sch[i];
+        if (!wk?.end || now <= wk.end) {
+          return i + 1; // weeks are 1-indexed
+        }
+      }
+      return sch.length; // after the last week, stick to the last
+    }
+    if (Number.isInteger(settings?.currentWeek) && settings.currentWeek >= 1) {
+      return settings.currentWeek;
+    }
+  } catch {}
+  return 1;
 }
 
 const th = { textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" };
