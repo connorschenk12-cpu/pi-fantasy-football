@@ -2,6 +2,9 @@
 // src/components/LeagueHome.js
 import React, { useEffect, useMemo, useState } from "react";
 import PlayersList from "./PlayersList";
+import LeagueAdmin from "./LeagueAdmin";
+import EntryFeeButton from "./EntryFeeButton";
+import DevPanel from "./DevPanel";
 import {
   listenLeague,
   listenTeam,
@@ -10,21 +13,50 @@ import {
   canDraft,
   draftPick,
   releasePlayerAndClearSlot,
+  moveToBench,
+  moveToStarter,
+  hasPaidEntry,
 } from "../lib/storage";
 
 export default function LeagueHome({ league, me, onBack, onShowNews }) {
   const leagueId = league?.id;
 
-  // ----- State (hooks must be top-level, never inside conditionals)
   const [activeTab, setActiveTab] = useState("myteam"); // 'myteam' | 'players' | 'draft'
   const [leagueState, setLeagueState] = useState(league || null);
   const [team, setTeam] = useState(null);
   const [players, setPlayers] = useState([]);
   const [claims, setClaims] = useState(new Map());
-  const [pickSlot, setPickSlot] = useState("FLEX"); // default slot for draft UI
+  const [pickSlot, setPickSlot] = useState("FLEX");
   const [pickPlayerId, setPickPlayerId] = useState("");
 
-  // ----- Derived data (ALWAYS safe to compute with useMemo at top level)
+  // bench start-slot choices keyed by playerId
+  const [slotChoiceByPlayer, setSlotChoiceByPlayer] = useState({});
+
+  useEffect(() => {
+    if (!leagueId) return;
+    const un = listenLeague(leagueId, setLeagueState);
+    return () => un && un();
+  }, [leagueId]);
+
+  useEffect(() => {
+    if (!leagueId || !me) return;
+    const un = listenTeam({ leagueId, username: me, onChange: setTeam });
+    return () => un && un();
+  }, [leagueId, me]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!leagueId) return;
+      const [p, c] = await Promise.all([listPlayers({ leagueId }), getLeagueClaims(leagueId)]);
+      if (!cancelled) {
+        setPlayers(p || []);
+        setClaims(c || new Map());
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [leagueId]);
+
   const playersById = useMemo(() => {
     const m = new Map();
     (players || []).forEach((p) => m.set(p.id, p));
@@ -50,41 +82,16 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
     return canDraft(leagueState) && current === me;
   }, [leagueState, me]);
 
-  // ----- Effects & listeners
-  useEffect(() => {
-    if (!leagueId) return;
-    // live league updates
-    const un = listenLeague(leagueId, setLeagueState);
-    return () => un && un();
-  }, [leagueId]);
+  function defaultSlotForPosition(pos) {
+    const p = String(pos || "").toUpperCase();
+    if (["QB","RB","WR","TE","K","DEF"].includes(p)) return p;
+    return "FLEX";
+    }
 
-  useEffect(() => {
-    if (!leagueId || !me) return;
-    // my team listener
-    const un = listenTeam({ leagueId, username: me, onChange: setTeam });
-    return () => un && un();
-  }, [leagueId, me]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (!leagueId) return;
-      const [p, c] = await Promise.all([listPlayers({ leagueId }), getLeagueClaims(leagueId)]);
-      if (!cancelled) {
-        setPlayers(p || []);
-        setClaims(c || new Map());
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [leagueId]);
-
-  // ----- Actions
   async function handleDraftPick() {
     try {
       if (!pickPlayerId) {
-        alert("Choose a player ID to draft (temporarily input ID).");
+        alert("Choose a player ID to draft (temporary input).");
         return;
       }
       const pos = playersById.get(pickPlayerId)?.position || "";
@@ -109,7 +116,6 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
     }
   }
 
-  // ----- Render helpers (no hooks inside)
   function renderMyTeam() {
     return (
       <div>
@@ -135,9 +141,14 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
                     <td style={td}>{row.pos}</td>
                     <td style={td}>
                       {row.id ? (
-                        <button onClick={() => handleRelease(row.id)} style={{ padding: 6 }}>
-                          Release
-                        </button>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <button onClick={() => handleRelease(row.id)} style={{ padding: 6 }}>
+                            Release
+                          </button>
+                          <button onClick={() => moveToBench({ leagueId, username: me, slot: row.slot })} style={{ padding: 6 }}>
+                            Bench
+                          </button>
+                        </div>
                       ) : (
                         <span style={{ opacity: 0.5 }}>—</span>
                       )}
@@ -148,10 +159,37 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
             </table>
 
             <h4 style={{ marginTop: 16 }}>Bench</h4>
-            <ul>
+            <ul style={{ listStyle: "none", padding: 0 }}>
               {(team.bench || []).map((id) => {
                 const p = playersById.get(id);
-                return <li key={id}>{p?.displayName || p?.name || id}</li>;
+                const label = p?.displayName || p?.name || id;
+                const chosen = slotChoiceByPlayer[id] ?? defaultSlotForPosition(p?.position);
+                return (
+                  <li key={id} style={{ marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span>{label} · {p?.team} · {p?.position}</span>
+                    <select
+                      value={chosen}
+                      onChange={(e) => setSlotChoiceByPlayer((prev) => ({ ...prev, [id]: e.target.value }))}
+                      style={{ padding: 4 }}
+                    >
+                      {["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"].map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await moveToStarter({ leagueId, username: me, playerId: id, slot: slotChoiceByPlayer[id] ?? defaultSlotForPosition(p?.position) });
+                        } catch (e) {
+                          alert(e.message || "Failed to start player");
+                        }
+                      }}
+                      style={{ padding: 6 }}
+                    >
+                      Start
+                    </button>
+                  </li>
+                );
               })}
               {(team.bench || []).length === 0 && <li style={{ opacity: 0.6 }}>No bench players yet</li>}
             </ul>
@@ -236,7 +274,6 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
     );
   }
 
-  // ----- Main render (no hooks here, just JSX)
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
@@ -244,15 +281,33 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
         <h2 style={{ margin: 0 }}>{leagueState?.name || "League"}</h2>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+      <LeagueAdmin isOwner={leagueState?.owner === me} league={leagueState} />
+      <div style={{ margin: "8px 0" }}>
+        {!hasPaidEntry(leagueState, me) && (
+          <EntryFeeButton league={leagueState} username={me} onPaid={() => {}} />
+        )}
+      </div>
+
+      {/* Dev tools (sandbox simulation) */}
+      <DevPanel me={me} setMe={()=>{}} league={leagueState} onLeagueUpdate={()=>{}} />
+
+      <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
         <TabButton label="My Team"  id="myteam" active={activeTab} onClick={setActiveTab} />
         <TabButton label="Players"  id="players" active={activeTab} onClick={setActiveTab} />
         <TabButton label="Draft"    id="draft"   active={activeTab} onClick={setActiveTab} />
       </div>
 
       {activeTab === "myteam" && renderMyTeam()}
+
       {activeTab === "players" && renderPlayers()}
-      {activeTab === "draft" && renderDraft()}
+
+      {activeTab === "draft" && (
+        !hasPaidEntry(leagueState, me) ? (
+          <p style={{ color: "#b00" }}>Please pay the entry fee to participate in the draft.</p>
+        ) : (
+          renderDraft()
+        )
+      )}
     </div>
   );
 }
