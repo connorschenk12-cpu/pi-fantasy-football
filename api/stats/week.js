@@ -37,3 +37,4 @@ export default async function handler(req, res) {
   res.setHeader("Cache-Control", "max-age=60, s-maxage=300, stale-while-revalidate=600");
   res.status(200).json({ ok: true, week, season, stats });
 }
+
