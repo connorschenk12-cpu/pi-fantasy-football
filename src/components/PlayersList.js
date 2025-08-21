@@ -75,7 +75,7 @@ export default function PlayersList({ leagueId, username, onShowNews }) {
             <th style={th}>Name</th>
             <th style={th}>Team</th>
             <th style={th}>Pos</th>
-            <th style={th}}>Proj</th>
+            <th style={th}>Proj</th> {/* <- fixed: removed stray '}' */}
             <th style={th}>Status</th>
             <th style={th}></th>
           </tr>
