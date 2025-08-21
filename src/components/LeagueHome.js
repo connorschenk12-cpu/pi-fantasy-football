@@ -7,17 +7,15 @@ import LeagueAdmin from "./LeagueAdmin";
 import { listenLeague } from "../lib/storage";
 
 export default function LeagueHome({ league, me, onBack }) {
-  // Guard: if no league prop yet
+  // Keep a live copy of the league doc
   const [liveLeague, setLiveLeague] = useState(league || null);
   const [tab, setTab] = useState("players"); // 'team' | 'players' | 'draft' | 'admin'
 
-  // Keep league data live/updated
   useEffect(() => {
     if (!league?.id) return;
     const unsub = listenLeague(league.id, (l) => setLiveLeague(l || league));
     return () => unsub && unsub();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [league?.id]);
+  }, [league?.id, league]);
 
   const l = liveLeague || league;
   if (!l) {
