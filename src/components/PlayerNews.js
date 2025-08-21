@@ -1,3 +1,4 @@
+// src/components/PlayerNews.js
 import React, { useEffect, useState } from "react";
 
 export default function PlayerNews({ name, onClose }) {
@@ -12,7 +13,7 @@ export default function PlayerNews({ name, onClose }) {
   }, [name]);
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)" }}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1000 }}>
       <div style={{ maxWidth: 700, margin: "40px auto", background: "#fff", borderRadius: 8, padding: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h3 style={{ margin: 0 }}>News: {name}</h3>
