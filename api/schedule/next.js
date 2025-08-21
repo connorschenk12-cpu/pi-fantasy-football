@@ -33,3 +33,4 @@ export default async function handler(req, res) {
   res.setHeader("Cache-Control", "max-age=600, s-maxage=3600");
   res.status(200).json({ ok: true, season, next: map });
 }
+
