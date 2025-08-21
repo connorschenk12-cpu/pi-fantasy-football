@@ -5,11 +5,13 @@ import PlayersList from "./PlayersList";
 import LeagueAdmin from "./LeagueAdmin";
 import EntryFeeButton from "./EntryFeeButton";
 import DevPanel from "./DevPanel";
+import DraftBoard from "./DraftBoard";
 import {
   listenLeague,
   listenTeam,
   listPlayers,
   getLeagueClaims,
+  listenLeagueClaims,
   canDraft,
   draftPick,
   releasePlayerAndClearSlot,
@@ -21,17 +23,19 @@ import {
 export default function LeagueHome({ league, me, onBack, onShowNews }) {
   const leagueId = league?.id;
 
-  const [activeTab, setActiveTab] = useState("myteam"); // 'myteam' | 'players' | 'draft'
+  const [activeTab, setActiveTab] = useState("myteam"); // 'myteam' | 'players' | 'draft' | 'admin'
   const [leagueState, setLeagueState] = useState(league || null);
   const [team, setTeam] = useState(null);
   const [players, setPlayers] = useState([]);
   const [claims, setClaims] = useState(new Map());
   const [pickSlot, setPickSlot] = useState("FLEX");
+  const [pickQuery, setPickQuery] = useState("");
   const [pickPlayerId, setPickPlayerId] = useState("");
 
   // bench start-slot choices keyed by playerId
   const [slotChoiceByPlayer, setSlotChoiceByPlayer] = useState({});
 
+  /* ---------- live league + team ---------- */
   useEffect(() => {
     if (!leagueId) return;
     const un = listenLeague(leagueId, setLeagueState);
@@ -44,19 +48,24 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
     return () => un && un();
   }, [leagueId, me]);
 
+  /* ---------- players + claims (live) ---------- */
   useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!leagueId) return;
-      const [p, c] = await Promise.all([listPlayers({ leagueId }), getLeagueClaims(leagueId)]);
-      if (!cancelled) {
-        setPlayers(p || []);
-        setClaims(c || new Map());
-      }
+      const p = await listPlayers({ leagueId });
+      if (!cancelled) setPlayers(p || []);
     })();
     return () => { cancelled = true; };
   }, [leagueId]);
 
+  useEffect(() => {
+    if (!leagueId) return;
+    const un = listenLeagueClaims(leagueId, (map) => setClaims(map || new Map()));
+    return () => un && un();
+  }, [leagueId]);
+
+  /* ---------- maps + derived ---------- */
   const playersById = useMemo(() => {
     const m = new Map();
     (players || []).forEach((p) => m.set(p.id, p));
@@ -82,26 +91,70 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
     return canDraft(leagueState) && current === me;
   }, [leagueState, me]);
 
+  const draftIsFreeOrPaid = useMemo(() => {
+    const entryEnabled = !!leagueState?.entry?.enabled;
+    if (!entryEnabled) return true;          // free leagues -> draft allowed
+    return hasPaidEntry(leagueState, me);    // paid leagues -> must have paid
+  }, [leagueState, me]);
+
   function defaultSlotForPosition(pos) {
     const p = String(pos || "").toUpperCase();
     if (["QB","RB","WR","TE","K","DEF"].includes(p)) return p;
     return "FLEX";
+  }
+
+  /* ---------- draft: suggestions & recommended ---------- */
+  const availablePlayers = useMemo(() => {
+    const out = [];
+    for (const p of players) {
+      if (!claims.has(p.id)) out.push(p);
     }
+    return out;
+  }, [players, claims]);
+
+  const normalizedQuery = pickQuery.trim().toLowerCase();
+  const nameMatches = useMemo(() => {
+    if (!normalizedQuery) return [];
+    const max = 10;
+    const arr = [];
+    for (const p of availablePlayers) {
+      const name = (p.displayName || p.name || "").toLowerCase();
+      const team = (p.team || "").toLowerCase();
+      if (name.includes(normalizedQuery) || team.includes(normalizedQuery)) {
+        arr.push(p);
+        if (arr.length >= max) break;
+      }
+    }
+    // sort by projection desc if available
+    arr.sort((a, b) => Number(b.projPoints || 0) - Number(a.projPoints || 0));
+    return arr;
+  }, [normalizedQuery, availablePlayers]);
+
+  const recommendedTop = useMemo(() => {
+    const top = [...availablePlayers];
+    top.sort((a, b) => Number(b.projPoints || 0) - Number(a.projPoints || 0));
+    return top.slice(0, 12);
+  }, [availablePlayers]);
 
   async function handleDraftPick() {
     try {
-      if (!pickPlayerId) {
-        alert("Choose a player ID to draft (temporary input).");
+      let chosenId = pickPlayerId;
+      if (!chosenId && nameMatches.length > 0) {
+        chosenId = nameMatches[0].id;
+      }
+      if (!chosenId) {
+        alert("Choose a player by clicking a suggestion or enter a name.");
         return;
       }
-      const pos = playersById.get(pickPlayerId)?.position || "";
+      const pos = playersById.get(chosenId)?.position || "";
       await draftPick({
         leagueId,
         username: me,
-        playerId: pickPlayerId,
+        playerId: chosenId,
         playerPosition: pos,
         slot: pickSlot || pos,
       });
+      setPickQuery("");
       setPickPlayerId("");
     } catch (e) {
       alert(e.message || "Draft pick failed");
@@ -116,6 +169,7 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
     }
   }
 
+  /* ---------- render sections ---------- */
   function renderMyTeam() {
     return (
       <div>
@@ -205,71 +259,132 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
     return (
       <div>
         <h3 style={{ marginTop: 0 }}>Players</h3>
-        <PlayersList leagueId={leagueId} username={me} onShowNews={onShowNews} />
+        <PlayersList
+          leagueId={leagueId}
+          username={me}
+          onShowNews={onShowNews}
+        />
       </div>
     );
   }
 
   function renderDraft() {
     const d = leagueState?.draft || {};
+    const order = Array.isArray(d.order) ? d.order : [];
+
     return (
       <div>
         <h3 style={{ marginTop: 0 }}>Draft</h3>
         <p>
           Status: <b>{d.status || "unscheduled"}</b>
+          {order.length > 0 && <> · Round {d.round || 1} · Direction {d.direction === -1 ? "⬅︎ (reverse)" : "➜ (forward)"} · On the clock: <b>{order[(Number.isInteger(d.pointer) ? d.pointer : 0)] || "—"}</b></>}
         </p>
-        {d.order && d.order.length > 0 && (
-          <p>
-            Round {d.round || 1} · Direction {d.direction === -1 ? "⬅︎" : "➜"} · Current:{" "}
-            <b>{(d.order[(Number.isInteger(d.pointer) ? d.pointer : 0)] || "—")}</b>
-          </p>
-        )}
 
-        {isMyTurnToDraft ? (
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <label>
-              Slot:&nbsp;
-              <select value={pickSlot} onChange={(e) => setPickSlot(e.target.value)}>
-                {["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"].map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Player ID:&nbsp;
-              <input
-                value={pickPlayerId}
-                onChange={(e) => setPickPlayerId(e.target.value)}
-                placeholder="type an ID (temporary UI)"
-                style={{ width: 220 }}
-              />
-            </label>
-            <button onClick={handleDraftPick} style={{ padding: 8 }}>Draft</button>
-          </div>
+        <DraftBoard league={leagueState} playersById={playersById} />
+
+        {canDraft(leagueState) && draftIsFreeOrPaid ? (
+          isMyTurnToDraft ? (
+            <>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "12px 0" }}>
+                <label>
+                  Slot:&nbsp;
+                  <select value={pickSlot} onChange={(e) => setPickSlot(e.target.value)}>
+                    {["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"].map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={{ flex: "1 1 320px" }}>
+                  Search name/team:&nbsp;
+                  <input
+                    value={pickQuery}
+                    onChange={(e) => {
+                      setPickQuery(e.target.value);
+                      setPickPlayerId(""); // reset manual selection when typing
+                    }}
+                    placeholder="e.g. Patrick Mahomes, KC"
+                    style={{ width: 320 }}
+                  />
+                </label>
+                <button onClick={handleDraftPick} style={{ padding: 8 }}>Draft</button>
+              </div>
+
+              {/* suggestions */}
+              {pickQuery.trim() && (
+                <div style={{ border: "1px solid #eee", borderRadius: 6, padding: 8, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>Suggestions</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 8 }}>
+                    {nameMatches.map((p) => (
+                      <button
+                        key={p.id}
+                        onClick={() => { setPickPlayerId(p.id); setPickQuery(p.displayName || p.name || ""); }}
+                        style={{ textAlign: "left", padding: 8, border: "1px solid #ddd", borderRadius: 6 }}
+                      >
+                        <div style={{ fontWeight: 600 }}>{p.displayName || p.name}</div>
+                        <div style={{ fontSize: 12, opacity: 0.8 }}>{p.team} · {p.position} · Proj {Number(p.projPoints || 0).toFixed(1)}</div>
+                      </button>
+                    ))}
+                    {nameMatches.length === 0 && <div style={{ opacity: 0.6 }}>No matches</div>}
+                  </div>
+                </div>
+              )}
+
+              {/* recommended top available */}
+              <div style={{ border: "1px solid #eee", borderRadius: 6, padding: 8 }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>Recommended (top available)</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 8 }}>
+                  {recommendedTop.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={async () => {
+                        try {
+                          await draftPick({
+                            leagueId,
+                            username: me,
+                            playerId: p.id,
+                            playerPosition: p.position,
+                            slot: defaultSlotForPosition(p.position),
+                          });
+                        } catch (e) {
+                          alert(e.message || "Draft pick failed");
+                        }
+                      }}
+                      style={{ textAlign: "left", padding: 8, border: "1px solid #ddd", borderRadius: 6 }}
+                    >
+                      <div style={{ fontWeight: 600 }}>{p.displayName || p.name}</div>
+                      <div style={{ fontSize: 12, opacity: 0.8 }}>{p.team} · {p.position} · Proj {Number(p.projPoints || 0).toFixed(1)}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          ) : (
+            <p style={{ opacity: 0.7, marginTop: 12 }}>Waiting for your turn…</p>
+          )
         ) : (
-          <p style={{ opacity: 0.7 }}>
-            {canDraft(leagueState)
-              ? "Waiting for your turn…"
-              : "Draft not live yet."}
+          <p style={{ color: "#b00" }}>
+            {leagueState?.entry?.enabled
+              ? "Please pay the entry fee to participate in the draft."
+              : "Draft is not live yet."}
           </p>
         )}
+      </div>
+    );
+  }
 
-        {Array.isArray(d.picks) && d.picks.length > 0 && (
-          <>
-            <h4 style={{ marginTop: 16 }}>Picks</h4>
-            <ol>
-              {d.picks.map((p, i) => {
-                const pl = playersById.get(p.playerId);
-                const label = pl?.displayName || pl?.name || p.playerId;
-                return (
-                  <li key={i}>
-                    #{p.overall} · R{p.round}P{p.pickInRound} — {p.username} selected {label} ({p.slot})
-                  </li>
-                );
-              })}
-            </ol>
-          </>
+  function renderAdmin() {
+    return (
+      <div>
+        <h3 style={{ marginTop: 0 }}>League Admin</h3>
+        <LeagueAdmin isOwner={leagueState?.owner === me} league={leagueState} />
+        {!hasPaidEntry(leagueState, me) && !!leagueState?.entry?.enabled && (
+          <div style={{ marginTop: 12 }}>
+            <EntryFeeButton league={leagueState} username={me} onPaid={() => {}} />
+          </div>
         )}
+        <div style={{ marginTop: 12 }}>
+          <DevPanel me={me} setMe={() => {}} league={leagueState} onLeagueUpdate={() => {}} />
+        </div>
       </div>
     );
   }
@@ -281,33 +396,20 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
         <h2 style={{ margin: 0 }}>{leagueState?.name || "League"}</h2>
       </div>
 
-      <LeagueAdmin isOwner={leagueState?.owner === me} league={leagueState} />
-      <div style={{ margin: "8px 0" }}>
-        {!hasPaidEntry(leagueState, me) && (
-          <EntryFeeButton league={leagueState} username={me} onPaid={() => {}} />
-        )}
-      </div>
-
-      {/* Dev tools (sandbox simulation) */}
-      <DevPanel me={me} setMe={()=>{}} league={leagueState} onLeagueUpdate={()=>{}} />
-
+      {/* Tabs */}
       <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
         <TabButton label="My Team"  id="myteam" active={activeTab} onClick={setActiveTab} />
         <TabButton label="Players"  id="players" active={activeTab} onClick={setActiveTab} />
         <TabButton label="Draft"    id="draft"   active={activeTab} onClick={setActiveTab} />
+        {leagueState?.owner === me && (
+          <TabButton label="Admin"  id="admin"   active={activeTab} onClick={setActiveTab} />
+        )}
       </div>
 
       {activeTab === "myteam" && renderMyTeam()}
-
       {activeTab === "players" && renderPlayers()}
-
-      {activeTab === "draft" && (
-        !hasPaidEntry(leagueState, me) ? (
-          <p style={{ color: "#b00" }}>Please pay the entry fee to participate in the draft.</p>
-        ) : (
-          renderDraft()
-        )
-      )}
+      {activeTab === "draft" && renderDraft()}
+      {activeTab === "admin" && leagueState?.owner === me && renderAdmin()}
     </div>
   );
 }
