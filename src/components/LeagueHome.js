@@ -6,6 +6,8 @@ import LeagueAdmin from "./LeagueAdmin";
 import EntryFeeButton from "./EntryFeeButton";
 import DevPanel from "./DevPanel";
 import DraftBoard from "./DraftBoard";
+import ProjectionsSeeder from "./ProjectionsSeeder";
+import WeekScheduleAdmin from "./WeekScheduleAdmin";
 import {
   listenLeague,
   listenTeam,
@@ -363,6 +365,8 @@ export default function LeagueHome({ league, me, onBack, onShowNews }) {
       <div>
         <h3 style={{ marginTop: 0 }}>League Admin</h3>
         <LeagueAdmin isOwner={leagueState?.owner === me} league={leagueState} />
+        <WeekScheduleAdmin leagueId={leagueState?.id} currentSettings={leagueState?.settings} />
+        <ProjectionsSeeder />
         {!hasPaidEntry(leagueState, me) && !!leagueState?.entry?.enabled && (
           <div style={{ marginTop: 12 }}>
             <EntryFeeButton league={leagueState} username={me} onPaid={() => {}} />
