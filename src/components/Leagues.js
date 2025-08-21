@@ -1,160 +1,94 @@
 import React, { useEffect, useState } from "react";
-import { createLeague, joinLeague, listMyLeagues } from "../lib/storage";
+import { listMyLeagues, createLeague, joinLeague } from "../lib/storage";
 
 export default function Leagues({ username, onOpenLeague }) {
-  const [leagueName, setLeagueName] = useState("");
+  const [leagues, setLeagues] = useState([]);
+  const [newLeagueName, setNewLeagueName] = useState("");
   const [joinId, setJoinId] = useState("");
-  const [mine, setMine] = useState([]);
   const [msg, setMsg] = useState("");
-  const [loading, setLoading] = useState(false);
 
   async function refresh() {
-    setLoading(true);
     try {
-      const data = await listMyLeagues(username);
-      setMine(data);
+      const ls = await listMyLeagues(username);
+      setLeagues(ls);
     } catch (e) {
-      setMsg("❌ Failed to load leagues");
-      console.error(e);
-    } finally {
-      setLoading(false);
+      setMsg(e.message || "Failed to load leagues");
     }
   }
 
   useEffect(() => {
     refresh();
-  }, [username]); // correct dependency
+    // eslint-disable-next-line
+  }, [username]);
 
   async function handleCreate() {
-    const name = leagueName.trim();
-    if (!name) return setMsg("Enter a league name");
-    setLoading(true);
+    setMsg("");
     try {
-      const id = await createLeague({ name, owner: username });
-      setLeagueName("");
-      setMsg(`✅ League created: ${name} (ID: ${id})`);
+      const l = await createLeague({ name: newLeagueName.trim(), owner: username });
+      setNewLeagueName("");
+      setMsg("✅ League created");
       await refresh();
+      onOpenLeague && onOpenLeague(l);
     } catch (e) {
-      setMsg("❌ Failed to create league");
-      console.error(e);
-    } finally {
-      setLoading(false);
+      setMsg(e.message || "Failed to create league");
     }
   }
 
   async function handleJoin() {
-    const id = joinId.trim();
-    if (!id) return setMsg("Enter a league ID");
-    setLoading(true);
+    setMsg("");
     try {
-      await joinLeague({ leagueId: id, username });
+      const l = await joinLeague({ leagueId: joinId.trim(), username });
       setJoinId("");
-      setMsg(`✅ Joined league ${id}`);
+      setMsg("✅ Joined league");
       await refresh();
+      onOpenLeague && onOpenLeague(l);
     } catch (e) {
-      setMsg("❌ League not found");
-      console.error(e);
-    } finally {
-      setLoading(false);
+      setMsg(e.message || "Failed to join league");
     }
   }
 
   return (
-    <div style={{ marginTop: 20 }}>
-      <h2>Leagues</h2>
+    <div>
+      <h2>My Leagues</h2>
       {msg && <p>{msg}</p>}
-      {loading && <p>Loading…</p>}
 
-      <div style={{ display: "grid", gap: 12, maxWidth: 420 }}>
-        <div>
-          <h3>Create a League</h3>
-          <input
-            value={leagueName}
-            onChange={(e) => setLeagueName(e.target.value)}
-            placeholder="League name"
-            style={{ padding: 10, width: "100%" }}
-          />
-          <button
-            onClick={handleCreate}
-            style={{ marginTop: 8, padding: 10, width: "100%" }}
-          >
-            Create
-          </button>
-        </div>
-
-        <div>
-          <h3>Join a League</h3>
-          <input
-            value={joinId}
-            onChange={(e) => setJoinId(e.target.value)}
-            placeholder="League ID (Firestore doc id)"
-            style={{ padding: 10, width: "100%" }}
-          />
-          <button
-            onClick={handleJoin}
-            style={{ marginTop: 8, padding: 10, width: "100%" }}
-          >
-            Join
-          </button>
-        </div>
-      </div>
-
-      <h3 style={{ marginTop: 24 }}>My Leagues</h3>
-      {mine.length === 0 ? (
-        <p>No leagues yet. Create one above or paste an ID to join.</p>
-      ) : (
+      {!leagues.length ? <p>No leagues yet.</p> : (
         <ul style={{ paddingLeft: 16 }}>
-          {mine.map((l) => (
-           <li key={l.id} style={{ marginBottom: 12 }}>
-  <strong>{l.name}</strong> — ID: <code>{l.id}</code>
-  <br />
-  Members: {(l.members || []).join(", ")}
-  <br />
-  <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
-    <button onClick={() => onOpenLeague(l)} style={{ padding: 8 }}>
-      Open League
-    </button>
-    <button
-      onClick={async () => {
-        try {
-          const url = `${window.location.origin}?join=${encodeURIComponent(l.id)}`;
-          await navigator.clipboard.writeText(url);
-          alert("Join link copied!");
-        } catch {
-          alert("Could not copy — long press and copy the ID.");
-        }
-      }}
-      style={{ padding: 8 }}
-    >
-      Copy Join Link
-    </button>
-    <button
-      onClick={async () => {
-        const url = `${window.location.origin}?join=${encodeURIComponent(l.id)}`;
-        const text = `Join my Pi Fantasy Football league: ${l.name}\n${url}`;
-        try {
-          if (window.Pi?.openShareDialog) {
-            await window.Pi.openShareDialog({ title: "Pi Fantasy Football", text, url });
-          } else if (navigator.share) {
-            await navigator.share({ title: "Pi Fantasy Football", text, url });
-          } else {
-            await navigator.clipboard.writeText(url);
-            alert("Share link copied!");
-          }
-        } catch (e) {
-          console.log("Share cancelled/failed:", e);
-        }
-      }}
-      style={{ padding: 8 }}
-    >
-      Share
-    </button>
-  </div>
-</li>
-
+          {leagues.map((l) => (
+            <li key={l.id} style={{ marginBottom: 6 }}>
+              <button onClick={() => onOpenLeague(l)} style={{ padding: 8 }}>
+                {l.name} <span style={{ opacity: 0.6 }}>({l.id})</span>
+              </button>
+            </li>
           ))}
         </ul>
       )}
+
+      <div style={{ marginTop: 16 }}>
+        <h3>Create League</h3>
+        <input
+          placeholder="League name"
+          value={newLeagueName}
+          onChange={(e) => setNewLeagueName(e.target.value)}
+          style={{ padding: 8, width: "260px" }}
+        />
+        <button onClick={handleCreate} style={{ marginLeft: 8, padding: 8 }}>
+          Create
+        </button>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <h3>Join League</h3>
+        <input
+          placeholder="League ID"
+          value={joinId}
+          onChange={(e) => setJoinId(e.target.value)}
+          style={{ padding: 8, width: "260px" }}
+        />
+        <button onClick={handleJoin} style={{ marginLeft: 8, padding: 8 }}>
+          Join
+        </button>
+      </div>
     </div>
   );
 }
