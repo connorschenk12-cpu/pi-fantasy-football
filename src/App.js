@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import Leagues from "./components/Leagues";
 import LeagueHome from "./components/LeagueHome";
 import PlayerNews from "./components/PlayerNews";
+import DevPanel from "./components/DevPanel";
 
 export default function App() {
   const [me, setMe] = useState(null);
@@ -12,7 +13,6 @@ export default function App() {
   const [openLeague, setOpenLeague] = useState(null);
   const [newsName, setNewsName] = useState(null);
 
-  // Pi SDK init (sandbox true so it works in Pi Browser sandbox)
   useEffect(() => {
     try {
       if (!window.Pi) {
@@ -20,7 +20,6 @@ export default function App() {
         setError("Pi SDK not found. Open in Pi Browser.");
         return;
       }
-      // Init without appId in sandbox mode
       window.Pi.init({ version: "2.0", sandbox: true });
       setStatus("ready");
     } catch (e) {
@@ -32,7 +31,7 @@ export default function App() {
   async function login() {
     try {
       if (!window.Pi) throw new Error("Pi SDK not available");
-      const scopes = ["username"]; // add "payments" later when enabling entry fees
+      const scopes = ["username"];
       const auth = await window.Pi.authenticate(scopes);
       const uname = auth?.user?.username || null;
       if (!uname) throw new Error("No username returned");
@@ -42,9 +41,7 @@ export default function App() {
     }
   }
 
-  if (status === "init") {
-    return <div style={{ padding: 16 }}>Loading Pi SDK…</div>;
-  }
+  if (status === "init") return <div style={{ padding: 16 }}>Loading Pi SDK…</div>;
   if (status === "error") {
     return (
       <div style={{ padding: 16 }}>
@@ -67,6 +64,9 @@ export default function App() {
           )}
         </div>
       </header>
+
+      {/* Dev tools to simulate users & draft in sandbox */}
+      <DevPanel me={me} setMe={setMe} league={openLeague} onLeagueUpdate={() => {}} />
 
       {!me ? (
         <p>Please sign in with Pi to continue.</p>
