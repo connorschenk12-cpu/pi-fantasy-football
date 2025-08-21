@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { listPlayers, listenLeagueClaims, ensureTeam, addDropPlayer } from "../lib/storage";
 
-export default function PlayersList({ leagueId, username, onShowNews }) {
+export default function PlayersList({ leagueId, username, onShowNews, currentWeek = 1, onChangeWeek }) {
   const [players, setPlayers] = useState([]);
   const [claims, setClaims] = useState(new Map());
   const [teamFilter, setTeamFilter] = useState("ALL");
@@ -39,10 +39,10 @@ export default function PlayersList({ leagueId, username, onShowNews }) {
     if (nq) {
       list = list.filter(p => (p.displayName || p.name || "").toLowerCase().includes(nq));
     }
-    // sort by projected points desc
-    list.sort((a, b) => Number(b.projPoints || 0) - Number(a.projPoints || 0));
+    // sort by projected points (selected week) desc
+    list.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
     return list;
-  }, [players, teamFilter, q]);
+  }, [players, teamFilter, q, currentWeek]);
 
   async function addToBench(p) {
     try {
@@ -57,6 +57,14 @@ export default function PlayersList({ leagueId, username, onShowNews }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        <label>
+          Week:&nbsp;
+          <select value={currentWeek} onChange={(e)=>onChangeWeek && onChangeWeek(Number(e.target.value))}>
+            {Array.from({ length: 18 }).map((_, i) => (
+              <option key={i+1} value={i+1}>Week {i+1}</option>
+            ))}
+          </select>
+        </label>
         <label>
           Team:&nbsp;
           <select value={teamFilter} onChange={(e)=>setTeamFilter(e.target.value)}>
@@ -75,7 +83,7 @@ export default function PlayersList({ leagueId, username, onShowNews }) {
             <th style={th}>Name</th>
             <th style={th}>Team</th>
             <th style={th}>Pos</th>
-            <th style={th}>Proj</th> {/* <- fixed: removed stray '}' */}
+            <th style={th}>Proj (W{currentWeek})</th>
             <th style={th}>Status</th>
             <th style={th}></th>
           </tr>
@@ -85,6 +93,7 @@ export default function PlayersList({ leagueId, username, onShowNews }) {
             const name = p.displayName || p.name || p.id;
             const claimedBy = claims.get(p.id)?.claimedBy || null;
             const available = !claimedBy;
+            const proj = projForWeek(p, currentWeek);
             return (
               <tr key={p.id}>
                 <td style={td}>
@@ -95,7 +104,7 @@ export default function PlayersList({ leagueId, username, onShowNews }) {
                 </td>
                 <td style={td}>{p.team || "—"}</td>
                 <td style={td}>{p.position || "—"}</td>
-                <td style={td}>{Number(p.projPoints || 0).toFixed(1)}</td>
+                <td style={td}>{proj.toFixed(1)}</td>
                 <td style={td} title={claimedBy ? `Owned by ${claimedBy}` : "Available"}>
                   {available ? "Available" : `Owned by ${claimedBy}`}
                 </td>
@@ -122,6 +131,17 @@ export default function PlayersList({ leagueId, username, onShowNews }) {
       </table>
     </div>
   );
+}
+
+function projForWeek(p, week) {
+  const wStr = String(week);
+  if (p?.projections && p.projections[wStr] != null) return Number(p.projections[wStr]) || 0;
+  if (p?.projections && p.projections[week] != null) return Number(p.projections[week]) || 0;
+  if (p?.projByWeek && p.projByWeek[wStr] != null) return Number(p.projByWeek[wStr]) || 0;
+  if (p?.projByWeek && p.projByWeek[week] != null) return Number(p.projByWeek[week]) || 0;
+  const keyed = p?.[`projW${week}`];
+  if (keyed != null) return Number(keyed) || 0;
+  return 0;
 }
 
 const th = { textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" };
