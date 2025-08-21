@@ -1,95 +1,128 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 // src/components/PlayersList.js
 import React, { useEffect, useMemo, useState } from "react";
-import { listPlayers, getLeagueClaims, addDropPlayer, fetchProjections, fetchNextGames } from "../lib/storage";
-import { computeFantasyPoints, DEFAULT_SCORING } from "../lib/scoring";
+import { listPlayers, listenLeagueClaims, ensureTeam, addDropPlayer } from "../lib/storage";
 
 export default function PlayersList({ leagueId, username, onShowNews }) {
   const [players, setPlayers] = useState([]);
   const [claims, setClaims] = useState(new Map());
-  const [projections, setProjections] = useState({});
-  const [nextGames, setNextGames] = useState({});
-  const [filter, setFilter] = useState("ALL");
-  const [search, setSearch] = useState("");
+  const [teamFilter, setTeamFilter] = useState("ALL");
+  const [q, setQ] = useState("");
 
   useEffect(() => {
+    let canceled = false;
     (async () => {
       const p = await listPlayers({ leagueId });
-      setPlayers(p || []);
-      const c = await getLeagueClaims(leagueId);
-      setClaims(c || new Map());
-      const week = 1; // could be league.currentWeek
-      setProjections(await fetchProjections(week));
-      setNextGames(await fetchNextGames());
+      if (!canceled) setPlayers(p || []);
     })();
+    return () => { canceled = true; };
   }, [leagueId]);
 
-  const rows = useMemo(() => {
-    const by = (p) => (p.displayName || p.name || "").toLowerCase();
-    const q = search.trim().toLowerCase();
-    const filtered = players
-      .filter(p => (filter === "ALL" || p.position === filter))
-      .filter(p => (q ? by(p).includes(q) : true))
-      .map(p => {
-        const proj = projections[p.id] || null;
-        const ng = nextGames[p.team] || {};
-        const opp = p.position === "DEF" ? "" : (ng.opponent || "");
-        const oppText = p.position === "DEF" ? (ng.opponent ? `vs ${ng.opponent}` : "") : (opp ? `@ ${opp}` : "");
-        const kickoff = ng.kickoff ? new Date(ng.kickoff).toLocaleString() : "";
-        const points = proj ? computeFantasyPoints(proj, DEFAULT_SCORING) : 0;
-        return { ...p, points, oppText, kickoff };
-      })
-      .sort((a, b) => b.points - a.points);
-    return filtered;
-  }, [players, filter, search, projections, nextGames]);
+  useEffect(() => {
+    if (!leagueId) return;
+    const un = listenLeagueClaims(leagueId, (m) => setClaims(m || new Map()));
+    return () => un && un();
+  }, [leagueId]);
 
-  async function handleAdd(p) {
+  const teams = useMemo(() => {
+    const s = new Set();
+    players.forEach(p => { if (p.team) s.add(p.team); });
+    return ["ALL", ...Array.from(s).sort()];
+  }, [players]);
+
+  const filtered = useMemo(() => {
+    let list = players.slice();
+    if (teamFilter !== "ALL") {
+      list = list.filter(p => p.team === teamFilter);
+    }
+    const nq = q.trim().toLowerCase();
+    if (nq) {
+      list = list.filter(p => (p.displayName || p.name || "").toLowerCase().includes(nq));
+    }
+    // sort by projected points desc
+    list.sort((a, b) => Number(b.projPoints || 0) - Number(a.projPoints || 0));
+    return list;
+  }, [players, teamFilter, q]);
+
+  async function addToBench(p) {
     try {
+      await ensureTeam({ leagueId, username });
       await addDropPlayer({ leagueId, username, addId: p.id, dropId: null });
-      alert(`Added ${p.displayName || p.name}`);
+      alert(`${p.displayName || p.name} added to your bench`);
     } catch (e) {
-      alert(e.message || "Failed to add");
+      alert(e.message || "Failed to add player");
     }
   }
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-        {["ALL","QB","RB","WR","TE","K","DEF"].map(pos => (
-          <button key={pos} onClick={() => setFilter(pos)} style={{ padding: 6, fontWeight: filter===pos?700:400 }}>{pos}</button>
-        ))}
-        <input placeholder="Search player…" value={search} onChange={(e)=>setSearch(e.target.value)} style={{ padding: 6, flex: 1, minWidth: 180 }} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        <label>
+          Team:&nbsp;
+          <select value={teamFilter} onChange={(e)=>setTeamFilter(e.target.value)}>
+            {teams.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
+        <label style={{ flex: "1 1 240px" }}>
+          Search name:&nbsp;
+          <input value={q} onChange={(e)=>setQ(e.target.value)} placeholder="Type a player name" style={{ width: 240 }} />
+        </label>
       </div>
 
-      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-        {rows.map((p) => {
-          const isClaimed = claims.has(p.id);
-          return (
-            <li key={p.id} style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, marginBottom: 8 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <div>
-                  <div style={{ fontWeight: 600 }}>{p.displayName || p.name}</div>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>{p.team} · {p.position} {p.bye ? `· Bye ${p.bye}` : ""}</div>
-                  <div style={{ fontSize: 12 }}>{p.oppText} {p.kickoff ? `· ${p.kickoff}` : ""}</div>
-                </div>
-                <div style={{ fontWeight: 700, fontSize: 18 }}>{p.points.toFixed(1)}</div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => onShowNews?.(p.displayName || p.name)} style={{ padding: 6 }}>
-                    📰 News
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr>
+            <th style={th}>Name</th>
+            <th style={th}>Team</th>
+            <th style={th}>Pos</th>
+            <th style={th}}>Proj</th>
+            <th style={th}>Status</th>
+            <th style={th}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {filtered.map((p) => {
+            const name = p.displayName || p.name || p.id;
+            const claimedBy = claims.get(p.id)?.claimedBy || null;
+            const available = !claimedBy;
+            return (
+              <tr key={p.id}>
+                <td style={td}>
+                  <span style={{ fontWeight: 600 }}>{name}</span>{" "}
+                  <button onClick={() => onShowNews && onShowNews(name)} style={{ marginLeft: 6, padding: "2px 6px" }}>
+                    News
                   </button>
-                  <button disabled={isClaimed} onClick={() => handleAdd(p)} style={{ padding: 6 }}>
-                    {isClaimed ? "Taken" : "Add"}
-                  </button>
-                </div>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-
-      {rows.length === 0 && <p>No players found (try syncing players and refreshing).</p>}
-      <p style={{ fontSize: 12, opacity: 0.7, marginTop: 8 }}>
-        Projections & schedule via Sleeper; headlines via Google News RSS.
-      </p>
+                </td>
+                <td style={td}>{p.team || "—"}</td>
+                <td style={td}>{p.position || "—"}</td>
+                <td style={td}>{Number(p.projPoints || 0).toFixed(1)}</td>
+                <td style={td} title={claimedBy ? `Owned by ${claimedBy}` : "Available"}>
+                  {available ? "Available" : `Owned by ${claimedBy}`}
+                </td>
+                <td style={td}>
+                  {available ? (
+                    <button onClick={() => addToBench(p)} style={{ padding: 6 }}>
+                      Add
+                    </button>
+                  ) : (
+                    <span style={{ opacity: 0.5 }}>—</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+          {filtered.length === 0 && (
+            <tr>
+              <td colSpan={6} style={{ ...td, textAlign: "center", opacity: 0.6 }}>
+                No players match your filters.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }
+
+const th = { textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" };
+const td = { borderBottom: "1px solid #f5f5f5", padding: "6px 4px" };
