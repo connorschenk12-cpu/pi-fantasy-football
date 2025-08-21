@@ -71,6 +71,58 @@ export async function getWeeklyLineup({ leagueId, username, week }) {
   const snap = await getDoc(ref);
   return snap.exists() ? snap.data() : { starters: {} };
 }
+
+// Release a player you own: clear from roster & bench, and free the claim.
+export async function releasePlayerAndClearSlot({ leagueId, username, playerId }) {
+  if (!leagueId || !username || !playerId) {
+    throw new Error("leagueId, username, and playerId are required");
+  }
+
+  const teamRef = doc(db, "leagues", leagueId, "teams", username);
+  const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
+  const txRef   = doc(collection(db, "leagues", leagueId, "transactions")); // auto-id
+
+  await runTransaction(db, async (tx) => {
+    // Make sure team exists
+    const teamSnap = await tx.get(teamRef);
+    if (!teamSnap.exists()) throw new Error("Team not found");
+    const team = teamSnap.data() || {};
+    const roster = { ...(team.roster || {}) };
+    const bench  = Array.isArray(team.bench) ? team.bench.slice() : [];
+
+    // Validate ownership of the claim (if the claim exists)
+    const claimSnap = await tx.get(claimRef);
+    if (claimSnap.exists()) {
+      const claim = claimSnap.data() || {};
+      if (claim.claimedBy !== username) {
+        throw new Error("You do not own this player");
+      }
+      // Remove the claim so the player becomes available league-wide
+      tx.delete(claimRef);
+    }
+
+    // Clear from roster (any slot the player occupies)
+    Object.keys(roster).forEach((slot) => {
+      if (roster[slot] === playerId) roster[slot] = null;
+    });
+
+    // Remove from bench if present
+    const idx = bench.indexOf(playerId);
+    if (idx >= 0) bench.splice(idx, 1);
+
+    // Persist team updates
+    tx.update(teamRef, { roster, bench });
+
+    // Log transaction (optional)
+    tx.set(txRef, {
+      createdAt: Date.now(),
+      type: "release",
+      username,
+      playerId
+    });
+  });
+}
+
 export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   const teamRef = doc(db, "leagues", leagueId, "teams", username);
   const addClaimRef = doc(db, "leagues", leagueId, "claims", addId);
