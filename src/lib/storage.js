@@ -1,49 +1,51 @@
 /* eslint-disable no-console */
 // src/lib/storage.js
 import {
-  getFirestore, doc, getDoc, setDoc, updateDoc, collection, getDocs, addDoc, onSnapshot, query, where, orderBy, limit,
-  serverTimestamp, increment, writeBatch
+  doc, getDoc, setDoc, updateDoc, collection, getDocs, addDoc, onSnapshot,
+  query, where, orderBy, limit, serverTimestamp, writeBatch
 } from "firebase/firestore";
 import { db } from "../firebase";
 
-/** ---------- ROSTER/DRAFT CONSTANTS ---------- **/
-export const ROSTER_SLOTS = ["QB","WR1","WR2","RB1","RB2","TE","FLEX","K","DEF"]; // 9 starters
-export const BENCH_SIZE = 4;               // 4 bench spots
-export const DRAFT_ROUNDS = ROSTER_SLOTS.length + BENCH_SIZE; // = 13? (No, 9 + 4 = 13) -> user asked for 12 total; we’ll make FLEX overlap with WR/RB to keep 12.
-// To hit exactly 12 rounds total, we’ll keep 8 fixed slots + FLEX (makes 9) + 3 bench = 12.
-// Adjust per user request:
-export const BENCH_SIZE_OVERRIDE = 3; // 3 bench -> total 12 rounds
-export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE_OVERRIDE; // 9 + 3 = 12
+/** ---------- ROSTER / DRAFT CONSTANTS ---------- **/
 
-export const PICK_CLOCK_MS = 5000; // 5 seconds
+// 9 starters (with distinct WR1/WR2, RB1/RB2) + FLEX
+export const ROSTER_SLOTS = ["QB", "WR1", "WR2", "RB1", "RB2", "TE", "FLEX", "K", "DEF"];
 
-/** Default empty roster that supports WR1/WR2, RB1/RB2 */
+// To hit exactly 12 rounds total, use 3 bench slots (9 starters + 3 bench = 12)
+export const BENCH_SIZE = 3;
+export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE; // 9 + 3 = 12
+
+// Five-second pick clock
+export const PICK_CLOCK_MS = 5000;
+
+/** Create an empty roster object that includes all starter slots */
 export function emptyRoster() {
   const r = {};
-  ROSTER_SLOTS.forEach((s) => r[s] = null);
+  ROSTER_SLOTS.forEach((s) => (r[s] = null));
   return r;
 }
 
-/** Resolve default slot for a given football position */
-export function defaultSlotForPosition(pos) {
-  const p = String(pos || "").toUpperCase();
-  if (p === "QB") return "QB";
-  if (p === "RB") return pickFirstOpen(["RB1","RB2"]) || "FLEX";
-  if (p === "WR") return pickFirstOpen(["WR1","WR2"]) || "FLEX";
-  if (p === "TE") return "TE";
-  if (p === "K")  return "K";
-  if (p === "DEF") return "DEF";
-  return "FLEX";
-}
-function pickFirstOpen(slots, r=null) {
-  const roster = r || {}; // allow external roster
+/** Pick the first open slot from a list */
+function pickFirstOpen(slots, roster) {
   for (const s of slots) {
     if (!roster[s]) return s;
   }
   return null;
 }
 
-/** ---------- BASIC LEAGUE / TEAM LISTENERS ---------- **/
+/** Resolve a default slot for a given position, based on current roster */
+export function defaultSlotForPosition(pos, roster = {}) {
+  const p = String(pos || "").toUpperCase();
+  if (p === "QB") return "QB";
+  if (p === "RB") return pickFirstOpen(["RB1", "RB2"], roster) || "FLEX";
+  if (p === "WR") return pickFirstOpen(["WR1", "WR2"], roster) || "FLEX";
+  if (p === "TE") return "TE";
+  if (p === "K") return "K";
+  if (p === "DEF") return "DEF";
+  return "FLEX";
+}
+
+/** ---------- LEAGUE / TEAM LISTENERS ---------- **/
 
 export function listenLeague(leagueId, onChange) {
   const ref = doc(db, "leagues", leagueId);
@@ -62,12 +64,16 @@ export async function ensureTeam({ leagueId, username }) {
   const ref = doc(db, "leagues", leagueId, "teams", username);
   const snap = await getDoc(ref);
   if (!snap.exists()) {
-    await setDoc(ref, {
-      owner: username,
-      roster: emptyRoster(),
-      bench: [],
-      createdAt: serverTimestamp(),
-    }, { merge: true });
+    await setDoc(
+      ref,
+      {
+        owner: username,
+        roster: emptyRoster(),
+        bench: [],
+        createdAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
   }
   return ref;
 }
@@ -79,10 +85,10 @@ export function listenTeam({ leagueId, username, onChange }) {
   });
 }
 
-/** ---------- PLAYERS / CLAIMS ---------- **/
+/** ---------- PLAYERS & CLAIMS ---------- **/
 
 export async function listPlayers({ leagueId }) {
-  // First try league-scoped players
+  // Try league-scoped collection first
   const leaguePlayersRef = collection(db, "leagues", leagueId, "players");
   const leagueSnap = await getDocs(leaguePlayersRef);
   if (!leagueSnap.empty) {
@@ -90,11 +96,11 @@ export async function listPlayers({ leagueId }) {
     leagueSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
     return arr;
   }
-  // Fallback: global players
+  // Fallback to global players
   const snap = await getDocs(collection(db, "players"));
-  const arr = [];
-  snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-  return arr;
+  const out = [];
+  snap.forEach((d) => out.push({ id: d.id, ...d.data() }));
+  return out;
 }
 
 export function listenLeagueClaims(leagueId, onChange) {
@@ -109,79 +115,76 @@ export function listenLeagueClaims(leagueId, onChange) {
 /** ---------- ENTRY / PAYMENTS GATE ---------- **/
 
 export function hasPaidEntry(league, username) {
-  return !!league?.entry?.enabled
-    ? !!league?.entry?.paid?.[username]
-    : true;
+  return league?.entry?.enabled ? !!league?.entry?.paid?.[username] : true;
 }
 
-/** ---------- DRAFT STATE & HELPERS ---------- **/
+/** ---------- DRAFT STATE HELPERS ---------- **/
 
 export function canDraft(league) {
   return league?.draft?.status === "live";
 }
-
 export function draftActive(league) {
   return canDraft(league);
 }
-
 export function isMyTurn(league, username) {
   const d = league?.draft || {};
   const order = Array.isArray(d.order) ? d.order : [];
   const ptr = Number.isInteger(d.pointer) ? d.pointer : 0;
   return canDraft(league) && order[ptr] === username;
 }
-
-/** compute current round (1-indexed) out of DRAFT_ROUNDS_TOTAL based on picksTaken */
-export function currentRound(league) {
-  const picksTaken = Number(league?.draft?.picksTaken || 0);
-  return Math.min(Math.floor(picksTaken / leagueDraftTeamCount(league)) + 1, DRAFT_ROUNDS_TOTAL);
-}
 export function leagueDraftTeamCount(league) {
   return Math.max(1, Array.isArray(league?.draft?.order) ? league.draft.order.length : 1);
 }
+export function currentRound(league) {
+  const picksTaken = Number(league?.draft?.picksTaken || 0);
+  return Math.min(
+    Math.floor(picksTaken / leagueDraftTeamCount(league)) + 1,
+    DRAFT_ROUNDS_TOTAL
+  );
+}
 
-/** Set up a 12-round draft */
+/** Configure a 12-round draft with a provided order */
 export async function configureDraft({ leagueId, order }) {
-  const ref = doc(db, "leagues", leagueId);
-  await updateDoc(ref, {
+  const lref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(lref);
+  const prev = snap.exists() ? snap.data() : {};
+  await updateDoc(lref, {
     draft: {
       status: "scheduled",
-      order,             // array of usernames picking in order
-      pointer: 0,        // index into order
-      direction: 1,      // 1 forward, -1 reverse (snake can flip each round)
+      order, // array of usernames
+      pointer: 0,
+      direction: 1,
       round: 1,
       picksTaken: 0,
       roundsTotal: DRAFT_ROUNDS_TOTAL,
       clockMs: PICK_CLOCK_MS,
-      deadline: null,    // server time (ms) when current pick expires
+      deadline: null,
     },
     settings: {
-      ...(await getDoc(ref)).data()?.settings,
-      // lock add-drop during draft
-      lockAddDuringDraft: true,
-    }
+      ...(prev.settings || {}),
+      lockAddDuringDraft: true, // block adds during draft
+    },
   });
 }
 
-/** Start draft (set status live, and create first deadline) */
+/** Start draft: set status live + start the timer */
 export async function startDraft({ leagueId }) {
   const ref = doc(db, "leagues", leagueId);
-  const now = Date.now();
   await updateDoc(ref, {
     "draft.status": "live",
-    "draft.deadline": now + PICK_CLOCK_MS
+    "draft.deadline": Date.now() + PICK_CLOCK_MS,
   });
 }
 
-/** End draft */
+/** End draft: unlock adds */
 export async function endDraft({ leagueId }) {
   await updateDoc(doc(db, "leagues", leagueId), {
     "draft.status": "done",
-    "settings.lockAddDuringDraft": false
+    "settings.lockAddDuringDraft": false,
   });
 }
 
-/** Pick helper: writes claim + puts into roster slot or bench */
+/** Perform a draft pick (handles bench fallback if slot full) */
 export async function draftPick({ leagueId, username, playerId, playerPosition, slot }) {
   const lref = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(lref);
@@ -195,44 +198,39 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   const onClock = order[ptr] || null;
   if (onClock !== username) throw new Error("Not your turn");
 
-  // reserve claim
+  // Deny duplicate claims
   const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
   const claimSnap = await getDoc(claimRef);
   if (claimSnap.exists()) throw new Error("Player already owned");
 
-  // ensure team doc
   const teamRef = await ensureTeam({ leagueId, username });
   const teamSnap = await getDoc(teamRef);
   const team = teamSnap.data() || { roster: emptyRoster(), bench: [] };
 
   // Decide target slot
-  const r = team.roster || {};
+  const rosterCopy = { ...(team.roster || emptyRoster()) };
   let targetSlot = slot;
   if (!targetSlot) {
-    // pick a best slot based on position & current roster state
     if (playerPosition === "RB") {
-      targetSlot = r.RB1 ? (r.RB2 ? "FLEX" : "RB2") : "RB1";
+      targetSlot = rosterCopy.RB1 ? (rosterCopy.RB2 ? "FLEX" : "RB2") : "RB1";
     } else if (playerPosition === "WR") {
-      targetSlot = r.WR1 ? (r.WR2 ? "FLEX" : "WR2") : "WR1";
+      targetSlot = rosterCopy.WR1 ? (rosterCopy.WR2 ? "FLEX" : "WR2") : "WR1";
     } else {
-      targetSlot = defaultSlotForPosition(playerPosition);
+      targetSlot = defaultSlotForPosition(playerPosition, rosterCopy);
     }
   }
 
   // If chosen starter slot is filled, drop to bench
   let benchInsert = false;
-  if (targetSlot !== "FLEX" && r[targetSlot]) {
-    benchInsert = true;
-  } else if (targetSlot === "FLEX" && r.FLEX) {
-    benchInsert = true;
-  }
+  if (targetSlot !== "FLEX" && rosterCopy[targetSlot]) benchInsert = true;
+  if (targetSlot === "FLEX" && rosterCopy.FLEX) benchInsert = true;
 
   const batch = writeBatch(db);
 
-  // write claim (ownership)
+  // claim ownership
   batch.set(claimRef, { claimedBy: username, at: serverTimestamp() }, { merge: true });
 
-  // update team roster/bench
+  // put onto team
   const newTeam = { ...team };
   if (benchInsert) {
     newTeam.bench = Array.isArray(newTeam.bench) ? [...newTeam.bench] : [];
@@ -243,47 +241,25 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   }
   batch.set(teamRef, newTeam, { merge: true });
 
-  // advance draft pointer, round, picksTaken, and set next deadline
+  // advance pointer, track picks & round, set next deadline
   const teamsCount = leagueDraftTeamCount(league);
-  let picksTaken = Number(league?.draft?.picksTaken || 0) + 1;
-  let round = Number(league?.draft?.round || 1);
-  let pointer = ptr + 1;
-  let direction = Number(league?.draft?.direction || 1);
-
-  if (pointer >= teamsCount) {
-    // end of a round -> snake direction & reset pointer accordingly
-    pointer = teamsCount - 1;
-    direction = -1;
-  }
-  if (pointer < 0) {
-    pointer = 0;
-    direction = 1;
-    round += 1;
-  }
-
-  // Compute pointer by moving one step in current direction from previous onClock
-  // Simpler approach: compute global pick index then map to serpentine position.
-  // But since we only need 12 rounds quick, we will alternate direction by round:
-  const globalPickIndex = picksTaken; // after adding current pick
-  if (globalPickIndex % teamsCount === 0) {
-    // just completed a set; flip direction & increment round if needed
-    direction = direction * -1;
-    if (direction === 1) round += 1;
-  }
-  // Compute next pointer based on round direction:
-  const mod = picksTaken % teamsCount;
-  pointer = (direction === 1) ? mod : (teamsCount - 1 - mod);
-
-  // Done when picksTaken reaches roundsTotal * teamCount
+  const picksTaken = Number(league?.draft?.picksTaken || 0) + 1;
   const roundsTotal = Number(league?.draft?.roundsTotal || DRAFT_ROUNDS_TOTAL);
-  const doneAll = picksTaken >= (roundsTotal * teamsCount);
 
-  const nextDeadline = doneAll ? null : (Date.now() + PICK_CLOCK_MS);
+  // Compute next pointer in snake fashion based on global pick index
+  const mod = picksTaken % teamsCount;
+  const round = Math.floor(picksTaken / teamsCount) + 1;
+  const direction = round % 2 === 1 ? 1 : -1; // odd round: forward, even round: reverse
+  const pointer =
+    direction === 1 ? mod : teamsCount - 1 - mod;
+
+  const doneAll = picksTaken >= roundsTotal * teamsCount;
+  const nextDeadline = doneAll ? null : Date.now() + PICK_CLOCK_MS;
 
   batch.update(lref, {
     "draft.pointer": Math.max(0, Math.min(teamsCount - 1, pointer)),
     "draft.direction": direction,
-    "draft.round": Math.max(1, round),
+    "draft.round": Math.max(1, Math.min(roundsTotal, round)),
     "draft.picksTaken": picksTaken,
     "draft.deadline": nextDeadline,
     "draft.status": doneAll ? "done" : "live",
@@ -292,7 +268,7 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   await batch.commit();
 }
 
-/** Auto-pick top available (by projection for currentWeek) */
+/** Auto-pick: highest projection for currentWeek among available players */
 export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   const league = await getLeague(leagueId);
   if (!canDraft(league)) return;
@@ -302,37 +278,43 @@ export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   const username = order[ptr];
   if (!username) return;
 
-  // Find available players
   const players = await listPlayers({ leagueId });
   const claimsSnap = await getDocs(collection(db, "leagues", leagueId, "claims"));
   const owned = new Set();
   claimsSnap.forEach((d) => owned.add(d.id));
 
-  const available = players.filter(p => !owned.has(p.id));
-  available.sort((a,b) => (projForWeek(b, currentWeek) - projForWeek(a, currentWeek)));
+  const available = players.filter((p) => !owned.has(p.id));
+  available.sort(
+    (a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek)
+  );
 
   const pick = available[0];
   if (!pick) {
-    // nothing left -> just advance pointer to end draft
-    await draftPick({ leagueId, username, playerId: "NOPLAYER", playerPosition: "FLEX", slot: "FLEX" }).catch(()=>{});
+    // Nothing left; advance draft so it can finish
     return;
   }
-  await draftPick({ leagueId, username, playerId: pick.id, playerPosition: pick.position, slot: null });
+  await draftPick({
+    leagueId,
+    username,
+    playerId: pick.id,
+    playerPosition: pick.position,
+    slot: null,
+  });
 }
 
-/** Projection helper: reads supported shapes on player doc */
+/** Projection reader tolerant to a few shapes */
 export function projForWeek(p, week) {
-  const wStr = String(week);
-  if (p?.projections && p.projections[wStr] != null) return Number(p.projections[wStr]) || 0;
+  const w = String(week);
+  if (p?.projections && p.projections[w] != null) return Number(p.projections[w]) || 0;
   if (p?.projections && p.projections[week] != null) return Number(p.projections[week]) || 0;
-  if (p?.projByWeek && p.projByWeek[wStr] != null) return Number(p.projByWeek[wStr]) || 0;
+  if (p?.projByWeek && p.projByWeek[w] != null) return Number(p.projByWeek[w]) || 0;
   if (p?.projByWeek && p.projByWeek[week] != null) return Number(p.projByWeek[week]) || 0;
   const keyed = p?.[`projW${week}`];
   if (keyed != null) return Number(keyed) || 0;
   return 0;
 }
 
-/** ---------- TEAM UTILITIES: move/start/release ---------- **/
+/** ---------- TEAM UTILITIES (move / release / add-drop) ---------- **/
 
 export async function moveToStarter({ leagueId, username, playerId, slot }) {
   const tRef = doc(db, "leagues", leagueId, "teams", username);
@@ -346,8 +328,7 @@ export async function moveToStarter({ leagueId, username, playerId, slot }) {
   bench.splice(idx, 1);
 
   const roster = { ...(team.roster || emptyRoster()) };
-  // if slot occupied, send previous to bench
-  if (roster[slot]) bench.push(roster[slot]);
+  if (roster[slot]) bench.push(roster[slot]); // swap to bench if occupied
   roster[slot] = playerId;
 
   await updateDoc(tRef, { roster, bench });
@@ -371,7 +352,6 @@ export async function moveToBench({ leagueId, username, slot }) {
 }
 
 export async function releasePlayerAndClearSlot({ leagueId, username, playerId }) {
-  // remove from bench or starter slot; and delete claim
   const tRef = doc(db, "leagues", leagueId, "teams", username);
   const snap = await getDoc(tRef);
   if (!snap.exists()) throw new Error("Team not found");
@@ -380,7 +360,7 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   const roster = { ...(team.roster || emptyRoster()) };
   const bench = Array.isArray(team.bench) ? [...team.bench] : [];
 
-  // clear from roster if present
+  // clear from roster
   for (const s of Object.keys(roster)) {
     if (roster[s] === playerId) roster[s] = null;
   }
@@ -394,7 +374,7 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   await batch.commit();
 }
 
-/** Add/drop from Players tab (blocked during draft if locked) */
+/** Add/Drop (disabled during live draft if locked) */
 export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   const league = await getLeague(leagueId);
   if (league?.settings?.lockAddDuringDraft && draftActive(league)) {
@@ -407,7 +387,7 @@ export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   const batch = writeBatch(db);
 
   if (dropId) {
-    // release (also removes claim)
+    // release (also deletes claim)
     const claimRef = doc(db, "leagues", leagueId, "claims", dropId);
     const roster = { ...(team.roster || emptyRoster()) };
     const bench = Array.isArray(team.bench) ? [...team.bench] : [];
@@ -419,7 +399,6 @@ export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   }
 
   if (addId) {
-    // claim & bench
     const claimRef = doc(db, "leagues", leagueId, "claims", addId);
     batch.set(claimRef, { claimedBy: username, at: serverTimestamp() }, { merge: true });
     const bench = Array.isArray(team.bench) ? [...team.bench] : [];
@@ -430,7 +409,7 @@ export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   await batch.commit();
 }
 
-/** ---------- LIST/CREATE LEAGUES (trimmed helpers) ---------- **/
+/** ---------- LEAGUE CREATION / MEMBERSHIP ---------- **/
 
 export async function createLeague({ name, owner, order }) {
   const ref = await addDoc(collection(db, "leagues"), {
@@ -443,7 +422,7 @@ export async function createLeague({ name, owner, order }) {
     },
     draft: {
       status: "scheduled",
-      order: order || [owner],
+      order: Array.isArray(order) && order.length ? order : [owner],
       pointer: 0,
       direction: 1,
       round: 1,
@@ -451,16 +430,47 @@ export async function createLeague({ name, owner, order }) {
       roundsTotal: DRAFT_ROUNDS_TOTAL,
       clockMs: PICK_CLOCK_MS,
       deadline: null,
-    }
+    },
   });
   return { id: ref.id, name, owner };
 }
 
+/** NEW: Join a league (adds membership doc + ensures team) */
+export async function joinLeague({ leagueId, username }) {
+  if (!leagueId || !username) throw new Error("leagueId and username are required");
+
+  // Add membership: leagues/{leagueId}/members/{username}
+  const memRef = doc(db, "leagues", leagueId, "members", username);
+  const memSnap = await getDoc(memRef);
+  if (!memSnap.exists()) {
+    await setDoc(memRef, { username, joinedAt: serverTimestamp() }, { merge: true });
+  }
+
+  // Ensure team exists
+  await ensureTeam({ leagueId, username });
+
+  // (Optional) you could also create reverse index at users/{username}/memberships/{leagueId}
+  return true;
+}
+
+/** UPDATED: list leagues the user owns OR has joined */
 export async function listMyLeagues({ username }) {
-  const q1 = query(collection(db, "leagues"), where("owner", "==", username));
-  const s1 = await getDocs(q1);
+  const leaguesCol = collection(db, "leagues");
+
+  // Owned
+  const qOwned = query(leaguesCol, where("owner", "==", username));
+  const sOwned = await getDocs(qOwned);
   const out = [];
-  s1.forEach((d) => out.push({ id: d.id, ...d.data() }));
-  // could also query membership collections if you store members
+  sOwned.forEach((d) => out.push({ id: d.id, ...d.data() }));
+
+  // Joined (scan leagues for membership doc — fine for small N)
+  const allLeagues = await getDocs(leaguesCol);
+  for (const d of allLeagues.docs) {
+    const memSnap = await getDoc(doc(db, "leagues", d.id, "members", username));
+    if (memSnap.exists()) {
+      if (!out.find((x) => x.id === d.id)) out.push({ id: d.id, ...d.data() });
+    }
+  }
+
   return out;
 }
