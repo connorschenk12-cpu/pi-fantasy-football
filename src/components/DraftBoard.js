@@ -1,203 +1,122 @@
-import React, { useEffect, useMemo, useState } from "react";
-import {
-  listPlayers,
-  getLeagueClaims,
-  listenLeagueClaims,
-  ensureTeam,
-  listenLeague,
-  draftPick,
-} from "../lib/storage";
+// src/components/DraftBoard.js
+import React, { useMemo } from "react";
 
-const SLOTS = ["QB", "RB", "WR", "TE", "FLEX", "K", "DEF"];
-const asMap = (x) => (x instanceof Map ? x : new Map());
+/**
+ * Shows: team order, current pointer, recent picks, and a board grid (rounds x teams).
+ * Expects: league.draft = { order[], pointer, round, direction, totalRounds, picks[] }
+ * picks items: { overall, round, pickInRound, username, playerId, slot, ts }
+ */
+export default function DraftBoard({ league, playersById }) {
+  const draft = league?.draft || {};
+  const order = Array.isArray(draft.order) ? draft.order : [];
+  const totalRounds = draft.totalRounds || Math.max(1, order.length ? 15 : 1);
+  const currentIdx = Number.isInteger(draft.pointer) ? draft.pointer : 0;
 
-export default function DraftBoard({ leagueId, username }) {
-  const [players, setPlayers] = useState([]);
-  const [claims, setClaims] = useState(new Map());
-  const [slotByPlayer, setSlotByPlayer] = useState({});
-  const [loading, setLoading] = useState(true);
-  const [msg, setMsg] = useState("");
-  const [league, setLeague] = useState(null);
-
-  useEffect(() => {
-    let unsubClaims = null;
-    let unsubLeague = null;
-
-    (async () => {
-      try {
-        const p = await listPlayers({ leagueId });
-        setPlayers(Array.isArray(p) ? p : []);
-
-        const initial = await getLeagueClaims(leagueId);
-        setClaims(asMap(initial));
-        unsubClaims = listenLeagueClaims(leagueId, (map) => setClaims(asMap(map)));
-
-        unsubLeague = listenLeague(leagueId, (l) => setLeague(l || null));
-
-        await ensureTeam({ leagueId, username });
-      } catch (e) {
-        console.error(e);
-        setMsg("❌ Failed to load draft board");
-      } finally {
-        setLoading(false);
-      }
-    })();
-
-    return () => {
-      unsubClaims && unsubClaims();
-      unsubLeague && unsubLeague();
-    };
-  }, [leagueId, username]);
-
-  const draftStatus = league?.draft?.status || "unscheduled";
-  const draftingEnabled = draftStatus === "live";
-
-  const myTurn = useMemo(() => {
-    const order = league?.draft?.order || [];
-    const pointer = league?.draft?.pointer ?? 0;
-    return order.length > 0 && order[pointer] === username;
-  }, [league, username]);
-
-  const turnText = useMemo(() => {
-    const order = league?.draft?.order || [];
-    const pointer = league?.draft?.pointer ?? 0;
-    const round = league?.draft?.round ?? 1;
-    if (!order.length) return "Draft order not set";
-    const who = order[pointer];
-    return `Round ${round} — Up: ${who}`;
-  }, [league]);
-
-  const availability = useMemo(() => {
+  const picksByRoundAndUser = useMemo(() => {
+    // Map: round -> username -> pick object
     const map = new Map();
-    (players || []).forEach((p) => {
-      const claim = asMap(claims).get(p.id);
-      map.set(p.id, claim ? claim.claimedBy : null);
+    (draft.picks || []).forEach((p) => {
+      const r = p.round || 1;
+      if (!map.has(r)) map.set(r, new Map());
+      map.get(r).set(p.username, p);
     });
     return map;
-  }, [players, claims]);
+  }, [draft.picks]);
 
-  async function handleDraft(p) {
-    const chosenSlot = (slotByPlayer && slotByPlayer[p.id]) || "";
-    if (!chosenSlot) return setMsg("Pick a slot first.");
-    const pos = String(p.position || p.pos || "").toUpperCase();
-    if (!pos) return setMsg("Player is missing a position.");
-    if (!myTurn) return setMsg("It's not your turn.");
+  const recentPicks = useMemo(() => {
+    const arr = (draft.picks || []).slice(-10);
+    return arr.reverse(); // latest first
+  }, [draft.picks]);
 
-    try {
-      setMsg(`⏳ Drafting ${p.name || p.id} → ${chosenSlot}...`);
-      await draftPick({
-        leagueId,
-        username,
-        playerId: p.id,
-        playerPosition: pos,
-        slot: chosenSlot,
-      });
-      setMsg(`✅ Drafted ${p.name || p.id} to ${chosenSlot}`);
-    } catch (e) {
-      console.error(e);
-      setMsg(`❌ ${e.message || "Draft failed"}`);
-    }
+  if (order.length === 0) {
+    return <p style={{ opacity: 0.7 }}>No draft order yet.</p>;
   }
 
-  if (loading) return <p>Loading draft board…</p>;
-
   return (
-    <div style={{ marginTop: 16 }}>
-      <h3>Draft Board</h3>
-      <p style={{ marginTop: -6, opacity: 0.8 }}>
-        Draft status: <strong>{draftStatus}</strong>
-        {!draftingEnabled && " — drafting is disabled until the draft is LIVE"}
-      </p>
-      <p style={{ marginTop: -6, opacity: 0.8 }}>
-        {turnText}
-        {myTurn ? " — Your turn" : ""}
-      </p>
-      {msg && <p>{msg}</p>}
+    <div style={{ marginBottom: 16 }}>
+      {/* Team order bar */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+        {order.map((u, idx) => (
+          <span
+            key={u + idx}
+            style={{
+              padding: "4px 8px",
+              borderRadius: 6,
+              border: "1px solid #ddd",
+              background: idx === currentIdx ? "#111" : "#fff",
+              color: idx === currentIdx ? "#fff" : "#111",
+              fontWeight: idx === currentIdx ? 700 : 500
+            }}
+          >
+            {u}{idx === currentIdx ? " • On the clock" : ""}
+          </span>
+        ))}
+      </div>
 
-      {!players.length ? (
-        <p>
-          No players found. Add to global <code>players</code> or{" "}
-          <code>leagues/{leagueId}/players</code>.
-        </p>
-      ) : (
-        <ul style={{ listStyle: "none", padding: 0 }}>
-          {players.map((p) => {
-            const pos = p.position || p.pos || "";
-            const claimedBy = availability.get(p.id);
-            const mine = claimedBy && claimedBy === username;
+      {/* Board grid (snake) */}
+      <div style={{ overflowX: "auto", border: "1px solid #eee", borderRadius: 8 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}>
+          <thead>
+            <tr>
+              <th style={th}>Rnd</th>
+              {order.map((u, i) => (
+                <th key={u + i} style={th}>{u}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {Array.from({ length: totalRounds }).map((_, rIdx) => {
+              const roundNumber = rIdx + 1;
+              const snakeOrder = roundNumber % 2 === 1 ? order : [...order].reverse();
+              return (
+                <tr key={roundNumber}>
+                  <td style={{ ...td, fontWeight: 700 }}>#{roundNumber}</td>
+                  {snakeOrder.map((user, colIdx) => {
+                    const p = picksByRoundAndUser.get(roundNumber)?.get(user);
+                    const pl = p ? playersById.get(p.playerId) : null;
+                    const label = p ? (pl?.displayName || pl?.name || p.playerId) : "";
+                    return (
+                      <td key={user + colIdx} style={td}>
+                        {p ? (
+                          <div>
+                            <div style={{ fontWeight: 600 }}>{label}</div>
+                            <div style={{ fontSize: 12, opacity: 0.8 }}>
+                              {pl?.team || "—"} · {pl?.position || p.slot}
+                            </div>
+                          </div>
+                        ) : (
+                          <span style={{ opacity: 0.3 }}>—</span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
 
-            return (
-              <li
-                key={p.id}
-                style={{
-                  padding: 10,
-                  marginBottom: 8,
-                  border: "1px solid #ddd",
-                  borderRadius: 8,
-                  background: mine ? "#eefbf0" : claimedBy ? "#f8f9fb" : "#fff",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 12,
-                    alignItems: "center",
-                  }}
-                >
-                  <div>
-                    <strong>{p.name || p.id}</strong>{" "}
-                    <span style={{ opacity: 0.7 }}>
-                      ({String(pos).toUpperCase()}
-                      {p.team ? ` – ${p.team}` : ""})
-                    </span>
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>
-                      {claimedBy
-                        ? mine
-                          ? "You drafted this player"
-                          : `Drafted by ${claimedBy}`
-                        : "Available"}
-                    </div>
-                  </div>
-
-                  {!claimedBy && (
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      <select
-                        value={(slotByPlayer && slotByPlayer[p.id]) || ""}
-                        onChange={(e) =>
-                          setSlotByPlayer((s) => ({ ...(s || {}), [p.id]: e.target.value }))
-                        }
-                        style={{ padding: 8 }}
-                        disabled={!draftingEnabled || !myTurn}
-                      >
-                        <option value="">
-                          {draftingEnabled
-                            ? myTurn
-                              ? "Select slot"
-                              : "Waiting for your turn"
-                            : `Draft ${draftStatus}`}
-                        </option>
-                        {SLOTS.map((s) => (
-                          <option key={s} value={s}>
-                            {s}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        onClick={() => handleDraft(p)}
-                        style={{ padding: 8 }}
-                        disabled={!draftingEnabled || !myTurn}
-                      >
-                        Draft
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+      {/* Recent picks */}
+      {recentPicks.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Recent picks</div>
+          <ol style={{ margin: 0, paddingLeft: 18 }}>
+            {recentPicks.map((p, i) => {
+              const pl = playersById.get(p.playerId);
+              const label = pl?.displayName || pl?.name || p.playerId;
+              return (
+                <li key={i}>
+                  #{p.overall} · R{p.round}P{p.pickInRound} — <b>{p.username}</b> selected {label} ({p.slot})
+                </li>
+              );
+            })}
+          </ol>
+        </div>
       )}
     </div>
   );
 }
+
+const th = { textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" };
+const td = { borderBottom: "1px solid #f5f5f5", padding: "6px 4px", verticalAlign: "top" };
