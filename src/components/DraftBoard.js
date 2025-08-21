@@ -1,122 +1,95 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 // src/components/DraftBoard.js
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  listenLeague, projForWeek, autoPickBestAvailable, isMyTurn, canDraft, startDraft, endDraft
+} from "../lib/storage";
 
-/**
- * Shows: team order, current pointer, recent picks, and a board grid (rounds x teams).
- * Expects: league.draft = { order[], pointer, round, direction, totalRounds, picks[] }
- * picks items: { overall, round, pickInRound, username, playerId, slot, ts }
- */
 export default function DraftBoard({ league, playersById }) {
-  const draft = league?.draft || {};
-  const order = Array.isArray(draft.order) ? draft.order : [];
-  const totalRounds = draft.totalRounds || Math.max(1, order.length ? 15 : 1);
-  const currentIdx = Number.isInteger(draft.pointer) ? draft.pointer : 0;
+  const leagueId = league?.id;
+  const [liveLeague, setLiveLeague] = useState(league || null);
+  const [now, setNow] = useState(Date.now());
+  const tickRef = useRef(null);
 
-  const picksByRoundAndUser = useMemo(() => {
-    // Map: round -> username -> pick object
-    const map = new Map();
-    (draft.picks || []).forEach((p) => {
-      const r = p.round || 1;
-      if (!map.has(r)) map.set(r, new Map());
-      map.get(r).set(p.username, p);
-    });
-    return map;
-  }, [draft.picks]);
+  useEffect(() => {
+    if (!leagueId) return;
+    const un = listenLeague(leagueId, (lg) => setLiveLeague(lg));
+    return () => un && un();
+  }, [leagueId]);
 
-  const recentPicks = useMemo(() => {
-    const arr = (draft.picks || []).slice(-10);
-    return arr.reverse(); // latest first
-  }, [draft.picks]);
+  // local clock tick (500ms)
+  useEffect(() => {
+    tickRef.current = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(tickRef.current);
+  }, []);
 
-  if (order.length === 0) {
-    return <p style={{ opacity: 0.7 }}>No draft order yet.</p>;
+  const d = liveLeague?.draft || {};
+  const order = Array.isArray(d.order) ? d.order : [];
+  const onClock = order[Number(d.pointer) || 0];
+
+  const currentWeek = Number(liveLeague?.settings?.currentWeek || 1);
+  const msLeft = useMemo(() => {
+    if (!d?.deadline) return 0;
+    return Math.max(0, Number(d.deadline) - now);
+  }, [d?.deadline, now]);
+
+  // Autopick when expired (any client can do this; in test you’re single user anyway)
+  useEffect(() => {
+    if (!liveLeague?.id) return;
+    if (!canDraft(liveLeague)) return;
+    if (!d?.deadline) return;
+    if (msLeft > 0) return;
+
+    // deadline passed -> auto pick best available
+    (async () => {
+      await autoPickBestAvailable({ leagueId: liveLeague.id, currentWeek });
+    })();
+    // next deadline is written by draftPick()
+  }, [msLeft, d?.deadline, liveLeague?.id, currentWeek]);
+
+  const statusLine = useMemo(() => {
+    const rd = d.round || 1;
+    const tot = d.roundsTotal || 12;
+    const pointerName = onClock || "—";
+    if (d.status === "live") {
+      return `Round ${rd}/${tot} • On the clock: ${pointerName} • ${Math.ceil(msLeft/1000)}s`;
+    }
+    return `Draft status: ${d.status || "scheduled"}`;
+  }, [d.status, d.round, d.roundsTotal, onClock, msLeft]);
+
+  async function handleStart() {
+    await startDraft({ leagueId });
+  }
+  async function handleEnd() {
+    await endDraft({ leagueId });
   }
 
+  // Simple visual of order & pointer
   return (
-    <div style={{ marginBottom: 16 }}>
-      {/* Team order bar */}
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-        {order.map((u, idx) => (
-          <span
-            key={u + idx}
-            style={{
-              padding: "4px 8px",
-              borderRadius: 6,
-              border: "1px solid #ddd",
-              background: idx === currentIdx ? "#111" : "#fff",
-              color: idx === currentIdx ? "#fff" : "#111",
-              fontWeight: idx === currentIdx ? 700 : 500
-            }}
-          >
-            {u}{idx === currentIdx ? " • On the clock" : ""}
-          </span>
+    <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, marginBottom: 12 }}>
+      <div style={{ fontWeight: 700, marginBottom: 6 }}>Draft Board</div>
+      <div style={{ marginBottom: 8 }}>{statusLine}</div>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        {order.map((u, i) => (
+          <div key={u + i} style={{
+            padding: "6px 8px",
+            borderRadius: 6,
+            border: "1px solid #ddd",
+            background: i === (d.pointer || 0) ? "#111" : "#fff",
+            color: i === (d.pointer || 0) ? "#fff" : "#111"
+          }}>
+            {u}
+          </div>
         ))}
       </div>
 
-      {/* Board grid (snake) */}
-      <div style={{ overflowX: "auto", border: "1px solid #eee", borderRadius: 8 }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}>
-          <thead>
-            <tr>
-              <th style={th}>Rnd</th>
-              {order.map((u, i) => (
-                <th key={u + i} style={th}>{u}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {Array.from({ length: totalRounds }).map((_, rIdx) => {
-              const roundNumber = rIdx + 1;
-              const snakeOrder = roundNumber % 2 === 1 ? order : [...order].reverse();
-              return (
-                <tr key={roundNumber}>
-                  <td style={{ ...td, fontWeight: 700 }}>#{roundNumber}</td>
-                  {snakeOrder.map((user, colIdx) => {
-                    const p = picksByRoundAndUser.get(roundNumber)?.get(user);
-                    const pl = p ? playersById.get(p.playerId) : null;
-                    const label = p ? (pl?.displayName || pl?.name || p.playerId) : "";
-                    return (
-                      <td key={user + colIdx} style={td}>
-                        {p ? (
-                          <div>
-                            <div style={{ fontWeight: 600 }}>{label}</div>
-                            <div style={{ fontSize: 12, opacity: 0.8 }}>
-                              {pl?.team || "—"} · {pl?.position || p.slot}
-                            </div>
-                          </div>
-                        ) : (
-                          <span style={{ opacity: 0.3 }}>—</span>
-                        )}
-                      </td>
-                    );
-                  })}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Recent picks */}
-      {recentPicks.length > 0 && (
-        <div style={{ marginTop: 10 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>Recent picks</div>
-          <ol style={{ margin: 0, paddingLeft: 18 }}>
-            {recentPicks.map((p, i) => {
-              const pl = playersById.get(p.playerId);
-              const label = pl?.displayName || pl?.name || p.playerId;
-              return (
-                <li key={i}>
-                  #{p.overall} · R{p.round}P{p.pickInRound} — <b>{p.username}</b> selected {label} ({p.slot})
-                </li>
-              );
-            })}
-          </ol>
-        </div>
+      {d.status === "scheduled" && (
+        <button onClick={handleStart} style={{ padding: "8px 12px" }}>Start Draft</button>
+      )}
+      {d.status === "live" && (
+        <button onClick={handleEnd} style={{ padding: "8px 12px" }}>End Draft</button>
       )}
     </div>
   );
 }
-
-const th = { textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" };
-const td = { borderBottom: "1px solid #f5f5f5", padding: "6px 4px", verticalAlign: "top" };
