@@ -2,6 +2,11 @@ import React, { useEffect, useState } from "react";
 import { initPi, piLogin } from "./index";
 import Leagues from "./components/Leagues";
 import LeagueHome from "./components/LeagueHome";
+import PlayerNews from "./components/PlayerNews";
+import { useState } from "react";
+// ...
+const [newsName, setNewsName] = useState(null);
+
 
 export default function App() {
   const [me, setMe] = useState(null);
@@ -50,18 +55,13 @@ export default function App() {
         Logged in as <strong>{me}</strong>
       </div>
 
-      {!openLeague ? (
-        <Leagues
-          username={me}
-          onOpenLeague={(l) => setOpenLeague(l)}
-        />
-      ) : (
-        <LeagueHome
-          league={openLeague}
-          me={me}
-          onBack={() => setOpenLeague(null)}
-        />
-      )}
+   {!openLeague ? (
+  <Leagues username={me} onOpenLeague={setOpenLeague} />
+) : (
+  <LeagueHome league={openLeague} me={me} onBack={() => setOpenLeague(null)} onShowNews={setNewsName} />
+)}
+{newsName && <PlayerNews name={newsName} onClose={() => setNewsName(null)} />}
+
     </div>
   );
 }
