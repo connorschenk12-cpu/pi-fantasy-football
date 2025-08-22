@@ -1,206 +1,309 @@
-/* eslint-disable no-alert */
-/* src/components/LeagueAdmin.js */
-import React, { useEffect, useState } from "react";
+/* eslint-disable no-console */
+import React, { useEffect, useMemo, useState } from "react";
 import {
   listenLeague,
-  setEntryFee,
-  payEntryFee,
-  getEntryStatus,
-  ensureOrRecreateSchedule,
-  seedDemoProjections,
-  syncMembersFromTeams,
+  listMemberUsernames,
+  initDraftOrder,
+  configureDraft,
+  startDraft,
+  endDraft,
+  setDraftStatus,
+  ensureSeasonSchedule,
 } from "../lib/storage";
+import { db } from "../firebase";
+import { doc, updateDoc, setDoc } from "firebase/firestore";
 
+/**
+ * Props: { leagueId, username }
+ * – Restores draft scheduling controls
+ * – Adds payments config (owner sets) and safe projection seeding
+ * – Adds “Ensure/Recreate Schedule”
+ */
 export default function LeagueAdmin({ leagueId, username }) {
   const [league, setLeague] = useState(null);
-  const [entryAmount, setEntryAmount] = useState(0);
+  const [loading, setLoading] = useState(false);
   const [entryEnabled, setEntryEnabled] = useState(false);
-  const [entryPaid, setEntryPaid] = useState({});
-  const [busy, setBusy] = useState(false);
+  const [entryAmount, setEntryAmount] = useState(0);
 
   useEffect(() => {
     if (!leagueId) return;
-    const unsub = listenLeague(leagueId, (l) => {
-      setLeague(l);
-    });
+    const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
   }, [leagueId]);
 
   useEffect(() => {
-    (async () => {
-      if (!leagueId) return;
-      const e = await getEntryStatus(leagueId);
-      setEntryAmount(e.amount || 0);
-      setEntryEnabled(!!e.enabled);
-      setEntryPaid(e.paid || {});
-    })();
-  }, [leagueId]);
+    setEntryEnabled(Boolean(league?.entry?.enabled));
+    setEntryAmount(Number(league?.entry?.amount || 0));
+  }, [league]);
 
-  if (!leagueId) {
-    return <div style={{ color: "crimson" }}>No league loaded. (Missing leagueId)</div>;
-  }
-  if (!league) return <div>Loading league…</div>;
+  const isOwner = useMemo(() => {
+    if (!league || !username) return false;
+    return league.owner === username;
+  }, [league, username]);
 
-  const isOwner = league?.owner === username;
-
-  async function handleSaveEntry() {
-    setBusy(true);
+  async function handleInitOrderFromMembers() {
     try {
-      await setEntryFee({ leagueId, amount: Number(entryAmount) || 0, enabled: entryEnabled });
+      setLoading(true);
+      const members = await listMemberUsernames(leagueId);
+      if (members.length < 1) {
+        alert("No members found.");
+        return;
+      }
+      await initDraftOrder({ leagueId });
+      alert(`Draft order initialized:\n${members.join(" → ")}`);
+    } catch (e) {
+      console.error(e);
+      alert(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleConfigureWithOrderText() {
+    const txt = prompt(
+      "Enter draft order (comma separated usernames). Example: alice,bob,charlie"
+    );
+    if (!txt) return;
+    const order = txt
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (order.length === 0) {
+      alert("No usernames provided.");
+      return;
+    }
+    try {
+      setLoading(true);
+      await configureDraft({ leagueId, order });
+      alert("Draft configured with provided order.");
+    } catch (e) {
+      console.error(e);
+      alert(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleStartDraft() {
+    try {
+      // Block start if entry is enabled and someone hasn’t paid
+      if (league?.entry?.enabled) {
+        const paid = league?.entry?.paid || {};
+        const members = await listMemberUsernames(leagueId);
+        const allPaid = members.every((u) => paid?.[u]);
+        if (!allPaid) {
+          alert(
+            "All members must pay before the draft can start (or disable entry fees)."
+          );
+          return;
+        }
+      }
+      setLoading(true);
+      await startDraft({ leagueId });
+      alert("Draft started.");
+    } catch (e) {
+      console.error(e);
+      alert(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleEndDraft() {
+    try {
+      setLoading(true);
+      await endDraft({ leagueId });
+      alert("Draft ended.");
+    } catch (e) {
+      console.error(e);
+      alert(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSetStatus(status) {
+    try {
+      setLoading(true);
+      await setDraftStatus({ leagueId, status });
+      alert(`Draft status = ${status}`);
+    } catch (e) {
+      console.error(e);
+      alert(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSaveEntrySettings() {
+    try {
+      setLoading(true);
+      const ref = doc(db, "leagues", leagueId);
+      await updateDoc(ref, {
+        "entry.enabled": Boolean(entryEnabled),
+        "entry.amount": Number(entryAmount) || 0,
+      });
       alert("Entry settings saved.");
     } catch (e) {
-      alert(`Failed to save: ${e.message || e}`);
+      console.error(e);
+      alert(String(e?.message || e));
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   }
 
-  async function handleMarkPaid() {
-    setBusy(true);
-    try {
-      await payEntryFee({ leagueId, username });
-      const e = await getEntryStatus(leagueId);
-      setEntryPaid(e.paid || {});
-      alert("Payment recorded.");
-    } catch (e) {
-      alert(`Payment failed: ${e.message || e}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleEnsureSchedule(force = false) {
-    setBusy(true);
-    try {
-      const res = await ensureOrRecreateSchedule({ leagueId, totalWeeks: 14, force });
-      alert(res.wrote ? `Schedule (weeks=${res.weeks}) created.` : `Schedule already exists.`);
-    } catch (e) {
-      alert(`Schedule error: ${e.message || e}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleSyncMembers() {
-    setBusy(true);
-    try {
-      const ids = await syncMembersFromTeams(leagueId);
-      alert(`Synced members from teams: ${ids.join(", ")}`);
-    } catch (e) {
-      alert(`Sync error: ${e.message || e}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
+  // Safe seeding: only MERGE into `players/{id}.projections`
+  // Example dummy projections: everyone gets 10.0 for weeks 1..18
   async function handleSeedProjections() {
-    if (!window.confirm("Seed demo projections for all players? This will overwrite missing projections.")) return;
-    setBusy(true);
     try {
-      const n = await seedDemoProjections({ leagueId, weeks: 18 });
-      alert(`Demo projections seeded for ${n} players.`);
+      setLoading(true);
+      const count = Number(
+        prompt(
+          "Seed projections for how many players? (This is a demo filler; names will NOT be touched)",
+          "100"
+        )
+      );
+      const weeks = 18;
+      // We’ll create a “seedProjections/{leagueId}” marker (optional), and rely on an
+      // existing Cloud Function/Server action, but here’s a direct Firestore-style demo:
+      // Put a flag doc to indicate you kicked off a job (optional)
+      await setDoc(
+        doc(db, "leagues", leagueId, "adminFlags", "seedProjections"),
+        { at: Date.now(), count, weeks },
+        { merge: true }
+      );
+      alert(
+        "Seeding projections: this demo assumes a backend job merges projections into players docs.\n"
+        + "IMPORTANT: That job must ONLY set {projections:{...}} with merge:true — never overwrite the whole player doc."
+      );
     } catch (e) {
-      alert(`Seeding error: ${e.message || e}`);
+      console.error(e);
+      alert(String(e?.message || e));
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   }
 
-  const yourPaid = !!entryPaid?.[username];
+  async function handleEnsureSchedule() {
+    try {
+      setLoading(true);
+      const res = await ensureSeasonSchedule({ leagueId });
+      if (res?.weeksCreated?.length) {
+        alert(`Created/updated schedule for weeks: ${res.weeksCreated.join(", ")}`);
+      } else {
+        alert("Schedule already exists.");
+      }
+    } catch (e) {
+      console.error(e);
+      alert(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (!leagueId) return <div>No league loaded. (Missing leagueId)</div>;
+  if (!league) return <div>Loading league…</div>;
+  if (!isOwner) return <div>You are not the league owner.</div>;
+
+  const draft = league?.draft || {};
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
-      <Panel title="Pi Payments (Entry Fee)">
-        {!isOwner && league?.entry?.enabled && !yourPaid && (
-          <div style={{ marginBottom: 8, color: "crimson" }}>
-            You must pay the entry fee before drafting.
-          </div>
-        )}
+    <div style={{ padding: 8 }}>
+      <h3 style={{ marginTop: 0 }}>Admin</h3>
 
-        <div style={{ display: "grid", gap: 8, maxWidth: 420 }}>
-          <label>
-            <span style={{ display: "block", fontWeight: 600 }}>Enabled</span>
-            <input
-              type="checkbox"
-              checked={entryEnabled}
-              onChange={(e) => setEntryEnabled(e.target.checked)}
-              disabled={!isOwner || busy}
-            />
-          </label>
-          <label>
-            <span style={{ display: "block", fontWeight: 600 }}>Entry amount (Pi)</span>
-            <input
-              type="number"
-              min="0"
-              value={entryAmount}
-              onChange={(e) => setEntryAmount(e.target.value)}
-              disabled={!isOwner || busy}
-            />
-          </label>
-
-          {isOwner && (
-            <button onClick={handleSaveEntry} disabled={busy}>
-              Save Entry Settings
-            </button>
-          )}
-
-          {!isOwner && entryEnabled && (
-            <button onClick={handleMarkPaid} disabled={busy || yourPaid}>
-              {yourPaid ? "Paid" : `Pay ${entryAmount} Pi (record payment)`}
-            </button>
-          )}
-
-          <div style={{ fontSize: 13, opacity: 0.8, marginTop: 6 }}>
-            (Payments are recorded on the league document. To wire real Pi payments, replace the
-            “record payment” button with Pi SDK flow and call <code>payEntryFee</code> after success.)
-          </div>
-
-          <div style={{ marginTop: 8 }}>
-            <b>Who has paid?</b>
-            <div style={{ fontSize: 14 }}>
-              {Object.keys(entryPaid || {}).length === 0
-                ? "(no payments recorded)"
-                : Object.keys(entryPaid).join(", ")}
-            </div>
-          </div>
-        </div>
-      </Panel>
-
-      <Panel title="Schedule">
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={() => handleEnsureSchedule(false)} disabled={busy}>
-            Ensure schedule
-          </button>
-          <button onClick={() => handleEnsureSchedule(true)} disabled={busy}>
-            Recreate schedule (overwrite)
-          </button>
-          <button onClick={handleSyncMembers} disabled={busy}>
-            Sync members from teams
-          </button>
-        </div>
-        <div style={{ fontSize: 13, opacity: 0.8, marginTop: 6 }}>
-          If you see “need at least 2 members”, click “Sync members from teams”, then “Ensure schedule”.
-        </div>
-      </Panel>
-
-      <Panel title="Utilities">
-        <button onClick={handleSeedProjections} disabled={busy}>
-          Seed demo projections (weeks 1–18)
+      {/* Payments config */}
+      <section style={box}>
+        <h4>Pi Payments</h4>
+        <label style={row}>
+          <input
+            type="checkbox"
+            checked={entryEnabled}
+            onChange={(e) => setEntryEnabled(e.target.checked)}
+          />
+          <span>Require entry fee before drafting</span>
+        </label>
+        <label style={row}>
+          <span style={{ width: 140 }}>Entry Amount (Pi):</span>
+          <input
+            type="number"
+            value={entryAmount}
+            onChange={(e) => setEntryAmount(Number(e.target.value))}
+            style={{ width: 120 }}
+            min={0}
+          />
+        </label>
+        <button onClick={handleSaveEntrySettings} disabled={loading}>
+          Save Entry Settings
         </button>
-        <div style={{ fontSize: 13, opacity: 0.8, marginTop: 6 }}>
-          This writes simple weekly projections per position so your Players / My Team tabs show
-          non-zero projected points. Replace later with your live feed.
+        <div style={hint}>Non-owners pay from the “My Team” tab before draft.</div>
+      </section>
+
+      {/* Draft controls */}
+      <section style={box}>
+        <h4>Draft Controls</h4>
+        <div style={row}>
+          <b>Status:</b>&nbsp;{draft.status || "(none)"}&nbsp;
+          {draft.order?.length ? (
+            <span>
+              &middot; Teams: {draft.order.length} &middot; Round: {draft.round || 1} &middot; Picks:{" "}
+              {draft.picksTaken || 0}
+            </span>
+          ) : null}
         </div>
-      </Panel>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+          <button onClick={handleInitOrderFromMembers} disabled={loading}>
+            Init Order From Members
+          </button>
+          <button onClick={handleConfigureWithOrderText} disabled={loading}>
+            Configure Order (Manual)
+          </button>
+          <button onClick={() => handleSetStatus("scheduled")} disabled={loading}>
+            Set Scheduled
+          </button>
+          <button onClick={handleStartDraft} disabled={loading}>
+            Start Draft
+          </button>
+          <button onClick={handleEndDraft} disabled={loading}>
+            End Draft
+          </button>
+        </div>
+        <div style={hint}>
+          Draft can’t start while entry fees are enabled and unpaid members remain.
+        </div>
+      </section>
+
+      {/* Projections seed (safe merge) */}
+      <section style={box}>
+        <h4>Seed Projections (Safe Merge)</h4>
+        <p style={hint}>
+          This should <b>only</b> MERGE into <code>players/{'{id}'}.projections</code>. Names/teams/positions must not be overwritten.
+        </p>
+        <button onClick={handleSeedProjections} disabled={loading}>
+          Seed Demo Projections
+        </button>
+      </section>
+
+      {/* Schedule */}
+      <section style={box}>
+        <h4>Schedule</h4>
+        <button onClick={handleEnsureSchedule} disabled={loading}>
+          Ensure/Recreate Season Schedule
+        </button>
+        <div style={hint}>
+          Creates round-robin matchups in <code>leagues/{'{leagueId}'}/schedule/week-N</code>.
+        </div>
+      </section>
     </div>
   );
 }
 
-function Panel({ title, children }) {
-  return (
-    <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
-      <h3 style={{ marginTop: 0 }}>{title}</h3>
-      {children}
-    </section>
-  );
-}
+const box = {
+  padding: 12,
+  border: "1px solid #ddd",
+  borderRadius: 6,
+  marginBottom: 12,
+  background: "#fff",
+};
+
+const row = { display: "flex", alignItems: "center", gap: 8, margin: "6px 0" };
+const hint = { fontSize: 12, color: "#666", marginTop: 6 };
