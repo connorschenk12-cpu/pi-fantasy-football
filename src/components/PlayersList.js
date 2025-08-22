@@ -1,81 +1,120 @@
 /* eslint-disable no-console */
 import React, { useEffect, useMemo, useState } from "react";
-import { listPlayers, projForWeek, opponentForWeek } from "../lib/storage";
+import {
+  listPlayers,
+  playerDisplay,
+  projForWeek,
+  opponentForWeek,
+} from "../lib/storage";
 
-export default function PlayersList({ leagueId, currentWeek = 1 }) {
+export default function PlayersList({ leagueId, currentWeek }) {
   const [players, setPlayers] = useState([]);
-  const [week, setWeek] = useState(currentWeek);
-  const [teamFilter, setTeamFilter] = useState(""); // NFL team filter like KC, DAL…
+  const [q, setQ] = useState("");
+  const [pos, setPos] = useState("ALL");
+  const [teamFilter, setTeamFilter] = useState("ALL");
+  const [week, setWeek] = useState(Number(currentWeek || 1));
 
   useEffect(() => {
-    (async () => { setPlayers(await listPlayers({ leagueId })); })();
+    let mounted = true;
+    (async () => {
+      try {
+        const arr = await listPlayers({ leagueId });
+        if (mounted) setPlayers(arr || []);
+      } catch (e) {
+        console.error("listPlayers error:", e);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
   }, [leagueId]);
 
-  const teamsList = useMemo(() => {
+  useEffect(() => {
+    setWeek(Number(currentWeek || 1));
+  }, [currentWeek]);
+
+  const teams = useMemo(() => {
     const s = new Set();
-    players.forEach(p => { if (p.team) s.add(p.team); });
-    return ["", ...Array.from(s).sort()];
+    (players || []).forEach((p) => {
+      if (p.team) s.add(p.team);
+    });
+    return ["ALL", ...Array.from(s).sort()];
   }, [players]);
 
-  const enhanced = useMemo(() => {
-    const arr = players.map(p => {
-      const wk = projForWeek(p, week);
-      // crude season total: sum of all available projection weeks on the doc
-      let season = 0;
-      if (p.projections && typeof p.projections === "object") {
-        Object.values(p.projections).forEach(v => season += Number(v||0));
-      }
-      const opp = opponentForWeek(p, week);
-      return { ...p, weekProj: wk, seasonProj: Math.round(season*100)/100, opp };
-    });
-    return arr
-      .filter(p => (teamFilter ? String(p.team||"") === teamFilter : true))
-      .sort((a,b)=> b.weekProj - a.weekProj);
-  }, [players, week, teamFilter]);
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return (players || [])
+      .filter((p) => (pos === "ALL" ? true : String(p.position || "").toUpperCase() === pos))
+      .filter((p) => (teamFilter === "ALL" ? true : String(p.team || "") === teamFilter))
+      .filter((p) => {
+        if (!needle) return true;
+        const name = playerDisplay(p).toLowerCase();
+        const idStr = String(p.id || "").toLowerCase();
+        return name.includes(needle) || idStr.includes(needle);
+      })
+      .sort((a, b) => (projForWeek(b, week) - projForWeek(a, week)));
+  }, [players, q, pos, teamFilter, week]);
 
   return (
     <div>
-      <div style={{ display:"flex", gap:8, marginBottom:8 }}>
-        <label>Week:&nbsp;
-          <select value={week} onChange={e=>setWeek(Number(e.target.value))}>
-            {Array.from({length:18},(_,i)=>i+1).map(w=>(
-              <option key={w} value={w}>Week {w}</option>
-            ))}
-          </select>
-        </label>
-        <label>Team:&nbsp;
-          <select value={teamFilter} onChange={e=>setTeamFilter(e.target.value)}>
-            {teamsList.map(t => <option key={t||"ALL"} value={t}>{t || "All teams"}</option>)}
-          </select>
-        </label>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        <input
+          placeholder="Search players by name or id…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          style={{ flex: "1 1 240px" }}
+        />
+        <select value={pos} onChange={(e) => setPos(e.target.value)}>
+          <option value="ALL">All</option>
+          <option value="QB">QB</option>
+          <option value="RB">RB</option>
+          <option value="WR">WR</option>
+          <option value="TE">TE</option>
+          <option value="K">K</option>
+          <option value="DEF">DEF</option>
+        </select>
+        <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}>
+          {teams.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+        <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
+          {Array.from({ length: 18 }).map((_, i) => (
+            <option key={i + 1} value={i + 1}>
+              Week {i + 1}
+            </option>
+          ))}
+        </select>
       </div>
 
-      <table style={{ width:"100%", borderCollapse:"collapse" }}>
+      <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
         <thead>
-          <tr>
-            <th align="left">Name</th>
-            <th align="left">Pos</th>
-            <th align="left">NFL</th>
-            <th align="left">Opp</th>
-            <th align="right">Week Proj</th>
-            <th align="right">Season Proj</th>
+          <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+            <th>Name</th>
+            <th>Pos</th>
+            <th>Team</th>
+            <th>Opp</th>
+            <th>Proj (W{week})</th>
           </tr>
         </thead>
         <tbody>
-          {enhanced.map(p=>(
-            <tr key={p.id} style={{ borderTop:"1px solid #eee" }}>
-              <td>{p.name || p.fullName || p.playerName || p.id}</td>
-              <td>{p.position}</td>
+          {filtered.map((p) => (
+            <tr key={p.id} style={{ borderBottom: "1px solid #f1f1f1" }}>
+              <td>{playerDisplay(p)}</td>
+              <td>{p.position || "-"}</td>
               <td>{p.team || "-"}</td>
-              <td>{p.opp || "-"}</td>
-              <td align="right">{p.weekProj?.toFixed(2)}</td>
-              <td align="right">{p.seasonProj?.toFixed(2)}</td>
+              <td>{opponentForWeek(p, week) || "-"}</td>
+              <td>{projForWeek(p, week).toFixed(1)}</td>
             </tr>
           ))}
-          {!enhanced.length && (
-            <tr><td colSpan={6} style={{ padding:12, textAlign:"center" }}>
-              No players found. Add players to Firestore.
-            </td></tr>
+          {filtered.length === 0 && (
+            <tr>
+              <td colSpan={5} style={{ color: "#999", paddingTop: 12 }}>
+                No players match your filters. Add players to Firestore or clear filters.
+              </td>
+            </tr>
           )}
         </tbody>
       </table>
