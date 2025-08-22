@@ -1,86 +1,61 @@
 /* eslint-disable no-console */
 import React, { useEffect, useState } from "react";
-import {
-  listenLeague,
-  listTeams,
-  listSeasonSchedule,
-  playerDisplay,
-  listPlayersMap,
-} from "../lib/storage";
+import { listTeams, getScheduleWeek, ensureOrRecreateSchedule } from "../lib/storage";
 
 export default function LeagueTab({ leagueId }) {
-  const [league, setLeague] = useState(null);
   const [teams, setTeams] = useState([]);
-  const [schedule, setSchedule] = useState([]);
-  const [playersMap, setPlayersMap] = useState(new Map());
+  const [weeks, setWeeks] = useState([1,2,3,4,5,6,7,8,9,10,11,12,13,14]);
+  const [weekView, setWeekView] = useState(1);
+  const [schedule, setSchedule] = useState({ week: 1, matchups: [] });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
 
   useEffect(() => {
-    if (!leagueId) return;
-    const unsub = listenLeague(leagueId, setLeague);
-    (async () => {
-      setTeams(await listTeams(leagueId));
-      setSchedule(await listSeasonSchedule(leagueId));
-      setPlayersMap(await listPlayersMap({ leagueId }));
-    })();
-    return () => unsub && unsub();
+    (async () => { setTeams(await listTeams(leagueId)); })();
   }, [leagueId]);
 
-  if (!leagueId) return <div>No league.</div>;
-  if (!league) return <div>Loading league…</div>;
+  useEffect(() => {
+    (async () => { setSchedule(await getScheduleWeek(leagueId, weekView)); })();
+  }, [leagueId, weekView]);
 
-  const standings = league?.standings || {};
+  async function onEnsureSchedule() {
+    try {
+      setBusy(true); setMsg("");
+      const wrote = await ensureOrRecreateSchedule({ leagueId, totalWeeks: 14 });
+      setMsg(`Schedule generated/updated: ${wrote} weeks.`);
+      setSchedule(await getScheduleWeek(leagueId, weekView));
+    } catch (e) {
+      console.error(e); setMsg(String(e?.message || e));
+    } finally { setBusy(false); }
+  }
 
   return (
     <div>
-      <h3>League Overview</h3>
+      <div style={{ marginBottom: 10 }}>
+        <button disabled={busy} onClick={onEnsureSchedule}>Ensure / Recreate Schedule</button>
+        {msg && <span style={{ marginLeft: 8 }}>{msg}</span>}
+      </div>
 
-      <section style={{ marginBottom: 16 }}>
-        <h4>Teams & Records</h4>
-        <table border="1" cellPadding="6">
-          <thead>
-            <tr>
-              <th>Team</th>
-              <th>W</th>
-              <th>L</th>
-              <th>T</th>
-              <th>PF</th>
-              <th>PA</th>
-            </tr>
-          </thead>
-          <tbody>
-            {teams.map(t => {
-              const rec = standings[t.id] || { wins:0, losses:0, ties:0, pointsFor:0, pointsAgainst:0 };
-              return (
-                <tr key={t.id}>
-                  <td>{t.name || t.id}</td>
-                  <td>{rec.wins || 0}</td>
-                  <td>{rec.losses || 0}</td>
-                  <td>{rec.ties || 0}</td>
-                  <td>{rec.pointsFor || 0}</td>
-                  <td>{rec.pointsAgainst || 0}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </section>
+      <h3>Teams</h3>
+      <ul>
+        {teams.map(t => <li key={t.id}>{t.id} {t.name ? `– ${t.name}` : ""}</li>)}
+      </ul>
 
-      <section>
-        <h4>Full Season Schedule</h4>
-        {schedule.length === 0 && <div>No schedule yet.</div>}
-        {schedule.map(weekDoc => (
-          <div key={weekDoc.week} style={{ marginBottom: 12 }}>
-            <b>Week {weekDoc.week}</b>
-            <ul>
-              {(weekDoc.matchups || []).map((m, i) => (
-                <li key={i}>
-                  {m.home} vs {m.away}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </section>
+      <h3>Schedule</h3>
+      <label>Week:&nbsp;</label>
+      <select value={weekView} onChange={(e)=>setWeekView(Number(e.target.value))}>
+        {weeks.map(w => <option key={w} value={w}>Week {w}</option>)}
+      </select>
+
+      {schedule?.matchups?.length ? (
+        <ul style={{ marginTop: 10 }}>
+          {schedule.matchups.map((m, i)=>(
+            <li key={i}>{m.home} vs {m.away}</li>
+          ))}
+        </ul>
+      ) : (
+        <p style={{ marginTop: 10 }}>No matchups scheduled for week {weekView}.</p>
+      )}
     </div>
   );
 }
