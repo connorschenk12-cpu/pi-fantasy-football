@@ -1,87 +1,90 @@
-/* eslint-disable react-hooks/exhaustive-deps */
+/* eslint-disable no-console */
 // src/App.js
 import React, { useEffect, useState } from "react";
 import Leagues from "./components/Leagues";
 import LeagueHome from "./components/LeagueHome";
-import PlayerNews from "./components/PlayerNews";
-import DevPanel from "./components/DevPanel";
+
+/**
+ * Minimal Pi auth bootstrap:
+ * - Tries to init window.Pi if present (Pi Browser)
+ * - Falls back to username only auth
+ * - Stores user in both React state and window.__PI_USER
+ */
+async function piLoginUsernameOnly() {
+  if (typeof window === "undefined") return null;
+  const Pi = window.Pi;
+  if (!Pi) {
+    console.warn("Pi SDK not found. Are you in Pi Browser?");
+    return null;
+  }
+  try {
+    // If you need sandbox: Pi.init({ appId: "YOUR_APP_ID", version: "2.0", sandbox: true });
+    if (!Pi.initialized) {
+      Pi.init({ version: "2.0" });
+    }
+    const scopes = ["username"];
+    const auth = await Pi.authenticate(scopes, () => ({}));
+    const username = auth?.user?.username || null;
+    if (!username) return null;
+    return { username };
+  } catch (e) {
+    console.error("Pi auth failed:", e);
+    return null;
+  }
+}
 
 export default function App() {
-  const [me, setMe] = useState(null);
-  const [status, setStatus] = useState("init"); // init | ready | error
-  const [error, setError] = useState(null);
-  const [openLeague, setOpenLeague] = useState(null);
-  const [newsName, setNewsName] = useState(null);
+  const [username, setUsername] = useState(null);
+  const [leagueId, setLeagueId] = useState(null);
 
+  // 1) Try cached user from previous page
   useEffect(() => {
-    try {
-      if (!window.Pi) {
-        setStatus("error");
-        setError("Pi SDK not found. Open in Pi Browser.");
-        return;
-      }
-      window.Pi.init({ version: "2.0", sandbox: true });
-      setStatus("ready");
-    } catch (e) {
-      setStatus("error");
-      setError(e.message || String(e));
-    }
+    const cached = (typeof window !== "undefined" && window.__PI_USER) || null;
+    if (cached?.username) setUsername(cached.username);
   }, []);
 
-  async function login() {
-    try {
-      if (!window.Pi) throw new Error("Pi SDK not available");
-      const scopes = ["username"];
-      const auth = await window.Pi.authenticate(scopes);
-      const uname = auth?.user?.username || null;
-      if (!uname) throw new Error("No username returned");
-      setMe(uname);
-    } catch (e) {
-      alert(e.message || "Login failed");
-    }
-  }
+  // 2) If missing, attempt Pi auth (Pi Browser)
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      if (username) return;
+      const u = await piLoginUsernameOnly();
+      if (mounted && u?.username) {
+        window.__PI_USER = u; // cache for other screens
+        setUsername(u.username);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [username]);
 
-  if (status === "init") return <div style={{ padding: 16 }}>Loading Pi SDK…</div>;
-  if (status === "error") {
+  // Render state
+  if (!username) {
     return (
-      <div style={{ padding: 16 }}>
-        <h3>App Error</h3>
-        <p>{error}</p>
-        <p style={{ opacity: 0.7 }}>Open this app inside the Pi Browser sandbox.</p>
+      <div style={{ padding: 12 }}>
+        <h3>Loading Pi user…</h3>
+        <div style={{ fontSize: 13, color: "#666" }}>
+          If this never finishes, open this app in <b>Pi Browser</b> and log in.
+        </div>
       </div>
     );
   }
 
   return (
-    <div style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-        <h2 style={{ margin: 0 }}>Pi Fantasy Football</h2>
-        <div>
-          {!me ? (
-            <button onClick={login} style={{ padding: "8px 12px" }}>Login with Pi</button>
-          ) : (
-            <span>Signed in as <b>{me}</b></span>
-          )}
-        </div>
-      </header>
-
-      {/* Dev tools to simulate users & draft in sandbox */}
-      <DevPanel me={me} setMe={setMe} league={openLeague} onLeagueUpdate={() => {}} />
-
-      {!me ? (
-        <p>Please sign in with Pi to continue.</p>
-      ) : !openLeague ? (
-        <Leagues username={me} onOpenLeague={setOpenLeague} />
+    <div style={{ padding: 12 }}>
+      {!leagueId ? (
+        <Leagues
+          username={username}
+          onOpenLeague={(id) => setLeagueId(id)}
+        />
       ) : (
         <LeagueHome
-          league={openLeague}
-          me={me}
-          onBack={() => setOpenLeague(null)}
-          onShowNews={setNewsName}
+          leagueId={leagueId}
+          username={username}
+          onBack={() => setLeagueId(null)}
         />
       )}
-
-      {newsName && <PlayerNews name={newsName} onClose={() => setNewsName(null)} />}
     </div>
   );
 }
