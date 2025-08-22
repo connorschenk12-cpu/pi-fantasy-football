@@ -13,6 +13,7 @@ import {
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
 import LeagueAdmin from "./LeagueAdmin";
+import LeagueTab from "./LeagueTab";
 
 /**
  * Props:
@@ -23,18 +24,18 @@ import LeagueAdmin from "./LeagueAdmin";
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
-  const [tab, setTab] = useState("team"); // team | players | draft | admin
+  const [tab, setTab] = useState("team"); // team | players | draft | league | admin
   const [playersById, setPlayersById] = useState({});
   const currentWeek = Number(league?.settings?.currentWeek || 1);
 
-  // Listen to league doc
+  // Listen to league
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
   }, [leagueId]);
 
-  // Ensure team + listen to my team doc
+  // Ensure team + listen to my team
   useEffect(() => {
     let unsub = null;
     (async () => {
@@ -49,7 +50,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players once and build a lookup map
+  // Load players once (for nice labels everywhere)
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -75,8 +76,9 @@ export default function LeagueHome({ leagueId, username, onBack }) {
 
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
+  const wins = Number(team?.wins || 0);
+  const losses = Number(team?.losses || 0);
 
-  // Helpers to render nicer labels
   const labelOf = (playerId) => {
     if (!playerId) return "(empty)";
     const p = playersById[playerId];
@@ -87,7 +89,6 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return `${name}${pos ? ` · ${pos}` : ""}${tm ? ` · ${tm}` : ""}`;
   };
 
-  // Move bench -> starter slot
   const handleBenchToSlot = async (playerId, slot) => {
     try {
       await moveToStarter({ leagueId, username, playerId, slot });
@@ -96,7 +97,6 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       alert(String(e?.message || e));
     }
   };
-  // Move starter slot -> bench
   const handleSlotToBench = async (slot) => {
     try {
       await moveToBench({ leagueId, username, slot });
@@ -105,6 +105,9 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       alert(String(e?.message || e));
     }
   };
+
+  const draftStatus = league?.draft?.status || "scheduled";
+  const showDraftTab = draftStatus !== "done"; // HIDE once draft is complete
 
   return (
     <div>
@@ -115,9 +118,12 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       <h2>{league?.name || leagueId}</h2>
 
       <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
-        <TabButton label="My Team"   active={tab === "team"}   onClick={() => setTab("team")} />
+        <TabButton label="My Team"   active={tab === "team"}    onClick={() => setTab("team")} />
         <TabButton label="Players"   active={tab === "players"} onClick={() => setTab("players")} />
-        <TabButton label="Draft"     active={tab === "draft"}   onClick={() => setTab("draft")} />
+        {showDraftTab && (
+          <TabButton label="Draft"   active={tab === "draft"}   onClick={() => setTab("draft")} />
+        )}
+        <TabButton label="League"    active={tab === "league"}  onClick={() => setTab("league")} />
         {isOwner && (
           <TabButton label="Admin"   active={tab === "admin"}   onClick={() => setTab("admin")} />
         )}
@@ -126,6 +132,10 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       {/* TEAM TAB */}
       {tab === "team" && (
         <div>
+          <div style={{ marginBottom: 8, color: "#555" }}>
+            Record: <b>{wins}-{losses}</b>
+          </div>
+
           <h3>Starters</h3>
           <ul style={{ listStyle: "none", padding: 0 }}>
             {ROSTER_SLOTS.map((s) => {
@@ -178,13 +188,18 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       )}
 
       {/* DRAFT TAB */}
-      {tab === "draft" && (
+      {tab === "draft" && showDraftTab && (
         <DraftBoard
           leagueId={leagueId}
           username={username}
           currentWeek={currentWeek}
-          playersById={playersById} // ensures Draft shows names too
+          playersById={playersById}
         />
+      )}
+
+      {/* LEAGUE TAB */}
+      {tab === "league" && (
+        <LeagueTab leagueId={leagueId} playersById={playersById} />
       )}
 
       {/* ADMIN TAB */}
