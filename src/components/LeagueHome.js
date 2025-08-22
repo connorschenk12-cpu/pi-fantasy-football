@@ -149,15 +149,15 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       )}
 
       {tab === "admin" && (
-        <div>
-          {!isOwner && (
-            <div style={{ marginBottom: 8, color: "#b00", fontSize: 13 }}>
-              You’re not the league owner, so some actions will be disabled.
-            </div>
-          )}
-          <LeagueAdmin leagueId={leagueId} username={username} />
-        </div>
-      )}
+  <div>
+    {!isOwner && (
+      <div style={{ marginBottom: 8, color: "#b00", fontSize: 13 }}>
+        You’re not the league owner, so some actions will be disabled.
+      </div>
+    )}
+    <LeagueAdmin leagueId={leagueId} league={league} username={username} />
+  </div>
+)}
     </div>
   );
 }
