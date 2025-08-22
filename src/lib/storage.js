@@ -200,7 +200,6 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
 
   const order = league?.draft?.order || [];
   const ptr = Number(league?.draft?.pointer || 0);
-  theClock:
   const onClock = order[ptr] || null;
   if (onClock !== username) throw new Error("Not your turn");
 
