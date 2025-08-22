@@ -1,61 +1,139 @@
-// src/components/LeagueAdmin.js
-import React, { useState } from "react";
-import { setEntryFee } from "../lib/storage";
+/* eslint-disable no-console */
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  listenLeague,
+  configureDraft,
+  setDraftStatus,
+} from "../lib/storage";
+import { db } from "../firebase";
+import { collection, onSnapshot } from "firebase/firestore";
 
-export default function LeagueAdmin({ isOwner, league }) {
+/**
+ * Props:
+ * - leagueId
+ * - username
+ */
+export default function LeagueAdmin({ leagueId, username }) {
+  const [league, setLeague] = useState(null);
+  const [members, setMembers] = useState([]);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
+  const [error, setError] = useState("");
 
-  const [fee, setFee] = useState(Number(league?.entry?.feePi || 0));
-  const [enabled, setEnabled] = useState(!!league?.entry?.enabled);
+  // League
+  useEffect(() => {
+    if (!leagueId) return;
+    const unsub = listenLeague(leagueId, (l) => setLeague(l));
+    return () => unsub && unsub();
+  }, [leagueId]);
 
-  if (!isOwner) return null;
+  // Members list
+  useEffect(() => {
+    if (!leagueId) return;
+    const ref = collection(db, "leagues", leagueId, "members");
+    const unsub = onSnapshot(ref, (snap) => {
+      const arr = [];
+      snap.forEach((d) => arr.push(d.id || d.data()?.username));
+      // unique + truthy
+      const unique = Array.from(new Set(arr.filter(Boolean)));
+      setMembers(unique);
+    }, (err) => {
+      console.error("members onSnapshot error:", err);
+      setMembers([]);
+    });
+    return () => unsub && unsub();
+  }, [leagueId]);
 
-  async function syncPlayers() {
+  const isOwner = (league?.owner && username) ? league.owner === username : false;
+
+  const draftOrder = useMemo(() => {
+    // If no members yet, at least include owner if present
+    const base = members && members.length ? members.slice() : (league?.owner ? [league.owner] : []);
+    return base;
+  }, [members, league?.owner]);
+
+  const status = league?.draft?.status || "scheduled";
+
+  const doConfigure = async () => {
     try {
-      setBusy(true);
-      setMsg("Syncing players from Sleeper…");
-      const r = await fetch("/api/players/sync", { method: "POST" });
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.error || "Sync failed");
-      setMsg(`Imported/updated ${j.imported} players ✅`);
+      setError(""); setBusy(true);
+      await configureDraft({ leagueId, order: draftOrder });
     } catch (e) {
-      setMsg(`Error: ${e.message}`);
+      console.error("configureDraft error:", e);
+      setError(String(e?.message || e));
     } finally {
       setBusy(false);
     }
-  }
+  };
 
-  async function saveEntry() {
+  const doStart = async () => {
     try {
-      setBusy(true);
-      await setEntryFee(league.id, enabled, fee);
-      setMsg("Entry settings saved");
+      setError(""); setBusy(true);
+      await setDraftStatus({ leagueId, status: "live" });
     } catch (e) {
-      setMsg(e.message || "Failed to save");
+      console.error("startDraft error:", e);
+      setError(String(e?.message || e));
     } finally {
       setBusy(false);
     }
+  };
+
+  const doPause = async () => {
+    try {
+      setError(""); setBusy(true);
+      await setDraftStatus({ leagueId, status: "paused" });
+    } catch (e) {
+      console.error("pauseDraft error:", e);
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doEnd = async () => {
+    try {
+      setError(""); setBusy(true);
+      await setDraftStatus({ leagueId, status: "done" });
+    } catch (e) {
+      console.error("endDraft error:", e);
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!isOwner) {
+    return <div>Only the league owner can access Admin.</div>;
   }
 
   return (
-    <div style={{ marginTop: 8, padding: 8, border: "1px dashed #ddd", borderRadius: 8 }}>
-      <b>Admin tools</b>
-      <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <button onClick={syncPlayers} disabled={busy} style={{ padding: 8 }}>
-          {busy ? "Syncing…" : "Sync Global Players"}
+    <div>
+      <h3>Admin</h3>
+      {error && <div style={{ color: "red", marginBottom: 8 }}>Error: {error}</div>}
+
+      <div style={{ marginBottom: 8 }}>
+        <div><b>Status:</b> {status}</div>
+        <div><b>Members:</b> {draftOrder.join(", ") || "(none yet)"}</div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button onClick={doConfigure} disabled={busy}>
+          Initialize Draft Order
+        </button>
+        <button onClick={doStart} disabled={busy || draftOrder.length === 0}>
+          Start Draft
+        </button>
+        <button onClick={doPause} disabled={busy || status !== "live"}>
+          Pause Draft
+        </button>
+        <button onClick={doEnd} disabled={busy}>
+          End Draft
         </button>
       </div>
 
-      <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <label>
-          <input type="checkbox" checked={enabled} onChange={(e)=>setEnabled(e.target.checked)} /> Entry fee enabled
-        </label>
-        <input type="number" value={fee} onChange={(e)=>setFee(e.target.value)} style={{ width: 100, padding: 6 }} />
-        <button onClick={saveEntry} disabled={busy} style={{ padding: 8 }}>Save Entry</button>
+      <div style={{ fontSize: 12, opacity: 0.75, marginTop: 8 }}>
+        Tip: Members are the usernames under <code>leagues/{leagueId}/members</code>.
+        Initialize to capture the current order; you can re-initialize anytime before starting.
       </div>
-
-      {msg && <div style={{ marginTop: 6, fontSize: 13 }}>{msg}</div>}
     </div>
   );
 }
