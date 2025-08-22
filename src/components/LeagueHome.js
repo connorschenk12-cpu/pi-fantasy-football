@@ -6,18 +6,18 @@ import {
   ensureTeam,
   moveToStarter,
   moveToBench,
-  listPlayersMap,
-  playerDisplay,
-  computeTeamPoints,
   ROSTER_SLOTS,
   hasPaidEntry,
-  allPaidOrFree,
+  playerDisplay,
+  listPlayersMap,
 } from "../lib/storage";
-
-import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
 import LeagueAdmin from "./LeagueAdmin";
-import MatchupsTab from "./MatchupsTab";
+import PlayersList from "./PlayersList";
+
+// Firestore (for marking a payment as paid)
+import { db } from "../firebase";
+import { doc, updateDoc } from "firebase/firestore";
 
 /**
  * Props:
@@ -28,9 +28,10 @@ import MatchupsTab from "./MatchupsTab";
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
+  const [tab, setTab] = useState("team"); // team | players | draft | league | admin
   const [playersMap, setPlayersMap] = useState(new Map());
-  const [tab, setTab] = useState("team"); // team | players | draft | league | matchups | admin
-  const [paidGateOk, setPaidGateOk] = useState(true);
+
+  const currentWeek = Number(league?.settings?.currentWeek || 1);
 
   // League
   useEffect(() => {
@@ -54,36 +55,22 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players map for name lookups + points
+  // Load players map (so we can render names instead of IDs)
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
+        if (!leagueId) return;
         const m = await listPlayersMap({ leagueId });
         if (mounted) setPlayersMap(m);
       } catch (e) {
         console.error("listPlayersMap error:", e);
       }
     })();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, [leagueId]);
-
-  // Check payment gate (free league counts as OK)
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        if (!leagueId) return;
-        const ok = await allPaidOrFree(leagueId);
-        if (mounted) setPaidGateOk(ok);
-      } catch (e) {
-        console.error("allPaidOrFree error:", e);
-      }
-    })();
-    return () => { mounted = false; };
-  }, [leagueId, league?.entry?.enabled, league?.entry?.paid, league?.entry?.amount]);
-
-  const currentWeek = Number(league?.settings?.currentWeek || 1);
 
   const isOwner = useMemo(() => {
     return league?.owner && username ? league.owner === username : false;
@@ -91,12 +78,6 @@ export default function LeagueHome({ leagueId, username, onBack }) {
 
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
-
-  const totals = useMemo(() => {
-    return computeTeamPoints({ roster, week: currentWeek, playersMap });
-  }, [roster, currentWeek, playersMap]);
-
-  const canShowDraftTab = (league?.draft?.status !== "done") && paidGateOk;
 
   const handleBenchToSlot = async (playerId, slot) => {
     try {
@@ -115,9 +96,18 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     }
   };
 
-  // Banner logic
-  const paymentsEnabled = !!league?.entry?.enabled;
-  const iHavePaid = hasPaidEntry(league, username);
+  const handleMarkPaid = async () => {
+    try {
+      const lgRef = doc(db, "leagues", leagueId);
+      await updateDoc(lgRef, {
+        [`entry.paid.${username}`]: true,
+      });
+      alert("Payment recorded.");
+    } catch (e) {
+      console.error("payment error:", e);
+      alert("Payment failed: " + (e.message || e));
+    }
+  };
 
   return (
     <div>
@@ -127,66 +117,53 @@ export default function LeagueHome({ leagueId, username, onBack }) {
 
       <h2>{league?.name || leagueId}</h2>
 
-      {/* Payment/Draft gate messaging */}
-      {league?.draft?.status !== "done" && (
-        <div style={{ margin: "10px 0" }}>
-          {paymentsEnabled ? (
-            iHavePaid ? (
-              paidGateOk ? (
-                <small style={{ color: "green" }}>
-                  All members have paid. Draft can begin when the owner starts it.
-                </small>
-              ) : (
-                <small style={{ color: "#b35c00" }}>
-                  Waiting for all members to pay the entry fee before the draft can start.
-                </small>
-              )
-            ) : (
-              <small style={{ color: "crimson" }}>
-                You haven’t paid the entry fee yet. Go to <b>Admin</b> → “Pi Payments” to pay.
-              </small>
-            )
-          ) : (
-            <small>League is free. Draft can begin when the owner starts it.</small>
-          )}
-        </div>
-      )}
-
-      {/* Tabs */}
-      <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-        <TabButton label="My Team"   active={tab === "team"}     onClick={() => setTab("team")} />
-        <TabButton label="Players"   active={tab === "players"}  onClick={() => setTab("players")} />
-        {canShowDraftTab && (
-          <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
-        )}
-        <TabButton label="League"    active={tab === "league"}   onClick={() => setTab("league")} />
-        <TabButton label="Matchups"  active={tab === "matchups"} onClick={() => setTab("matchups")} />
-        {/* hide Admin after draft is done */}
-        {isOwner && league?.draft?.status !== "done" && (
+      <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
+        <TabButton label="My Team" active={tab === "team"} onClick={() => setTab("team")} />
+        <TabButton label="Players" active={tab === "players"} onClick={() => setTab("players")} />
+        <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
+        <TabButton label="League" active={tab === "league"} onClick={() => setTab("league")} />
+        {isOwner && (
           <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
         )}
       </div>
 
-      {/* TEAM */}
       {tab === "team" && (
         <div>
+          {/* Entry Fee Payment (only before draft and only if not paid) */}
+          {league?.draft?.status !== "done" &&
+            league?.entry?.enabled &&
+            !hasPaidEntry(league, username) && (
+              <div
+                style={{
+                  marginBottom: 16,
+                  padding: 12,
+                  border: "1px solid #ccc",
+                  borderRadius: 6,
+                  background: "#fffef5",
+                }}
+              >
+                <h3 style={{ marginTop: 0 }}>League Entry Fee</h3>
+                <p style={{ margin: "6px 0" }}>
+                  Amount: <b>{league.entry.amount} Pi</b>
+                </p>
+                <button onClick={handleMarkPaid}>Pay Now</button>
+                <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
+                  (Draft is blocked until all members have paid or entry is disabled.)
+                </div>
+              </div>
+            )}
+
           <h3>Starters</h3>
           <ul style={{ listStyle: "none", padding: 0 }}>
             {ROSTER_SLOTS.map((s) => {
-              const pid = roster[s];
-              const player = pid ? playersMap.get(pid) : null;
-              const name = playerDisplay(player);
-              const opp = player ? opponentForWeekSafe(player, currentWeek) : "";
-              const pts = player ? Math.round((Number(computePts(player, currentWeek)) || 0) * 100) / 100 : 0;
+              const pid = roster[s] || null;
+              const p = pid ? playersMap.get(pid) : null;
+              const name = playerDisplay(p);
               return (
                 <li key={s} style={{ marginBottom: 6 }}>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <b style={{ width: 40 }}>{s}</b>
-                    <span style={{ minWidth: 180 }}>
-                      {pid ? `${name}` : "(empty)"}
-                      {opp ? ` — ${opp}` : ""}
-                    </span>
-                    <span style={{ minWidth: 90 }}>Proj: {pts.toFixed(1)}</span>
+                    <span>{pid ? name : "(empty)"}</span>
                     {pid && (
                       <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
                         Send to Bench
@@ -198,25 +175,15 @@ export default function LeagueHome({ leagueId, username, onBack }) {
             })}
           </ul>
 
-          <div style={{ marginTop: 6, fontWeight: 600 }}>
-            Team projected total (W{currentWeek}): {totals.total.toFixed(1)}
-          </div>
-
-          <h3 style={{ marginTop: 18 }}>Bench</h3>
+          <h3>Bench</h3>
           <ul style={{ listStyle: "none", padding: 0 }}>
             {bench.map((pid) => {
               const p = playersMap.get(pid);
-              const name = playerDisplay(p) || pid;
-              const opp = p ? opponentForWeekSafe(p, currentWeek) : "";
-              const pts = p ? Math.round((Number(computePts(p, currentWeek)) || 0) * 100) / 100 : 0;
+              const name = playerDisplay(p);
               return (
                 <li key={pid} style={{ marginBottom: 6 }}>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <span style={{ minWidth: 180 }}>
-                      {name}
-                      {opp ? ` — ${opp}` : ""}
-                    </span>
-                    <span style={{ minWidth: 90 }}>Proj: {pts.toFixed(1)}</span>
+                    <span>{name}</span>
                     <select
                       defaultValue=""
                       onChange={(e) => {
@@ -226,7 +193,9 @@ export default function LeagueHome({ leagueId, username, onBack }) {
                     >
                       <option value="">Move to slot…</option>
                       {ROSTER_SLOTS.map((s) => (
-                        <option key={s} value={s}>{s}</option>
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
                       ))}
                     </select>
                   </div>
@@ -238,35 +207,19 @@ export default function LeagueHome({ leagueId, username, onBack }) {
         </div>
       )}
 
-      {/* PLAYERS */}
-      {tab === "players" && (
-        <PlayersList leagueId={leagueId} currentWeek={currentWeek} />
-      )}
+      {tab === "players" && <PlayersList leagueId={leagueId} currentWeek={currentWeek} />}
 
-      {/* DRAFT */}
-      {tab === "draft" && canShowDraftTab && (
+      {tab === "draft" && (
         <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
       )}
 
-      {/* LEAGUE – keep whatever you already had here if you have a LeagueTab component */}
       {tab === "league" && (
-        <div>
-          <p>Browse teams and the full season schedule in the League tab (if you have a dedicated component, render it here).</p>
-          {/* If you already have <LeagueTab /> just swap this for:
-              <LeagueTab leagueId={leagueId} currentWeek={currentWeek} />
-          */}
+        <div style={{ padding: 8 }}>
+          <p>View other teams and schedules here (UI coming next).</p>
         </div>
       )}
 
-      {/* MATCHUPS */}
-      {tab === "matchups" && (
-        <MatchupsTab leagueId={leagueId} currentWeek={currentWeek} />
-      )}
-
-      {/* ADMIN */}
-      {tab === "admin" && isOwner && league?.draft?.status !== "done" && (
-        <LeagueAdmin leagueId={leagueId} username={username} />
-      )}
+      {tab === "admin" && isOwner && <LeagueAdmin leagueId={leagueId} username={username} />}
     </div>
   );
 }
@@ -286,25 +239,4 @@ function TabButton({ label, active, onClick }) {
       {label}
     </button>
   );
-}
-
-// small local helpers using your storage projections/opponent
-function computePts(p, week) {
-  // reuse projForWeek semantics without importing again
-  const w = String(week);
-  if (p?.projections && p.projections[w] != null) return Number(p.projections[w]) || 0;
-  if (p?.projByWeek && p.projByWeek[w] != null) return Number(p.projByWeek[w]) || 0;
-  if (p?.[`projW${w}`] != null) return Number(p[`projW${w}`]) || 0;
-  if (p?.proj != null) return Number(p.proj) || 0;
-  if (p?.avgPoints != null) return Number(p.avgPoints) || 0;
-  if (p?.rank != null) return Math.max(0, 25 - Number(p.rank));
-  return 0;
-}
-function opponentForWeekSafe(p, week) {
-  const w = String(week);
-  const m = p?.matchups?.[w] ?? p?.matchups?.[week];
-  if (m && (m.opp || m.opponent)) return m.opp || m.opponent;
-  if (p?.oppByWeek && p.oppByWeek[w] != null) return p.oppByWeek[w];
-  if (p?.[`oppW${w}`] != null) return p[`oppW${w}`];
-  return "";
 }
