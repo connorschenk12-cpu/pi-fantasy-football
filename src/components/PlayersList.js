@@ -5,8 +5,8 @@ import { listPlayers, projForWeek } from "../lib/storage";
 /**
  * Props:
  * - leagueId (string)
- * - currentWeek (number)   // used for projections sort
- * - onDraft(player)        // optional: for DraftBoard, shows Draft button
+ * - currentWeek (number)
+ * - onDraft(player) (optional)
  * - allowDraftButton (bool)
  */
 export default function PlayersList({
@@ -43,7 +43,6 @@ export default function PlayersList({
   const filtered = useMemo(() => {
     let arr = Array.isArray(players) ? players.slice() : [];
 
-    // Basic sanitization: ensure we can read name/position/team safely
     arr = arr.map((p) => ({
       id: p?.id ?? "",
       name: (p?.name ?? "").toString(),
@@ -53,7 +52,6 @@ export default function PlayersList({
       ...p,
     }));
 
-    // Text search by name (fallback to id)
     const needle = (q || "").toString().trim().toLowerCase();
     if (needle) {
       arr = arr.filter((p) => {
@@ -63,19 +61,12 @@ export default function PlayersList({
       });
     }
 
-    // Position filter
     const pf = (posFilter || "ALL").toUpperCase();
-    if (pf !== "ALL") {
-      arr = arr.filter((p) => p.position === pf);
-    }
+    if (pf !== "ALL") arr = arr.filter((p) => p.position === pf);
 
-    // Team filter
     const tf = (teamFilter || "ALL").toUpperCase();
-    if (tf !== "ALL") {
-      arr = arr.filter((p) => p.team === tf);
-    }
+    if (tf !== "ALL") arr = arr.filter((p) => p.team === tf);
 
-    // Sort by projected points (desc) for currentWeek
     arr.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
     return arr;
   }, [players, q, posFilter, teamFilter, currentWeek]);
@@ -115,8 +106,8 @@ export default function PlayersList({
       {!loading && error && <div style={{ color: "red" }}>Error: {error}</div>}
       {!loading && !error && filtered.length === 0 && (
         <div>
-          No players found. Make sure you’ve added data to:
-          <code> /players </code> (global) or <code> /leagues/{leagueId}/players</code> (league-scoped).
+          No players found. Add players under:
+          <code> /players </code> (global) or <code> /leagues/{leagueId}/players</code> (league).
         </div>
       )}
 
