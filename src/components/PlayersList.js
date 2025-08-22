@@ -1,100 +1,84 @@
 /* eslint-disable no-console */
 import React, { useEffect, useMemo, useState } from "react";
-import {
-  listPlayers,
-  projForWeek,
-  playerDisplay,
-  opponentForWeek,
-} from "../lib/storage";
+import { listPlayers, projForWeek, opponentForWeek } from "../lib/storage";
 
-export default function PlayersList({ leagueId, currentWeek }) {
+export default function PlayersList({ leagueId, currentWeek = 1 }) {
   const [players, setPlayers] = useState([]);
-  const [q, setQ] = useState("");
-  const [teamFilter, setTeamFilter] = useState("");
+  const [week, setWeek] = useState(currentWeek);
+  const [teamFilter, setTeamFilter] = useState(""); // NFL team filter like KC, DAL…
 
   useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const arr = await listPlayers({ leagueId });
-        if (!alive) return;
-        // sort by projection desc
-        arr.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
-        setPlayers(arr);
-      } catch (e) {
-        console.error("PlayersList load error:", e);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [leagueId, currentWeek]);
+    (async () => { setPlayers(await listPlayers({ leagueId })); })();
+  }, [leagueId]);
 
-  const teams = useMemo(() => {
+  const teamsList = useMemo(() => {
     const s = new Set();
-    players.forEach((p) => {
-      if (p?.team) s.add(p.team);
-      // also support p.nflTeam, etc.
-      if (p?.nflTeam) s.add(p.nflTeam);
-    });
-    return Array.from(s).sort();
+    players.forEach(p => { if (p.team) s.add(p.team); });
+    return ["", ...Array.from(s).sort()];
   }, [players]);
 
-  const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    return players.filter((p) => {
-      const name = playerDisplay(p).toLowerCase();
-      const team = (p.team || p.nflTeam || "").toLowerCase();
-      const matchesName = !needle || name.includes(needle);
-      const matchesTeam = !teamFilter || teamFilter.toLowerCase() === team;
-      return matchesName && matchesTeam;
+  const enhanced = useMemo(() => {
+    const arr = players.map(p => {
+      const wk = projForWeek(p, week);
+      // crude season total: sum of all available projection weeks on the doc
+      let season = 0;
+      if (p.projections && typeof p.projections === "object") {
+        Object.values(p.projections).forEach(v => season += Number(v||0));
+      }
+      const opp = opponentForWeek(p, week);
+      return { ...p, weekProj: wk, seasonProj: Math.round(season*100)/100, opp };
     });
-  }, [players, q, teamFilter]);
+    return arr
+      .filter(p => (teamFilter ? String(p.team||"") === teamFilter : true))
+      .sort((a,b)=> b.weekProj - a.weekProj);
+  }, [players, week, teamFilter]);
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search player by name…"
-          style={{ flex: 1, padding: 8 }}
-        />
-        <select
-          value={teamFilter}
-          onChange={(e) => setTeamFilter(e.target.value)}
-        >
-          <option value="">All Teams</option>
-          {teams.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>
+      <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+        <label>Week:&nbsp;
+          <select value={week} onChange={e=>setWeek(Number(e.target.value))}>
+            {Array.from({length:18},(_,i)=>i+1).map(w=>(
+              <option key={w} value={w}>Week {w}</option>
+            ))}
+          </select>
+        </label>
+        <label>Team:&nbsp;
+          <select value={teamFilter} onChange={e=>setTeamFilter(e.target.value)}>
+            {teamsList.map(t => <option key={t||"ALL"} value={t}>{t || "All teams"}</option>)}
+          </select>
+        </label>
       </div>
 
-      <ul style={{ listStyle: "none", padding: 0 }}>
-        {filtered.map((p) => {
-          const proj = projForWeek(p, currentWeek);
-          const opp = opponentForWeek(p, currentWeek);
-          return (
-            <li key={p.id} style={{ padding: "8px 0", borderBottom: "1px solid #eee" }}>
-              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                <div style={{ minWidth: 180 }}>{playerDisplay(p)}</div>
-                <div style={{ width: 70, color: "#666" }}>{p.position || ""}</div>
-                <div style={{ width: 70, color: "#666" }}>{p.team || p.nflTeam || ""}</div>
-                <div style={{ minWidth: 120, color: "#666" }}>
-                  {opp ? `Opp: ${opp}` : ""}
-                </div>
-                <div style={{ marginLeft: "auto" }}>
-                  Proj W{currentWeek}: <b>{Number(proj || 0).toFixed(1)}</b>
-                </div>
-              </div>
-            </li>
-          );
-        })}
-        {filtered.length === 0 && <li>No players found.</li>}
-      </ul>
+      <table style={{ width:"100%", borderCollapse:"collapse" }}>
+        <thead>
+          <tr>
+            <th align="left">Name</th>
+            <th align="left">Pos</th>
+            <th align="left">NFL</th>
+            <th align="left">Opp</th>
+            <th align="right">Week Proj</th>
+            <th align="right">Season Proj</th>
+          </tr>
+        </thead>
+        <tbody>
+          {enhanced.map(p=>(
+            <tr key={p.id} style={{ borderTop:"1px solid #eee" }}>
+              <td>{p.name || p.fullName || p.playerName || p.id}</td>
+              <td>{p.position}</td>
+              <td>{p.team || "-"}</td>
+              <td>{p.opp || "-"}</td>
+              <td align="right">{p.weekProj?.toFixed(2)}</td>
+              <td align="right">{p.seasonProj?.toFixed(2)}</td>
+            </tr>
+          ))}
+          {!enhanced.length && (
+            <tr><td colSpan={6} style={{ padding:12, textAlign:"center" }}>
+              No players found. Add players to Firestore.
+            </td></tr>
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }
