@@ -8,24 +8,19 @@ import { db } from "../firebase";
 
 /** ---------- ROSTER / DRAFT CONSTANTS ---------- **/
 
-// 9 starters (with distinct WR1/WR2, RB1/RB2) + FLEX
 export const ROSTER_SLOTS = ["QB", "WR1", "WR2", "RB1", "RB2", "TE", "FLEX", "K", "DEF"];
-
-// 12 rounds total: 9 starters + 3 bench
-export const BENCH_SIZE = 3;
+export const BENCH_SIZE = 3; // 9 starters + 3 bench = 12 rounds total
 export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE; // 12
-
-// Five-second pick clock
 export const PICK_CLOCK_MS = 5000;
 
-/** Create an empty roster object that includes all starter slots */
+/** ---------- ROSTER HELPERS ---------- **/
+
 export function emptyRoster() {
   const r = {};
   ROSTER_SLOTS.forEach((s) => (r[s] = null));
   return r;
 }
 
-/** Pick the first open slot from a list */
 function pickFirstOpen(slots, roster) {
   for (const s of slots) {
     if (!roster[s]) return s;
@@ -33,7 +28,6 @@ function pickFirstOpen(slots, roster) {
   return null;
 }
 
-/** Resolve a default slot for a given position, based on current roster */
 export function defaultSlotForPosition(pos, roster = {}) {
   const p = String(pos || "").toUpperCase();
   if (p === "QB") return "QB";
@@ -48,19 +42,25 @@ export function defaultSlotForPosition(pos, roster = {}) {
 /** ---------- LEAGUE / TEAM LISTENERS & HELPERS ---------- **/
 
 export function listenLeague(leagueId, onChange) {
+  if (!leagueId) return () => {};
   const ref = doc(db, "leagues", leagueId);
   return onSnapshot(ref, (snap) => {
     if (snap.exists()) onChange({ id: snap.id, ...snap.data() });
     else onChange(null);
+  }, (err) => {
+    console.error("listenLeague error:", err);
+    onChange(null);
   });
 }
 
 export async function getLeague(leagueId) {
+  if (!leagueId) return null;
   const s = await getDoc(doc(db, "leagues", leagueId));
   return s.exists() ? { id: s.id, ...s.data() } : null;
 }
 
 export async function ensureTeam({ leagueId, username }) {
+  if (!leagueId || !username) throw new Error("ensureTeam requires leagueId & username");
   const ref = doc(db, "leagues", leagueId, "teams", username);
   const snap = await getDoc(ref);
   if (!snap.exists()) {
@@ -79,36 +79,49 @@ export async function ensureTeam({ leagueId, username }) {
 }
 
 export function listenTeam({ leagueId, username, onChange }) {
+  if (!leagueId || !username) return () => {};
   const ref = doc(db, "leagues", leagueId, "teams", username);
   return onSnapshot(ref, (snap) => {
     onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
+  }, (err) => {
+    console.error("listenTeam error:", err);
+    onChange(null);
   });
 }
 
 /** ---------- PLAYERS & CLAIMS ---------- **/
 
 export async function listPlayers({ leagueId }) {
-  // Try league-scoped collection first
-  const leaguePlayersRef = collection(db, "leagues", leagueId, "players");
-  const leagueSnap = await getDocs(leaguePlayersRef);
-  if (!leagueSnap.empty) {
-    const arr = [];
-    leagueSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-    return arr;
+  try {
+    if (leagueId) {
+      const leaguePlayersRef = collection(db, "leagues", leagueId, "players");
+      const leagueSnap = await getDocs(leaguePlayersRef);
+      if (!leagueSnap.empty) {
+        const arr = [];
+        leagueSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+        return arr;
+      }
+    }
+    const snap = await getDocs(collection(db, "players"));
+    const out = [];
+    snap.forEach((d) => out.push({ id: d.id, ...d.data() }));
+    return out;
+  } catch (e) {
+    console.error("listPlayers error:", e);
+    return [];
   }
-  // Fallback to global players
-  const snap = await getDocs(collection(db, "players"));
-  const out = [];
-  snap.forEach((d) => out.push({ id: d.id, ...d.data() }));
-  return out;
 }
 
 export function listenLeagueClaims(leagueId, onChange) {
+  if (!leagueId) return () => {};
   const ref = collection(db, "leagues", leagueId, "claims");
   return onSnapshot(ref, (snap) => {
     const m = new Map();
     snap.forEach((d) => m.set(d.id, d.data()));
     onChange(m);
+  }, (err) => {
+    console.error("listenLeagueClaims error:", err);
+    onChange(new Map());
   });
 }
 
@@ -143,51 +156,9 @@ export function currentRound(league) {
   );
 }
 
-/** Set draft status with sensible side-effects */
-export async function setDraftStatus({ leagueId, status }) {
-  const ref = doc(db, "leagues", leagueId);
-
-  if (status === "live") {
-    // go live and start the clock
-    await updateDoc(ref, {
-      "draft.status": "live",
-      "draft.deadline": Date.now() + PICK_CLOCK_MS,
-      "settings.lockAddDuringDraft": true,
-    });
-    return;
-  }
-
-  if (status === "done") {
-    // end draft and unlock add/drop
-    await updateDoc(ref, {
-      "draft.status": "done",
-      "draft.deadline": null,
-      "settings.lockAddDuringDraft": false,
-    });
-    return;
-  }
-
-  if (status === "scheduled") {
-    // keep it simple: just mark scheduled and clear deadline
-    await updateDoc(ref, {
-      "draft.status": "scheduled",
-      "draft.deadline": null,
-      "settings.lockAddDuringDraft": true,
-    });
-    return;
-  }
-
-  if (status === "paused") {
-    await updateDoc(ref, { "draft.status": "paused" });
-    return;
-  }
-
-  // fallback: set whatever status was requested
-  await updateDoc(ref, { "draft.status": status });
-}
-
-/** Configure (or reconfigure) a 12-round draft with a provided order */
+/** Configure or reconfigure a draft with provided order */
 export async function configureDraft({ leagueId, order }) {
+  if (!leagueId) throw new Error("configureDraft requires leagueId");
   const lref = doc(db, "leagues", leagueId);
   const snap = await getDoc(lref);
   const prev = snap.exists() ? snap.data() : {};
@@ -205,37 +176,60 @@ export async function configureDraft({ leagueId, order }) {
     },
     settings: {
       ...(prev.settings || {}),
-      lockAddDuringDraft: true, // block adds during draft
+      lockAddDuringDraft: true,
     },
   });
 }
 
-/** Back-compat wrapper (some components still import initDraftOrder) */
 export async function initDraftOrder({ leagueId, order }) {
   return configureDraft({ leagueId, order });
 }
 
-/** Start draft: set status live + start the timer */
-export async function startDraft({ leagueId }) {
+export async function setDraftStatus({ leagueId, status }) {
+  if (!leagueId) throw new Error("setDraftStatus requires leagueId");
   const ref = doc(db, "leagues", leagueId);
-  await updateDoc(ref, {
-    "draft.status": "live",
-    "draft.deadline": Date.now() + PICK_CLOCK_MS,
-  });
+
+  if (status === "live") {
+    await updateDoc(ref, {
+      "draft.status": "live",
+      "draft.deadline": Date.now() + PICK_CLOCK_MS,
+      "settings.lockAddDuringDraft": true,
+    });
+    return;
+  }
+  if (status === "done") {
+    await updateDoc(ref, {
+      "draft.status": "done",
+      "draft.deadline": null,
+      "settings.lockAddDuringDraft": false,
+    });
+    return;
+  }
+  if (status === "scheduled") {
+    await updateDoc(ref, {
+      "draft.status": "scheduled",
+      "draft.deadline": null,
+      "settings.lockAddDuringDraft": true,
+    });
+    return;
+  }
+  if (status === "paused") {
+    await updateDoc(ref, { "draft.status": "paused" });
+    return;
+  }
+  await updateDoc(ref, { "draft.status": status });
 }
 
-/** End draft: unlock adds */
+export async function startDraft({ leagueId }) {
+  return setDraftStatus({ leagueId, status: "live" });
+}
+
 export async function endDraft({ leagueId }) {
-  await updateDoc(doc(db, "leagues", leagueId), {
-    "draft.status": "done",
-    "settings.lockAddDuringDraft": false,
-    "draft.deadline": null,
-  });
+  return setDraftStatus({ leagueId, status: "done" });
 }
 
 /** Perform a draft pick (handles bench fallback if slot full) */
 export async function draftPick({ leagueId, username, playerId, playerPosition, slot }) {
-  // Load league
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
   if (!leagueSnap.exists()) throw new Error("League not found");
@@ -243,25 +237,19 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
 
   if (!canDraft(league)) throw new Error("Draft is not live");
 
-  // Whose turn?
   const order = Array.isArray(league?.draft?.order) ? league.draft.order : [];
   const ptr = Number.isInteger(league?.draft?.pointer) ? league.draft.pointer : 0;
   const onClock = order[ptr] || null;
   if (onClock !== username) throw new Error("Not your turn");
 
-  // Deny duplicate claims
   const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
   const claimSnap = await getDoc(claimRef);
   if (claimSnap.exists()) throw new Error("Player already owned");
 
-  // Ensure team
   const teamRef = await ensureTeam({ leagueId, username });
   const teamSnap = await getDoc(teamRef);
-  const team = teamSnap.exists()
-    ? teamSnap.data()
-    : { roster: emptyRoster(), bench: [] };
+  const team = teamSnap.exists() ? teamSnap.data() : { roster: emptyRoster(), bench: [] };
 
-  // Decide target slot
   const rosterCopy = { ...(team.roster || emptyRoster()) };
   let targetSlot = slot;
   if (!targetSlot) {
@@ -275,43 +263,32 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
     }
   }
 
-  // If chosen starter slot is filled, drop to bench
   let sendToBench = false;
   if (targetSlot !== "FLEX" && rosterCopy[targetSlot]) sendToBench = true;
   if (targetSlot === "FLEX" && rosterCopy.FLEX) sendToBench = true;
 
   const batch = writeBatch(db);
 
-  // claim ownership
-  batch.set(
-    claimRef,
-    { claimedBy: username, at: serverTimestamp() },
-    { merge: true }
-  );
+  batch.set(claimRef, { claimedBy: username, at: serverTimestamp() }, { merge: true });
 
-  // put onto team
   const newTeam = {
     roster: { ...(team.roster || emptyRoster()) },
     bench: Array.isArray(team.bench) ? [...team.bench] : [],
   };
 
-  if (sendToBench) {
-    newTeam.bench.push(playerId);
-  } else {
-    newTeam.roster[targetSlot] = playerId;
-  }
+  if (sendToBench) newTeam.bench.push(playerId);
+  else newTeam.roster[targetSlot] = playerId;
+
   batch.set(teamRef, newTeam, { merge: true });
 
-  // advance pointer, track picks & round, set next deadline
   const teamsCount = Math.max(1, Array.isArray(order) ? order.length : 1);
   const prevPicks = Number(league?.draft?.picksTaken || 0);
   const picksTaken = prevPicks + 1;
   const roundsTotal = Number(league?.draft?.roundsTotal || DRAFT_ROUNDS_TOTAL);
 
-  // Compute next pointer in snake fashion based on global pick index
   const mod = picksTaken % teamsCount;
   const round = Math.floor(picksTaken / teamsCount) + 1;
-  const direction = round % 2 === 1 ? 1 : -1; // odd: forward, even: reverse
+  const direction = round % 2 === 1 ? 1 : -1; // odd forward, even reverse
   const pointer = direction === 1 ? mod : teamsCount - 1 - mod;
 
   const doneAll = picksTaken >= roundsTotal * teamsCount;
@@ -329,11 +306,9 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   await batch.commit();
 }
 
-/** Auto-pick: highest projection for currentWeek among available players */
 export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   const league = await getLeague(leagueId);
   if (!canDraft(league)) return;
-
   const order = league?.draft?.order || [];
   const ptr = Number(league?.draft?.pointer || 0);
   const username = order[ptr];
@@ -345,12 +320,10 @@ export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   claimsSnap.forEach((d) => owned.add(d.id));
 
   const available = players.filter((p) => !owned.has(p.id));
-  available.sort(
-    (a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek)
-  );
+  available.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
 
   const pick = available[0];
-  if (!pick) return; // nothing left
+  if (!pick) return;
 
   await draftPick({
     leagueId,
@@ -361,18 +334,17 @@ export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   });
 }
 
-/** Timer helper: if deadline passed, auto-pick */
 export async function autoDraftIfExpired({ leagueId, currentWeek }) {
   const league = await getLeague(leagueId);
   if (!league || league?.draft?.status !== "live") return;
   const dl = Number(league?.draft?.deadline || 0);
-  if (!dl) return;
-  if (Date.now() >= dl) {
+  if (dl && Date.now() >= dl) {
     await autoPickBestAvailable({ leagueId, currentWeek });
   }
 }
 
-/** Projection reader tolerant to a few shapes */
+/** ---------- PROJECTIONS HELPER ---------- **/
+
 export function projForWeek(p, week) {
   const w = String(week);
   if (p?.projections && p.projections[w] != null) return Number(p.projections[w]) || 0;
@@ -384,7 +356,7 @@ export function projForWeek(p, week) {
   return 0;
 }
 
-/** ---------- TEAM UTILITIES (move / release / add-drop) ---------- **/
+/** ---------- TEAM UTILITIES ---------- **/
 
 export async function moveToStarter({ leagueId, username, playerId, slot }) {
   const tRef = doc(db, "leagues", leagueId, "teams", username);
@@ -430,11 +402,9 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   const roster = { ...(team.roster || emptyRoster()) };
   const bench = Array.isArray(team.bench) ? [...team.bench] : [];
 
-  // clear from roster
   for (const s of Object.keys(roster)) {
     if (roster[s] === playerId) roster[s] = null;
   }
-  // remove from bench
   const idx = bench.indexOf(playerId);
   if (idx >= 0) bench.splice(idx, 1);
 
@@ -444,7 +414,6 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   await batch.commit();
 }
 
-/** Add/Drop (disabled during live draft if locked) */
 export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   const league = await getLeague(leagueId);
   if (league?.settings?.lockAddDuringDraft && draftActive(league)) {
@@ -457,7 +426,6 @@ export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   const batch = writeBatch(db);
 
   if (dropId) {
-    // release (also deletes claim)
     const claimRef = doc(db, "leagues", leagueId, "claims", dropId);
     const roster = { ...(team.roster || emptyRoster()) };
     const bench = Array.isArray(team.bench) ? [...team.bench] : [];
@@ -482,6 +450,7 @@ export async function addDropPlayer({ leagueId, username, addId, dropId }) {
 /** ---------- LEAGUE CREATION / MEMBERSHIP ---------- **/
 
 export async function createLeague({ name, owner, order }) {
+  if (!name || !owner) throw new Error("createLeague requires name & owner");
   const ref = await addDoc(collection(db, "leagues"), {
     name,
     owner,
@@ -505,26 +474,19 @@ export async function createLeague({ name, owner, order }) {
   return { id: ref.id, name, owner };
 }
 
-/** Join a league (adds membership doc + ensures team) */
 export async function joinLeague({ leagueId, username }) {
-  if (!leagueId || !username) throw new Error("leagueId and username are required");
-
-  // Add membership: leagues/{leagueId}/members/{username}
+  if (!leagueId || !username) throw new Error("joinLeague requires leagueId & username");
   const memRef = doc(db, "leagues", leagueId, "members", username);
   const memSnap = await getDoc(memRef);
   if (!memSnap.exists()) {
     await setDoc(memRef, { username, joinedAt: serverTimestamp() }, { merge: true });
   }
-
-  // Ensure team exists
   await ensureTeam({ leagueId, username });
-
-  // (Optional) also create reverse index at users/{username}/memberships/{leagueId}
   return true;
 }
 
-/** list leagues the user owns OR has joined */
 export async function listMyLeagues({ username }) {
+  if (!username) return []; // <- IMPORTANT GUARD (fixes where(undefined))
   const leaguesCol = collection(db, "leagues");
 
   // Owned
