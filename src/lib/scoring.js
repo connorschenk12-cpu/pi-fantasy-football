@@ -1,32 +1,42 @@
 // src/lib/scoring.js
-export const DEFAULT_SCORING = {
-  passYds: 0.04,  // 1 pt per 25 pass yds
-  passTD: 4,
-  passInt: -2,
-  rushYds: 0.1,   // 1 pt per 10 rush yds
-  rushTD: 6,
-  recYds: 0.1,    // 1 pt per 10 rec yds
-  recTD: 6,
-  rec: 0,         // set to 1 for full PPR if you want
-  fumbles: -2,
-  // placeholders for K/DEF if you add later:
-  kickPts: 0,
-  defPts: 0,
-};
+// Simple projected scoring using your existing projForWeek() helper.
+// Bench does not count.
 
-export function computeFantasyPoints(stat, scoring = DEFAULT_SCORING) {
-  if (!stat) return 0;
-  const s = scoring || DEFAULT_SCORING;
-  const total =
-    (stat.passYds || 0) * s.passYds +
-    (stat.passTD  || 0) * s.passTD  +
-    (stat.passInt || 0) * s.passInt +
-    (stat.rushYds || 0) * s.rushYds +
-    (stat.rushTD  || 0) * s.rushTD  +
-    (stat.recYds  || 0) * s.recYds  +
-    (stat.recTD   || 0) * s.recTD   +
-    (stat.rec     || 0) * s.rec     +
-    (stat.fumbles || 0) * s.fumbles;
+import { projForWeek } from "./storage";
 
-  return Math.round((total + Number.EPSILON) * 100) / 100;
+/**
+ * Compute a team's projected score and per-player breakdown for a week.
+ * team: { roster: { SLOT: playerId|null }, bench: [...] }
+ * playersMap: Map<playerId, playerDoc>
+ * returns { total: number, parts: Array<{slot,id,name,position,team,proj,opp}> }
+ */
+export function computeTeamProjectedScore(team, playersMap, week, opponentForWeekFn) {
+  const parts = [];
+  let total = 0;
+
+  if (!team || !team.roster) {
+    return { total: 0, parts: [] };
+  }
+
+  for (const [slot, pid] of Object.entries(team.roster)) {
+    if (!pid) continue;
+    const p = playersMap.get(pid);
+    const proj = p ? Number(projForWeek(p, week) || 0) : 0;
+    const opp = p && opponentForWeekFn ? opponentForWeekFn(p, week) : "";
+    total += proj;
+    parts.push({
+      slot,
+      id: pid,
+      name: p ? (p.name || p.fullName || p.display || p.id) : pid,
+      position: p?.position || "",
+      team: p?.team || p?.nflTeam || "",
+      proj,
+      opp,
+    });
+  }
+
+  // Sort starter rows by largest contribution
+  parts.sort((a, b) => b.proj - a.proj);
+
+  return { total, parts };
 }
