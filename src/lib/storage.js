@@ -62,6 +62,46 @@ export function defaultSlotForPosition(pos, roster = {}) {
   return "FLEX";
 }
 
+// --- NEW HELPERS: opponent lookup + list teams ---
+
+/** Try to read a player's opponent/team they face in a given week.
+ *  We support several shapes so your data can be flexible:
+ *   - p.matchups?.[week]?.opp
+ *   - p.oppByWeek?.[week]
+ *   - p.opponentByWeek?.[week]
+ *   - p[`oppW${week}`]
+ *   - p[`opponentW${week}`]
+ *  Returns a short string like "vs DAL" or "@ KC" if your data encodes home/away;
+ *  otherwise just the opponent code like "DAL".
+ */
+export function opponentForWeek(p, week) {
+  if (!p || week == null) return "";
+  const w = String(week);
+
+  const m =
+    p?.matchups?.[w] ??
+    p?.matchups?.[week] ??
+    null;
+  if (m && (m.opp || m.opponent)) return m.opp || m.opponent;
+
+  if (p?.oppByWeek && p.oppByWeek[w] != null) return p.oppByWeek[w];
+  if (p?.opponentByWeek && p.opponentByWeek[w] != null) return p.opponentByWeek[w];
+
+  if (p?.[`oppW${w}`] != null) return p[`oppW${w}`];
+  if (p?.[`opponentW${w}`] != null) return p[`opponentW${w}`];
+
+  return "";
+}
+
+/** List all teams in the league (one doc per username) */
+export async function listTeams(leagueId) {
+  const col = collection(db, "leagues", leagueId, "teams");
+  const snap = await getDocs(col);
+  const arr = [];
+  snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+  return arr;
+}
+
 /** =========================================================
  *  LEAGUE / TEAM READ & LISTEN
  *  ========================================================= */
