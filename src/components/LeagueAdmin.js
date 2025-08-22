@@ -9,23 +9,35 @@ import {
   setDraftStatus,
 } from "../lib/storage";
 
-export default function LeagueAdmin({ leagueId, username }) {
-  const [league, setLeague] = useState(null);
+/**
+ * Props:
+ * - leagueId (optional if league prop provided)
+ * - league (optional; if provided, we won't re-fetch)
+ * - username (required for owner check)
+ */
+export default function LeagueAdmin({ leagueId, league: leagueProp, username }) {
+  const [league, setLeague] = useState(leagueProp || null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-
-  // local editor for draft order (one username per line)
   const [orderText, setOrderText] = useState("");
 
-  // Load league safely
+  // If a league object is provided, prefer it and skip listening.
   useEffect(() => {
+    if (leagueProp) {
+      setLeague(leagueProp);
+      if (Array.isArray(leagueProp?.draft?.order)) {
+        setOrderText(leagueProp.draft.order.join("\n"));
+      }
+      return;
+    }
+    // Otherwise, listen by leagueId.
     setError("");
     setLeague(null);
     if (!leagueId) return;
     try {
       const unsub = listenLeague(leagueId, (l) => {
         setLeague(l);
-        if (l?.draft?.order && Array.isArray(l.draft.order)) {
+        if (Array.isArray(l?.draft?.order)) {
           setOrderText(l.draft.order.join("\n"));
         }
       });
@@ -34,7 +46,7 @@ export default function LeagueAdmin({ leagueId, username }) {
       console.error(e);
       setError(String(e?.message || e));
     }
-  }, [leagueId]);
+  }, [leagueProp, leagueId]);
 
   // owner check (case-insensitive)
   const isOwner = useMemo(() => {
@@ -49,7 +61,6 @@ export default function LeagueAdmin({ leagueId, username }) {
   const roundsTotal = Number(draft.roundsTotal || 12);
   const pointer = Number.isFinite(draft.pointer) ? draft.pointer : 0;
 
-  // Helpers
   function cleanOrder(text) {
     return String(text || "")
       .split(/\r?\n/g)
@@ -58,12 +69,13 @@ export default function LeagueAdmin({ leagueId, username }) {
   }
 
   async function onSaveOrder() {
-    if (!leagueId) return setError("No leagueId");
+    const id = league?.id || leagueId;
+    if (!id) return setError("No leagueId available.");
     const arr = cleanOrder(orderText);
     if (!arr.length) return setError("Enter at least one username for the order.");
     try {
       setSaving(true);
-      await configureDraft({ leagueId, order: arr });
+      await configureDraft({ leagueId: id, order: arr });
       setSaving(false);
       alert("Draft order saved & draft set to scheduled.");
     } catch (e) {
@@ -74,10 +86,11 @@ export default function LeagueAdmin({ leagueId, username }) {
   }
 
   async function onStart() {
-    if (!leagueId) return setError("No leagueId");
+    const id = league?.id || leagueId;
+    if (!id) return setError("No leagueId available.");
     try {
       setSaving(true);
-      await startDraft({ leagueId });
+      await startDraft({ leagueId: id });
       setSaving(false);
       alert("Draft started.");
     } catch (e) {
@@ -88,10 +101,11 @@ export default function LeagueAdmin({ leagueId, username }) {
   }
 
   async function onEnd() {
-    if (!leagueId) return setError("No leagueId");
+    const id = league?.id || leagueId;
+    if (!id) return setError("No leagueId available.");
     try {
       setSaving(true);
-      await endDraft({ leagueId });
+      await endDraft({ leagueId: id });
       setSaving(false);
       alert("Draft ended.");
     } catch (e) {
@@ -102,10 +116,11 @@ export default function LeagueAdmin({ leagueId, username }) {
   }
 
   async function onSetStatus(next) {
-    if (!leagueId) return setError("No leagueId");
+    const id = league?.id || leagueId;
+    if (!id) return setError("No leagueId available.");
     try {
       setSaving(true);
-      await setDraftStatus({ leagueId, status: next });
+      await setDraftStatus({ leagueId: id, status: next });
       setSaving(false);
       alert(`Draft status set to ${next}.`);
     } catch (e) {
@@ -116,18 +131,24 @@ export default function LeagueAdmin({ leagueId, username }) {
   }
 
   // Render guards
-  if (!leagueId) {
-    return <Box>
-      <h3>Admin</h3>
-      <Alert type="error">No league loaded. (Missing <code>leagueId</code> prop)</Alert>
-    </Box>;
+  if (!league && !leagueId) {
+    return (
+      <Box>
+        <h3>Admin</h3>
+        <Alert type="error">
+          No league loaded. (Missing <code>league</code> or <code>leagueId</code>)
+        </Alert>
+      </Box>
+    );
   }
 
   if (!league) {
-    return <Box>
-      <h3>Admin</h3>
-      <div>Loading league…</div>
-    </Box>;
+    return (
+      <Box>
+        <h3>Admin</h3>
+        <div>Loading league…</div>
+      </Box>
+    );
   }
 
   return (
@@ -192,7 +213,7 @@ export default function LeagueAdmin({ leagueId, username }) {
   );
 }
 
-/** ---------- Tiny UI helpers (no external deps) ---------- */
+/** ---------- Tiny UI helpers ---------- */
 function Box({ children }) {
   return (
     <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
@@ -200,7 +221,6 @@ function Box({ children }) {
     </div>
   );
 }
-
 function Section({ title, children }) {
   return (
     <div style={{ marginTop: 16 }}>
@@ -209,22 +229,12 @@ function Section({ title, children }) {
     </div>
   );
 }
-
 function Row({ children }) {
   return <div style={{ margin: "4px 0" }}>{children}</div>;
 }
-
 function Alert({ type = "info", children }) {
-  const colors = {
-    info: "#155724",
-    warn: "#856404",
-    error: "#721c24",
-  };
-  const bgs = {
-    info: "#d4edda",
-    warn: "#fff3cd",
-    error: "#f8d7da",
-  };
+  const colors = { info: "#155724", warn: "#856404", error: "#721c24" };
+  const bgs = { info: "#d4edda", warn: "#fff3cd", error: "#f8d7da" };
   return (
     <div
       style={{
