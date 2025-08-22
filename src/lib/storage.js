@@ -154,6 +154,34 @@ export function listenTeamById(leagueId, teamId, onChange) {
   });
 }
 
+// --- NEW: listMatchups for a given week ---
+import { query, where } from "firebase/firestore"; // ensure these are in your imports at top
+
+export async function listMatchups(leagueId, week) {
+  const colRef = collection(db, "leagues", leagueId, "matchups");
+  const q = Number.isFinite(week)
+    ? query(colRef, where("week", "==", Number(week)))
+    : colRef;
+  const snap = await getDocs(q);
+  const arr = [];
+  snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+  // Expect docs like: { id, week, home: "usernameA", away: "usernameB" }
+  return arr;
+}
+
+// --- OPTIONAL: live listener for matchups of a week (use if you prefer real-time) ---
+export function listenMatchups(leagueId, week, onChange) {
+  const colRef = collection(db, "leagues", leagueId, "matchups");
+  const qq = Number.isFinite(week)
+    ? query(colRef, where("week", "==", Number(week)))
+    : colRef;
+  return onSnapshot(qq, (snap) => {
+    const arr = [];
+    snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+    onChange(arr);
+  });
+}
+
 /** =========================================================
  *  PLAYERS
  *  ========================================================= */
