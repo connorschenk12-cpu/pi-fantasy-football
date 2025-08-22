@@ -1,146 +1,100 @@
 /* eslint-disable no-console */
 import React, { useEffect, useMemo, useState } from "react";
-import { listPlayers, projForWeek } from "../lib/storage";
+import {
+  listPlayers,
+  projForWeek,
+  playerDisplay,
+  opponentForWeek,
+} from "../lib/storage";
 
-/**
- * Props:
- * - leagueId (string)
- * - currentWeek (number)
- * - onDraft(player) (optional)
- * - allowDraftButton (bool)
- */
-export default function PlayersList({
-  leagueId,
-  currentWeek = 1,
-  onDraft,
-  allowDraftButton = false,
-}) {
+export default function PlayersList({ leagueId, currentWeek }) {
   const [players, setPlayers] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
-  const [posFilter, setPosFilter] = useState("ALL");
-  const [teamFilter, setTeamFilter] = useState("ALL");
-  const [error, setError] = useState("");
+  const [teamFilter, setTeamFilter] = useState("");
 
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        setLoading(true);
-        const list = await listPlayers({ leagueId });
+        const arr = await listPlayers({ leagueId });
         if (!alive) return;
-        setPlayers(Array.isArray(list) ? list : []);
+        // sort by projection desc
+        arr.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
+        setPlayers(arr);
       } catch (e) {
         console.error("PlayersList load error:", e);
-        if (alive) setError(String(e?.message || e));
-      } finally {
-        if (alive) setLoading(false);
       }
     })();
-    return () => { alive = false; };
-  }, [leagueId]);
+    return () => {
+      alive = false;
+    };
+  }, [leagueId, currentWeek]);
 
-  const filtered = useMemo(() => {
-    let arr = Array.isArray(players) ? players.slice() : [];
-
-    arr = arr.map((p) => ({
-      id: p?.id ?? "",
-      name: (p?.name ?? "").toString(),
-      position: (p?.position ?? "").toString().toUpperCase(),
-      team: (p?.team ?? "").toString().toUpperCase(),
-      projections: p?.projections ?? p?.projByWeek ?? {},
-      ...p,
-    }));
-
-    const needle = (q || "").toString().trim().toLowerCase();
-    if (needle) {
-      arr = arr.filter((p) => {
-        const hay1 = p.name ? p.name.toLowerCase() : "";
-        const hay2 = p.id ? String(p.id).toLowerCase() : "";
-        return hay1.indexOf(needle) >= 0 || hay2.indexOf(needle) >= 0;
-      });
-    }
-
-    const pf = (posFilter || "ALL").toUpperCase();
-    if (pf !== "ALL") arr = arr.filter((p) => p.position === pf);
-
-    const tf = (teamFilter || "ALL").toUpperCase();
-    if (tf !== "ALL") arr = arr.filter((p) => p.team === tf);
-
-    arr.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
-    return arr;
-  }, [players, q, posFilter, teamFilter, currentWeek]);
-
-  const uniqueTeams = useMemo(() => {
-    const set = new Set();
-    for (const p of players) {
-      const t = (p?.team ?? "").toString().toUpperCase();
-      if (t) set.add(t);
-    }
-    return ["ALL", ...Array.from(set).sort()];
+  const teams = useMemo(() => {
+    const s = new Set();
+    players.forEach((p) => {
+      if (p?.team) s.add(p.team);
+      // also support p.nflTeam, etc.
+      if (p?.nflTeam) s.add(p.nflTeam);
+    });
+    return Array.from(s).sort();
   }, [players]);
 
-  const positions = ["ALL", "QB", "RB", "WR", "TE", "K", "DEF"];
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return players.filter((p) => {
+      const name = playerDisplay(p).toLowerCase();
+      const team = (p.team || p.nflTeam || "").toLowerCase();
+      const matchesName = !needle || name.includes(needle);
+      const matchesTeam = !teamFilter || teamFilter.toLowerCase() === team;
+      return matchesName && matchesTeam;
+    });
+  }, [players, q, teamFilter]);
 
   return (
     <div>
-      <h3>Players</h3>
-
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
         <input
-          type="text"
-          placeholder="Search player name…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
+          placeholder="Search player by name…"
           style={{ flex: 1, padding: 8 }}
         />
-        <select value={posFilter} onChange={(e) => setPosFilter(e.target.value)} style={{ padding: 8 }}>
-          {positions.map((p) => <option key={p} value={p}>{p}</option>)}
-        </select>
-        <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} style={{ padding: 8 }}>
-          {uniqueTeams.map((t) => <option key={t} value={t}>{t}</option>)}
+        <select
+          value={teamFilter}
+          onChange={(e) => setTeamFilter(e.target.value)}
+        >
+          <option value="">All Teams</option>
+          {teams.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
         </select>
       </div>
 
-      {loading && <div>Loading players…</div>}
-      {!loading && error && <div style={{ color: "red" }}>Error: {error}</div>}
-      {!loading && !error && filtered.length === 0 && (
-        <div>
-          No players found. Add players under:
-          <code> /players </code> (global) or <code> /leagues/{leagueId}/players</code> (league).
-        </div>
-      )}
-
-      {!loading && !error && filtered.length > 0 && (
-        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-          {filtered.map((p) => {
-            const proj = projForWeek(p, currentWeek);
-            return (
-              <li key={p.id} style={{
-                border: "1px solid #eee",
-                borderRadius: 8,
-                padding: 10,
-                marginBottom: 8,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between"
-              }}>
-                <div>
-                  <div style={{ fontWeight: 600 }}>{p.name || p.id}</div>
-                  <div style={{ fontSize: 12, opacity: 0.8 }}>
-                    {p.position || "N/A"} · {p.team || "N/A"} · Proj W{currentWeek}: {proj}
-                  </div>
+      <ul style={{ listStyle: "none", padding: 0 }}>
+        {filtered.map((p) => {
+          const proj = projForWeek(p, currentWeek);
+          const opp = opponentForWeek(p, currentWeek);
+          return (
+            <li key={p.id} style={{ padding: "8px 0", borderBottom: "1px solid #eee" }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <div style={{ minWidth: 180 }}>{playerDisplay(p)}</div>
+                <div style={{ width: 70, color: "#666" }}>{p.position || ""}</div>
+                <div style={{ width: 70, color: "#666" }}>{p.team || p.nflTeam || ""}</div>
+                <div style={{ minWidth: 120, color: "#666" }}>
+                  {opp ? `Opp: ${opp}` : ""}
                 </div>
-                {allowDraftButton && typeof onDraft === "function" && (
-                  <button onClick={() => onDraft(p)} style={{ padding: "6px 10px" }}>
-                    Draft
-                  </button>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
+                <div style={{ marginLeft: "auto" }}>
+                  Proj W{currentWeek}: <b>{Number(proj || 0).toFixed(1)}</b>
+                </div>
+              </div>
+            </li>
+          );
+        })}
+        {filtered.length === 0 && <li>No players found.</li>}
+      </ul>
     </div>
   );
 }
