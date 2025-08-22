@@ -1,4 +1,5 @@
 /* eslint-disable no-console */
+// src/components/LeagueHome.js
 import React, { useEffect, useMemo, useState } from "react";
 import {
   listenLeague,
@@ -7,7 +8,6 @@ import {
   moveToStarter,
   moveToBench,
   ROSTER_SLOTS,
-  emptyRoster,
 } from "../lib/storage";
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
@@ -15,9 +15,9 @@ import LeagueAdmin from "./LeagueAdmin";
 
 /**
  * Props:
- * - leagueId
- * - username
- * - onBack()
+ * - leagueId (string, required)
+ * - username (string, required)
+ * - onBack()  (function, required)
  */
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
@@ -25,14 +25,14 @@ export default function LeagueHome({ leagueId, username, onBack }) {
   const [tab, setTab] = useState("team"); // team | players | draft | admin
   const currentWeek = Number(league?.settings?.currentWeek || 1);
 
-  // League
+  // Subscribe to league
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
   }, [leagueId]);
 
-  // Ensure team + listen
+  // Ensure team exists and subscribe to it
   useEffect(() => {
     let unsub = null;
     (async () => {
@@ -47,14 +47,13 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Owner check (case-insensitive)
   const isOwner = useMemo(() => {
-    const a = (league?.owner || "").trim().toLowerCase();
-    const b = (username || "").trim().toLowerCase();
-    return !!a && !!b && a === b;
+    return league?.owner && username
+      ? String(league.owner).toLowerCase() === String(username).toLowerCase()
+      : false;
   }, [league?.owner, username]);
 
-  const roster = team?.roster || emptyRoster();
+  const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
   const handleBenchToSlot = async (playerId, slot) => {
@@ -81,18 +80,17 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       </div>
 
       <h2>{league?.name || leagueId}</h2>
-      <div style={{ fontSize: 12, color: "#666", marginTop: -6 }}>
-        Owner: <b>{league?.owner || "…"}</b> &middot; You: <b>{username || "…"}</b>
+
+      <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
+        <TabButton label="My Team"   active={tab === "team"}   onClick={() => setTab("team")} />
+        <TabButton label="Players"   active={tab === "players"} onClick={() => setTab("players")} />
+        <TabButton label="Draft"     active={tab === "draft"}   onClick={() => setTab("draft")} />
+        {isOwner && (
+          <TabButton label="Admin"   active={tab === "admin"}   onClick={() => setTab("admin")} />
+        )}
       </div>
 
-      <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-        <TabButton label="My Team" active={tab === "team"} onClick={() => setTab("team")} />
-        <TabButton label="Players" active={tab === "players"} onClick={() => setTab("players")} />
-        <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
-        {/* Always show Admin tab; LeagueAdmin enforces owner-only inside */}
-        <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
-      </div>
-
+      {/* TEAM TAB */}
       {tab === "team" && (
         <div>
           <h3>Starters</h3>
@@ -100,7 +98,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
             {ROSTER_SLOTS.map((s) => (
               <li key={s} style={{ marginBottom: 6 }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <b style={{ width: 44 }}>{s}</b>
+                  <b style={{ width: 40 }}>{s}</b>
                   <span>{roster[s] || "(empty)"}</span>
                   {roster[s] && (
                     <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
@@ -127,9 +125,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
                   >
                     <option value="">Move to slot…</option>
                     {ROSTER_SLOTS.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
+                      <option key={s} value={s}>{s}</option>
                     ))}
                   </select>
                 </div>
@@ -140,24 +136,28 @@ export default function LeagueHome({ leagueId, username, onBack }) {
         </div>
       )}
 
+      {/* PLAYERS TAB */}
       {tab === "players" && (
         <PlayersList leagueId={leagueId} currentWeek={currentWeek} />
       )}
 
+      {/* DRAFT TAB */}
       {tab === "draft" && (
         <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
       )}
 
-      {tab === "admin" && (
-  <div>
-    {!isOwner && (
-      <div style={{ marginBottom: 8, color: "#b00", fontSize: 13 }}>
-        You’re not the league owner, so some actions will be disabled.
-      </div>
-    )}
-    <LeagueAdmin leagueId={leagueId} league={league} username={username} />
-  </div>
-)}
+      {/* ADMIN TAB */}
+      {tab === "admin" && isOwner && (
+        league ? (
+          <LeagueAdmin
+            league={league}
+            leagueId={leagueId}
+            username={username}
+          />
+        ) : (
+          <div>Loading league…</div>
+        )
+      )}
     </div>
   );
 }
@@ -172,7 +172,6 @@ function TabButton({ label, active, onClick }) {
         border: active ? "2px solid #333" : "1px solid #ccc",
         background: active ? "#f2f2f2" : "#fff",
         fontWeight: active ? 700 : 400,
-        cursor: "pointer",
       }}
     >
       {label}
