@@ -188,6 +188,41 @@ export async function getEntryStatus(leagueId) {
   return { enabled: !!e.enabled, amount: Number(e.amount || 0), paid: e.paid || {} };
 }
 
+// --- Add under ENTRY / PAYMENTS helpers in storage.js ---
+
+/** True if entry is disabled OR (enabled and every member paid) */
+export async function allPaidOrFree(leagueId) {
+  const s = await getDoc(doc(db, "leagues", leagueId));
+  if (!s.exists()) return true;
+  const lg = s.data() || {};
+  const entry = lg.entry || { enabled: false, amount: 0, paid: {} };
+  if (!entry.enabled) return true;
+
+  // need all members to be paid
+  const memSnap = await getDocs(collection(db, "leagues", leagueId, "members"));
+  const members = [];
+  memSnap.forEach((d) => members.push(d.id));
+  for (const u of members) {
+    if (!entry.paid || !entry.paid[u]) return false;
+  }
+  return true;
+}
+
+/** Who has not paid yet (when entry is enabled) */
+export async function membersUnpaid(leagueId) {
+  const s = await getDoc(doc(db, "leagues", leagueId));
+  if (!s.exists()) return [];
+  const lg = s.data() || {};
+  const entry = lg.entry || {};
+  if (!entry.enabled) return [];
+  const memSnap = await getDocs(collection(db, "leagues", leagueId, "members"));
+  const out = [];
+  memSnap.forEach((d) => {
+    const u = d.id;
+    if (!entry.paid || !entry.paid[u]) out.push(u);
+  });
+  return out;
+}
 /* =========================================================
  * DRAFT HELPERS
  * ======================================================= */
