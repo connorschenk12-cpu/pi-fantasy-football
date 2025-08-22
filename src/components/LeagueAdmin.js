@@ -12,13 +12,11 @@ import {
 /** Try to read a leagueId from the current URL (no React Router needed). */
 function sniffLeagueIdFromUrl() {
   try {
-    const { href, pathname, search } = window.location || {};
-    // ?leagueId=... or ?league=...
+    const { href, pathname } = window.location || {};
     const url = new URL(href);
     const qsId = url.searchParams.get("leagueId") || url.searchParams.get("league");
     if (qsId) return qsId;
 
-    // /league/<id> or /leagues/<id> or /<id> at the end
     const path = String(pathname || "");
     const m =
       path.match(/\/leagues?\/([^/]+)/i) ||
@@ -39,7 +37,6 @@ function sniffLeagueIdFromUrl() {
  * - username (required for owner check)
  */
 export default function LeagueAdmin({ leagueId: leagueIdProp, league: leagueProp, username }) {
-  // Resolve an effective leagueId from: provided league object -> prop -> URL sniffing.
   const urlId = sniffLeagueIdFromUrl();
   const effectiveLeagueId = (leagueProp && leagueProp.id) || leagueIdProp || urlId || null;
 
@@ -60,7 +57,7 @@ export default function LeagueAdmin({ leagueId: leagueIdProp, league: leagueProp
 
   // If no league object, listen by effectiveLeagueId
   useEffect(() => {
-    if (leagueProp) return; // already have it
+    if (leagueProp) return;
     setError("");
     setLeague(null);
     if (!effectiveLeagueId) return;
