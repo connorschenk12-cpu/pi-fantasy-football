@@ -10,43 +10,36 @@ import {
   listPlayersMap,
   playerDisplay,
   opponentForWeek,
+  computeTeamPoints,
   listTeams,
+  listenScheduleWeek,
 } from "../lib/storage";
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
 import LeagueAdmin from "./LeagueAdmin";
-import Matchups from "./Matchups";
 
+/**
+ * Props:
+ * - leagueId
+ * - username
+ * - onBack()
+ */
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
-  const [playersMap, setPlayersMap] = useState(new Map());
   const [tab, setTab] = useState("team"); // team | players | draft | league | matchups | admin
+  const [playersMap, setPlayersMap] = useState(new Map());
   const [allTeams, setAllTeams] = useState([]);
+  const [weekSchedule, setWeekSchedule] = useState({ week: 1, matchups: [] });
+
   const currentWeek = Number(league?.settings?.currentWeek || 1);
+  const draftDone = league?.draft?.status === "done";
 
   // League
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
-  }, [leagueId]);
-
-  // Players map
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        if (!leagueId) return;
-        const map = await listPlayersMap({ leagueId });
-        if (alive) setPlayersMap(map);
-      } catch (e) {
-        console.error("listPlayersMap error:", e);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
   }, [leagueId]);
 
   // Ensure team + listen
@@ -64,22 +57,44 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load all teams when 'league' tab is active (or when league changes)
+  // Load players map (names, projections, opponents)
   useEffect(() => {
-    let alive = true;
+    let mounted = true;
     (async () => {
       try {
-        if (!leagueId || tab !== "league") return;
-        const t = await listTeams(leagueId);
-        if (alive) setAllTeams(t);
+        if (!leagueId) return;
+        const map = await listPlayersMap({ leagueId });
+        if (mounted) setPlayersMap(map);
+      } catch (e) {
+        console.error("listPlayersMap error:", e);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [leagueId]);
+
+  // Load league teams (for "League" tab)
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        if (!leagueId) return;
+        const teams = await listTeams(leagueId);
+        if (mounted) setAllTeams(teams);
       } catch (e) {
         console.error("listTeams error:", e);
       }
     })();
-    return () => {
-      alive = false;
-    };
-  }, [leagueId, tab]);
+    return () => { mounted = false; };
+  }, [leagueId]);
+
+  // Listen to schedule for current week (for "Matchups" tab)
+  useEffect(() => {
+    if (!leagueId || !currentWeek) return;
+    const unsub = listenScheduleWeek(leagueId, currentWeek, (data) => {
+      setWeekSchedule(data || { week: currentWeek, matchups: [] });
+    });
+    return () => unsub && unsub();
+  }, [leagueId, currentWeek]);
 
   const isOwner = useMemo(() => {
     return league?.owner && username ? league.owner === username : false;
@@ -87,9 +102,6 @@ export default function LeagueHome({ leagueId, username, onBack }) {
 
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
-
-  const draftStatus = league?.draft?.status || "scheduled";
-  const showDraftTab = draftStatus !== "done"; // hide Draft once complete
 
   const handleBenchToSlot = async (playerId, slot) => {
     try {
@@ -116,10 +128,10 @@ export default function LeagueHome({ leagueId, username, onBack }) {
 
       <h2>{league?.name || leagueId}</h2>
 
-      <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
+      <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
         <TabButton label="My Team" active={tab === "team"} onClick={() => setTab("team")} />
         <TabButton label="Players" active={tab === "players"} onClick={() => setTab("players")} />
-        {showDraftTab && (
+        {!draftDone && (
           <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
         )}
         <TabButton label="League" active={tab === "league"} onClick={() => setTab("league")} />
@@ -129,22 +141,22 @@ export default function LeagueHome({ leagueId, username, onBack }) {
         )}
       </div>
 
-      {/* TEAM TAB */}
+      {/* My Team */}
       {tab === "team" && (
         <div>
           <h3>Starters — Week {currentWeek}</h3>
           <ul style={{ listStyle: "none", padding: 0 }}>
             {ROSTER_SLOTS.map((s) => {
-              const pid = roster[s] || null;
+              const pid = roster[s];
               const p = pid ? playersMap.get(pid) : null;
-              const name = p ? playerDisplay(p) : "(empty)";
               const opp = p ? opponentForWeek(p, currentWeek) : "";
               return (
-                <li key={s} style={{ marginBottom: 8 }}>
-                  <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                    <b style={{ width: 44 }}>{s}</b>
-                    <span style={{ minWidth: 180 }}>{name}</span>
-                    <span style={{ color: "#666" }}>{opp ? `• Opp: ${opp}` : ""}</span>
+                <li key={s} style={{ marginBottom: 6 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <b style={{ width: 40 }}>{s}</b>
+                    <span>
+                      {p ? `${playerDisplay(p)} ${opp ? `(${opp})` : ""}` : "(empty)"}{" "}
+                    </span>
                     {pid && (
                       <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
                         Send to Bench
@@ -156,17 +168,14 @@ export default function LeagueHome({ leagueId, username, onBack }) {
             })}
           </ul>
 
-          <h3>Bench — Week {currentWeek}</h3>
+          <h3>Bench</h3>
           <ul style={{ listStyle: "none", padding: 0 }}>
             {bench.map((pid) => {
               const p = playersMap.get(pid);
-              const name = p ? playerDisplay(p) : pid;
-              const opp = p ? opponentForWeek(p, currentWeek) : "";
               return (
-                <li key={pid} style={{ marginBottom: 8 }}>
-                  <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                    <span style={{ minWidth: 180 }}>{name}</span>
-                    <span style={{ color: "#666" }}>{opp ? `• Opp: ${opp}` : ""}</span>
+                <li key={pid} style={{ marginBottom: 6 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span>{p ? playerDisplay(p) : pid}</span>
                     <select
                       defaultValue=""
                       onChange={(e) => {
@@ -187,28 +196,71 @@ export default function LeagueHome({ leagueId, username, onBack }) {
             })}
             {bench.length === 0 && <li>(no bench players)</li>}
           </ul>
+
+          {/* Team total preview */}
+          <TeamTotalPreview
+            title={`Projected Total (Week ${currentWeek})`}
+            roster={roster}
+            playersMap={playersMap}
+            week={currentWeek}
+          />
         </div>
       )}
 
-      {/* PLAYERS TAB */}
+      {/* Players */}
       {tab === "players" && (
         <PlayersList leagueId={leagueId} currentWeek={currentWeek} />
       )}
 
-      {/* DRAFT TAB */}
-      {tab === "draft" && showDraftTab && (
+      {/* Draft */}
+      {tab === "draft" && !draftDone && (
         <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
       )}
 
-      {/* LEAGUE TAB */}
-      {tab === "league" && <LeagueTab leagueId={leagueId} teams={allTeams} />}
+      {/* League (other teams) */}
+      {tab === "league" && (
+        <div>
+          <h3>Teams in League</h3>
+          {allTeams.length === 0 && <p>(no other teams yet)</p>}
+          <ul style={{ listStyle: "none", padding: 0 }}>
+            {allTeams.map((t) => {
+              const wins = Number(t?.wins || 0);
+              const losses = Number(t?.losses || 0);
+              const teamName = t?.name || t?.id;
+              // quick projected total
+              const { total } = computeTeamPoints({
+                roster: t?.roster || {},
+                week: currentWeek,
+                playersMap,
+              });
+              return (
+                <li key={t.id} style={{ marginBottom: 10, borderBottom: "1px solid #eee", paddingBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div>
+                      <b>{teamName}</b> — <span>{wins}-{losses}</span>
+                    </div>
+                    <div>Proj: {total}</div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
 
-      {/* MATCHUPS TAB */}
-      {tab === "matchups" && <Matchups leagueId={leagueId} defaultWeek={currentWeek} />}
+      {/* Matchups */}
+      {tab === "matchups" && (
+        <MatchupsView
+          leagueId={leagueId}
+          week={currentWeek}
+          schedule={weekSchedule}
+          playersMap={playersMap}
+        />
+      )}
 
-      {/* ADMIN TAB */}
+      {/* Admin */}
       {tab === "admin" && isOwner && (
-        <LeagueAdmin leagueId={leagueId} username={username} league={league} />
+        <LeagueAdmin leagueId={leagueId} username={username} />
       )}
     </div>
   );
@@ -231,33 +283,82 @@ function TabButton({ label, active, onClick }) {
   );
 }
 
-/** Simple league overview list */
-function LeagueTab({ leagueId, teams }) {
+/** Small helper to show a team's projected total */
+function TeamTotalPreview({ title, roster, week, playersMap }) {
+  const { total } = computeTeamPoints({ roster, week, playersMap });
+  return (
+    <div style={{ padding: "8px 0" }}>
+      <b>{title}:</b> {total}
+    </div>
+  );
+}
+
+/** Matchups view for the current week */
+function MatchupsView({ leagueId, week, schedule, playersMap }) {
+  const matchups = Array.isArray(schedule?.matchups) ? schedule.matchups : [];
+
+  if (!matchups.length) {
+    return <p>No matchups scheduled for week {week}.</p>;
+  }
+
   return (
     <div>
-      <h3>League Teams</h3>
-      {(!teams || teams.length === 0) && <p>No teams yet.</p>}
+      <h3>Week {week} Matchups</h3>
       <ul style={{ listStyle: "none", padding: 0 }}>
-        {teams.map((t) => {
-          const record = t?.record || t?.standings || {};
-          const w = record.wins ?? 0;
-          const l = record.losses ?? 0;
-          const name = t?.name || t?.owner || t?.id;
-          return (
-            <li key={t.id} style={{ marginBottom: 8 }}>
-              <div style={{ display: "flex", gap: 12 }}>
-                <b style={{ minWidth: 180 }}>{name}</b>
-                <span style={{ color: "#666" }}>
-                  W-L: {w}-{l}
-                </span>
-              </div>
-            </li>
-          );
-        })}
+        {matchups.map((m, idx) => (
+          <MatchupRow
+            key={`${m.home}_vs_${m.away}_${idx}`}
+            leagueId={leagueId}
+            home={m.home}
+            away={m.away}
+            week={week}
+            playersMap={playersMap}
+          />
+        ))}
       </ul>
-      <p style={{ color: "#888", fontSize: 12 }}>
-        (Tip: records will update when you add weekly results logic.)
-      </p>
     </div>
+  );
+}
+
+/** Single matchup line: shows both teams + projected totals */
+function MatchupRow({ leagueId, home, away, week, playersMap }) {
+  const [homeTeam, setHomeTeam] = useState(null);
+  const [awayTeam, setAwayTeam] = useState(null);
+
+  useEffect(() => {
+    const unsubHome = listenTeam({ leagueId, username: home, onChange: setHomeTeam });
+    const unsubAway = listenTeam({ leagueId, username: away, onChange: setAwayTeam });
+    return () => {
+      unsubHome && unsubHome();
+      unsubAway && unsubAway();
+    };
+  }, [leagueId, home, away]);
+
+  const homePts = computeTeamPoints({
+    roster: homeTeam?.roster || {},
+    week,
+    playersMap,
+  }).total;
+
+  const awayPts = computeTeamPoints({
+    roster: awayTeam?.roster || {},
+    week,
+    playersMap,
+  }).total;
+
+  return (
+    <li style={{ marginBottom: 10, borderBottom: "1px solid #eee", paddingBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ flex: 1 }}>
+          <b>{homeTeam?.name || home}</b>
+          <div>Proj: {homePts}</div>
+        </div>
+        <div style={{ alignSelf: "center" }}>vs</div>
+        <div style={{ flex: 1, textAlign: "right" }}>
+          <b>{awayTeam?.name || away}</b>
+          <div>Proj: {awayPts}</div>
+        </div>
+      </div>
+    </li>
   );
 }
