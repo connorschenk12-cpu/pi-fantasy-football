@@ -26,7 +26,7 @@ export const ROSTER_SLOTS = ["QB", "WR1", "WR2", "RB1", "RB2", "TE", "FLEX", "K"
 // 9 starters + 3 bench = 12 total rounds
 export const BENCH_SIZE = 3;
 export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE; // 12
-export const PICK_CLOCK_MS = 5000; // 5 seconds per pick
+export const PICK_CLOCK_MS = 5000; // 5-second pick clock
 
 export function emptyRoster() {
   const r = {};
@@ -51,7 +51,7 @@ export function defaultSlotForPosition(pos, roster = {}) {
 }
 
 /* =========================================================
- *  OPPONENT / TEAMS UTIL
+ *  PLAYER HELPERS (opponent/projections)
  * ======================================================= */
 
 export function opponentForWeek(p, week) {
@@ -68,14 +68,6 @@ export function opponentForWeek(p, week) {
   if (p?.[`opponentW${w}`] != null) return p[`opponentW${w}`];
 
   return "";
-}
-
-export async function listTeams(leagueId) {
-  const col = collection(db, "leagues", leagueId, "teams");
-  const snap = await getDocs(col);
-  const arr = [];
-  snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-  return arr;
 }
 
 /* =========================================================
@@ -103,7 +95,7 @@ export async function ensureTeam({ leagueId, username }) {
       ref,
       {
         owner: username,
-        name: username,
+        name: username, // default team name
         roster: emptyRoster(),
         bench: [],
         createdAt: serverTimestamp(),
@@ -130,25 +122,20 @@ export function listenTeamById(leagueId, teamId, onChange) {
   });
 }
 
-/* =========================================================
- *  MEMBERS
- * ======================================================= */
-
-export async function listMembers(leagueId) {
-  const colRef = collection(db, "leagues", leagueId, "members");
-  const snap = await getDocs(colRef);
+export async function listTeams(leagueId) {
+  const col = collection(db, "leagues", leagueId, "teams");
+  const snap = await getDocs(col);
   const arr = [];
-  snap.forEach((d) => arr.push(d.id)); // username as doc id
+  snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
   return arr;
 }
-
 
 /* =========================================================
  *  PLAYERS
  * ======================================================= */
 
 export async function listPlayers({ leagueId }) {
-  // League-level players override global players if present
+  // league-scoped first
   if (leagueId) {
     const leaguePlayersRef = collection(db, "leagues", leagueId, "players");
     const leagueSnap = await getDocs(leaguePlayersRef);
@@ -158,6 +145,7 @@ export async function listPlayers({ leagueId }) {
       return arr;
     }
   }
+  // fallback to global
   const snap = await getDocs(collection(db, "players"));
   const out = [];
   snap.forEach((d) => out.push({ id: d.id, ...d.data() }));
@@ -176,7 +164,7 @@ export function playerDisplay(p) {
   return p.name || p.fullName || p.playerName || String(p.id) || "(unknown)";
 }
 
-/** Projections tolerant to multiple shapes */
+/** Tolerant weekly projection reader */
 export function projForWeek(p, week) {
   const w = String(week);
   if (p?.projections && p.projections[w] != null) return Number(p.projections[w]) || 0;
@@ -187,40 +175,6 @@ export function projForWeek(p, week) {
   if (keyed != null) return Number(keyed) || 0;
   return 0;
 }
-
-/** ---- Projected season totals helpers ---- **/
-
-/** Sum a single player's projections across the season (default 18 weeks). */
-export function playerProjectedSeason(p, weeks = 18) {
-  if (!p) return 0;
-  let sum = 0;
-  for (let w = 1; w <= weeks; w++) {
-    sum += Number(projForWeek(p, w) || 0);
-  }
-  return Math.round(sum * 100) / 100;
-}
-
-/**
- * Compute projected season total for a team's starters.
- * Returns { lines: [{slot, playerId, player, projectedSeason}], total }
- */
-export function computeSeasonProjected({ roster, playersMap, weeks = 18 }) {
-  const lines = [];
-  let total = 0;
-
-  (ROSTER_SLOTS || []).forEach((slot) => {
-    const pid = roster?.[slot] || null;
-    const p = pid ? playersMap.get(pid) : null;
-    const proj = playerProjectedSeason(p, weeks);
-    total += Number(proj || 0);
-    lines.push({ slot, playerId: pid, player: p, projectedSeason: proj });
-  });
-
-  return { lines, total: Math.round(total * 100) / 100 };
-}
-
-/** Optional: alias – weekly projected team = current computeTeamPoints */
-export const computeWeeklyProjectedTeam = computeTeamPoints;
 
 export function pointsForPlayer(p, week) {
   return projForWeek(p, week);
@@ -239,7 +193,7 @@ export function computeTeamPoints({ roster, week, playersMap }) {
   return { lines, total: Math.round(total * 100) / 100 };
 }
 
-/** Ownership map for draft/add/drop */
+/** Claims (ownership) */
 export function listenLeagueClaims(leagueId, onChange) {
   const ref = collection(db, "leagues", leagueId, "claims");
   return onSnapshot(ref, (snap) => {
@@ -250,7 +204,7 @@ export function listenLeagueClaims(leagueId, onChange) {
 }
 
 /* =========================================================
- *  ENTRY / PAYMENTS (simple gate)
+ *  ENTRY / PAYMENTS GATE (simple flag)
  * ======================================================= */
 
 export function hasPaidEntry(league, username) {
@@ -281,6 +235,7 @@ export function currentRound(league) {
   return Math.min(Math.floor(picksTaken / leagueDraftTeamCount(league)) + 1, DRAFT_ROUNDS_TOTAL);
 }
 
+/** Configure draft (scheduled) with explicit order */
 export async function configureDraft({ leagueId, order }) {
   const lref = doc(db, "leagues", leagueId);
   const snap = await getDoc(lref);
@@ -297,13 +252,11 @@ export async function configureDraft({ leagueId, order }) {
       clockMs: PICK_CLOCK_MS,
       deadline: null,
     },
-    settings: {
-      ...(prev.settings || {}),
-      lockAddDuringDraft: true,
-    },
+    settings: { ...(prev.settings || {}), lockAddDuringDraft: true },
   });
 }
 
+/** Initialize order from members (simple) */
 export async function initDraftOrder({ leagueId }) {
   const memCol = collection(db, "leagues", leagueId, "members");
   const memSnap = await getDocs(memCol);
@@ -316,10 +269,7 @@ export async function initDraftOrder({ leagueId }) {
 
 export async function startDraft({ leagueId }) {
   const ref = doc(db, "leagues", leagueId);
-  await updateDoc(ref, {
-    "draft.status": "live",
-    "draft.deadline": Date.now() + PICK_CLOCK_MS,
-  });
+  await updateDoc(ref, { "draft.status": "live", "draft.deadline": Date.now() + PICK_CLOCK_MS });
 }
 
 export async function endDraft({ leagueId }) {
@@ -336,7 +286,7 @@ export async function setDraftStatus({ leagueId, status }) {
   await updateDoc(doc(db, "leagues", leagueId), { "draft.status": status });
 }
 
-/** Draft pick with bench fallback if slot filled */
+/** Perform a draft pick (starter slot if open else bench) */
 export async function draftPick({ leagueId, username, playerId, playerPosition, slot }) {
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
@@ -345,57 +295,48 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
 
   if (!canDraft(league)) throw new Error("Draft is not live");
 
-  // turn check
   const order = Array.isArray(league?.draft?.order) ? league.draft.order : [];
   const ptr = Number.isInteger(league?.draft?.pointer) ? league.draft.pointer : 0;
   const onClock = order[ptr] || null;
   if (onClock !== username) throw new Error("Not your turn");
 
-  // duplicate check
+  // already owned?
   const claimRef = doc(db, "leagues", leagueId, "claims", playerId);
   const claimSnap = await getDoc(claimRef);
   if (claimSnap.exists()) throw new Error("Player already owned");
 
-  // team
   const teamRef = await ensureTeam({ leagueId, username });
   const teamSnap = await getDoc(teamRef);
   const team = teamSnap.exists() ? teamSnap.data() : { roster: emptyRoster(), bench: [] };
 
-  // target slot
+  // pick target slot
   const rosterCopy = { ...(team.roster || emptyRoster()) };
   let targetSlot = slot;
   if (!targetSlot) {
     const pos = String(playerPosition || "").toUpperCase();
-    if (pos === "RB") {
-      targetSlot = rosterCopy.RB1 ? (rosterCopy.RB2 ? "FLEX" : "RB2") : "RB1";
-    } else if (pos === "WR") {
-      targetSlot = rosterCopy.WR1 ? (rosterCopy.WR2 ? "FLEX" : "WR2") : "WR1";
-    } else {
-      targetSlot = defaultSlotForPosition(pos, rosterCopy);
-    }
+    if (pos === "RB") targetSlot = rosterCopy.RB1 ? (rosterCopy.RB2 ? "FLEX" : "RB2") : "RB1";
+    else if (pos === "WR") targetSlot = rosterCopy.WR1 ? (rosterCopy.WR2 ? "FLEX" : "WR2") : "WR1";
+    else targetSlot = defaultSlotForPosition(pos, rosterCopy);
   }
 
-  // if slot full → bench
+  // full? -> bench
   let sendToBench = false;
   if (targetSlot !== "FLEX" && rosterCopy[targetSlot]) sendToBench = true;
   if (targetSlot === "FLEX" && rosterCopy.FLEX) sendToBench = true;
 
   const batch = writeBatch(db);
 
-  // claim
   batch.set(claimRef, { claimedBy: username, at: serverTimestamp() }, { merge: true });
 
-  // update team
   const newTeam = {
     roster: { ...(team.roster || emptyRoster()) },
     bench: Array.isArray(team.bench) ? [...team.bench] : [],
   };
   if (sendToBench) newTeam.bench.push(playerId);
   else newTeam.roster[targetSlot] = playerId;
-
   batch.set(teamRef, newTeam, { merge: true });
 
-  // advance pointer (snake)
+  // advance pointer snake
   const teamsCount = Math.max(1, Array.isArray(order) ? order.length : 1);
   const prevPicks = Number(league?.draft?.picksTaken || 0);
   const picksTaken = prevPicks + 1;
@@ -421,7 +362,7 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   await batch.commit();
 }
 
-/** Best available (by projections) for auto-pick */
+/** Auto-pick best available by projection */
 export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   const league = await getLeague(leagueId);
   if (!canDraft(league)) return;
@@ -451,7 +392,7 @@ export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   });
 }
 
-/** Auto-draft if the pick clock has expired */
+/** Auto-draft when clock expired */
 export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
@@ -505,7 +446,7 @@ export async function moveToStarter({ leagueId, username, playerId, slot }) {
   bench.splice(idx, 1);
 
   const roster = { ...(team.roster || emptyRoster()) };
-  if (roster[slot]) bench.push(roster[slot]); // swap down if occupied
+  if (roster[slot]) bench.push(roster[slot]); // swap
   roster[slot] = playerId;
 
   await updateDoc(tRef, { roster, bench });
@@ -537,9 +478,7 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   const roster = { ...(team.roster || emptyRoster()) };
   const bench = Array.isArray(team.bench) ? [...team.bench] : [];
 
-  for (const s of Object.keys(roster)) {
-    if (roster[s] === playerId) roster[s] = null;
-  }
+  for (const s of Object.keys(roster)) if (roster[s] === playerId) roster[s] = null;
   const idx = bench.indexOf(playerId);
   if (idx >= 0) bench.splice(idx, 1);
 
@@ -549,6 +488,7 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   await batch.commit();
 }
 
+/** Add/Drop (blocked while draft is locked) */
 export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   const league = await getLeague(leagueId);
   if (league?.settings?.lockAddDuringDraft && draftActive(league)) {
@@ -591,10 +531,7 @@ export async function createLeague({ name, owner, order }) {
     name,
     owner,
     createdAt: serverTimestamp(),
-    settings: {
-      currentWeek: 1,
-      lockAddDuringDraft: false,
-    },
+    settings: { currentWeek: 1, lockAddDuringDraft: false },
     draft: {
       status: "scheduled",
       order: Array.isArray(order) && order.length ? order : [owner],
@@ -632,13 +569,13 @@ export async function joinLeague({ leagueId, username }) {
 export async function listMyLeagues({ username }) {
   const leaguesCol = collection(db, "leagues");
 
-  // leagues I own
+  // owned
   const qOwned = query(leaguesCol, where("owner", "==", username));
   const sOwned = await getDocs(qOwned);
   const out = [];
   sOwned.forEach((d) => out.push({ id: d.id, ...d.data() }));
 
-  // leagues I joined
+  // joined
   const allLeagues = await getDocs(leaguesCol);
   for (const d of allLeagues.docs) {
     const memSnap = await getDoc(doc(db, "leagues", d.id, "members", username));
@@ -653,16 +590,16 @@ export async function listMyLeagues({ username }) {
  *  SCHEDULE / MATCHUPS
  * ======================================================= */
 
-/** Simple round-robin generator. Returns [{week, matchups:[{home,away}]}...] */
+/** Round-robin schedule generator */
 export function generateScheduleRoundRobin(usernames, totalWeeks) {
   const teams = [...new Set(usernames || [])].filter(Boolean);
   if (teams.length < 2) return [];
 
   const rounds = Math.min(totalWeeks || teams.length - 1, 18);
   const schedule = [];
-
-  // pad to even with BYE
   const arr = [...teams];
+
+  // add a bye if odd
   if (arr.length % 2 === 1) arr.push("__BYE__");
   const n = arr.length;
   const half = n / 2;
@@ -675,24 +612,21 @@ export function generateScheduleRoundRobin(usernames, totalWeeks) {
     for (let i = 0; i < half; i++) {
       const home = left[i];
       const away = right[i];
-      if (home !== "__BYE__" && away !== "__BYE__") {
-        matchups.push({ home, away });
-      }
+      if (home !== "__BYE__" && away !== "__BYE__") matchups.push({ home, away });
     }
     schedule.push({ week, matchups });
 
     // rotate (circle method)
     const fixed = left[0];
-    const moveFromLeft = left.splice(1, 1)[0];
-    const moveFromRight = right.pop();
-    left.push(moveFromRight);
-    right.unshift(moveFromLeft);
-    left[0] = fixed;
+    const moveFromLeft = left.slice(1);
+    const moveFromRight = right.shift();
+    right.push(left[left.length - 1]);
+    left = [fixed, moveFromRight, ...moveFromLeft.slice(0, moveFromLeft.length - 1)];
   }
   return schedule;
 }
 
-/** Write schedule docs under leagues/{leagueId}/schedule/week-{n} */
+/** Write schedule docs: leagues/{leagueId}/schedule/week-{week} */
 export async function writeSchedule(leagueId, schedule) {
   if (!leagueId || !Array.isArray(schedule)) throw new Error("Invalid schedule");
   const batch = writeBatch(db);
@@ -703,136 +637,7 @@ export async function writeSchedule(leagueId, schedule) {
   await batch.commit();
 }
 
-/** ------------ MEMBERS / SCHEDULE UTILITIES (ADD THESE) ------------ **/
-
-/**
- * Return a list of member usernames for a league.
- * Priority: members subcollection -> team doc IDs -> [owner]
- */
-/** ------------ MEMBERS / SCHEDULE UTILITIES (single source of truth) ------------ **/
-
-/**
- * Return a list of member usernames for a league.
- * Priority: members subcollection -> team doc IDs -> [owner]
- */
-export async function listMemberUsernames(leagueId) {
-  const out = new Set();
-
-  // 1) members subcollection
-  const memCol = collection(db, "leagues", leagueId, "members");
-  const memSnap = await getDocs(memCol);
-  memSnap.forEach((d) => out.add(d.id));
-
-  if (out.size === 0) {
-    // 2) team documents
-    const teamsCol = collection(db, "leagues", leagueId, "teams");
-    const teamsSnap = await getDocs(teamsCol);
-    teamsSnap.forEach((d) => out.add(d.id));
-  }
-
-  if (out.size === 0) {
-    // 3) fall back to owner
-    const league = await getLeague(leagueId);
-    if (league?.owner) out.add(league.owner);
-  }
-
-  return [...out].filter(Boolean);
-}
-
-/**
- * Ensure there is a season schedule. If none exists (or force=true),
- * it (re)creates a round-robin schedule and writes:
- *   leagues/{leagueId}/schedule/week-{N} -> { week, matchups: [{home, away}] }
- *
- * @returns the schedule array in memory: [{ week, matchups: [...] }, ...]
- */
-export async function ensureOrRecreateSchedule({
-  leagueId,
-  totalWeeks = 14,
-  force = false,
-}) {
-  if (!leagueId) throw new Error("ensureOrRecreateSchedule: leagueId required");
-
-  // Check if a schedule doc already exists (week-1) unless forcing
-  const week1Ref = doc(db, "leagues", leagueId, "schedule", "week-1");
-  const existing = await getDoc(week1Ref);
-
-  if (existing.exists() && !force) {
-    // Read back all existing weeks to return an array
-    const schedCol = collection(db, "leagues", leagueId, "schedule");
-    const snap = await getDocs(schedCol);
-    const arr = [];
-    snap.forEach((d) => arr.push(d.data()));
-    arr.sort((a, b) => Number(a.week || 0) - Number(b.week || 0));
-    return arr;
-  }
-
-  // Build a new schedule
-  const members = await listMemberUsernames(leagueId);
-  if (members.length < 2) throw new Error("Need at least 2 members to build a schedule.");
-
-  const schedule = generateScheduleRoundRobin(members, totalWeeks);
-
-  // Write it
-  await writeSchedule(leagueId, schedule);
-
-  return schedule;
-}
-
-
-  // remove any falsey values
-  return [...out].filter(Boolean);
-}
-
-/**
- * Ensure there is a season schedule. If none exists (or force=true),
- * it (re)creates a round-robin schedule and writes:
- *   leagues/{leagueId}/schedule/week-{N} -> { week, matchups: [{home, away}] }
- *
- * @returns the schedule array in memory: [{ week, matchups: [...] }, ...]
- */
-export async function ensureOrRecreateSchedule({
-  leagueId,
-  totalWeeks = 14,
-  force = false,
-}) {
-  if (!leagueId) throw new Error("ensureOrRecreateSchedule: leagueId required");
-
-  // Check if a schedule doc already exists (week-1) unless forcing
-  const week1Ref = doc(db, "leagues", leagueId, "schedule", "week-1");
-  const existing = await getDoc(week1Ref);
-
-  if (existing.exists() && !force) {
-    // Read back all existing weeks to return an array
-    const schedCol = collection(db, "leagues", leagueId, "schedule");
-    const snap = await getDocs(schedCol);
-    const arr = [];
-    snap.forEach((d) => arr.push(d.data()));
-    // sort by week in case Firestore returns unordered
-    arr.sort((a, b) => Number(a.week || 0) - Number(b.week || 0));
-    return arr;
-  }
-
-  // Build a new schedule
-  const members = await listMemberUsernames(leagueId);
-  if (members.length < 2) throw new Error("Need at least 2 members to build a schedule.");
-
-  const schedule = generateScheduleRoundRobin(members, totalWeeks);
-
-  // Write it
-  await writeSchedule(leagueId, schedule);
-
-  return schedule;
-}
-
-/** Read schedule for a given week (one doc per week) */
-export async function getScheduleWeek(leagueId, week) {
-  const ref = doc(db, "leagues", leagueId, "schedule", `week-${week}`);
-  const snap = await getDoc(ref);
-  return snap.exists() ? snap.data() : { week, matchups: [] };
-}
-
-/** Live listen to a week schedule */
+/** Listen to a particular week schedule */
 export function listenScheduleWeek(leagueId, week, onChange) {
   if (!leagueId || !week) return () => {};
   const ref = doc(db, "leagues", leagueId, "schedule", `week-${week}`);
@@ -841,33 +646,7 @@ export function listenScheduleWeek(leagueId, week, onChange) {
   });
 }
 
-/** Ensure a season schedule exists (idempotent). Returns schedule array. */
-export async function ensureSeasonSchedule(leagueId, totalWeeks = 14) {
-  if (!leagueId) throw new Error("leagueId required");
-
-  // If week-1 exists with matchups, assume schedule already created
-  const wk1Ref = doc(db, "leagues", leagueId, "schedule", "week-1");
-  const wk1Snap = await getDoc(wk1Ref);
-  if (wk1Snap.exists() && Array.isArray(wk1Snap.data()?.matchups) && wk1Snap.data().matchups.length) {
-    // Already present — return the first few weeks to the caller
-    const arr = [];
-    for (let w = 1; w <= totalWeeks; w++) {
-      const s = await getScheduleWeek(leagueId, w);
-      arr.push(s);
-    }
-    return arr;
-  }
-
-  // Build from members
-  const members = await listMembers(leagueId);
-  if (members.length < 2) throw new Error("Need at least 2 members to create a schedule");
-
-  const schedule = generateScheduleRoundRobin(members, totalWeeks);
-  await writeSchedule(leagueId, schedule);
-  return schedule;
-}
-
-/** Optional: record a final result */
+/** (Optional) store a final result */
 export async function setMatchupResult({ leagueId, week, home, away, homePts, awayPts }) {
   const ref = doc(db, "leagues", leagueId, "results", `week-${week}_${home}_vs_${away}`);
   await setDoc(
@@ -875,4 +654,86 @@ export async function setMatchupResult({ leagueId, week, home, away, homePts, aw
     { leagueId, week, home, away, homePts, awayPts, at: serverTimestamp() },
     { merge: true }
   );
+}
+
+/** List matchups for a week (if you need non-live) */
+export async function listMatchups(leagueId, week) {
+  const colRef = collection(db, "leagues", leagueId, "matchups");
+  const qRef = Number.isFinite(week) ? query(colRef, where("week", "==", Number(week))) : colRef;
+  const snap = await getDocs(qRef);
+  const arr = [];
+  snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+  return arr;
+}
+
+/** Live matchups for a week (use if you store them under /matchups) */
+export function listenMatchups(leagueId, week, onChange) {
+  const colRef = collection(db, "leagues", leagueId, "matchups");
+  const qq = Number.isFinite(week) ? query(colRef, where("week", "==", Number(week))) : colRef;
+  return onSnapshot(qq, (snap) => {
+    const arr = [];
+    snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+    onChange(arr);
+  });
+}
+
+/** Members list for schedule seeding */
+export async function listMemberUsernames(leagueId) {
+  const out = new Set();
+
+  // members subcollection
+  const memCol = collection(db, "leagues", leagueId, "members");
+  const memSnap = await getDocs(memCol);
+  memSnap.forEach((d) => out.add(d.id));
+
+  if (out.size === 0) {
+    // fall back to team doc IDs
+    const teamsCol = collection(db, "leagues", leagueId, "teams");
+    const teamsSnap = await getDocs(teamsCol);
+    teamsSnap.forEach((d) => out.add(d.id));
+  }
+
+  if (out.size === 0) {
+    // fall back to owner
+    const league = await getLeague(leagueId);
+    if (league?.owner) out.add(league.owner);
+  }
+  return [...out].filter(Boolean);
+}
+
+/** Ensure (or recreate) a season schedule */
+export async function ensureOrRecreateSchedule({ leagueId, totalWeeks = 14, force = false }) {
+  if (!leagueId) throw new Error("ensureOrRecreateSchedule: leagueId required");
+
+  const week1Ref = doc(db, "leagues", leagueId, "schedule", "week-1");
+  const existing = await getDoc(week1Ref);
+
+  if (existing.exists() && !force) {
+    // return what exists
+    const schedCol = collection(db, "leagues", leagueId, "schedule");
+    const snap = await getDocs(schedCol);
+    const arr = [];
+    snap.forEach((d) => arr.push(d.data()));
+    arr.sort((a, b) => Number(a.week || 0) - Number(b.week || 0));
+    return arr;
+  }
+
+  const members = await listMemberUsernames(leagueId);
+  if (members.length < 2) throw new Error("Need at least 2 members to build a schedule.");
+
+  const schedule = generateScheduleRoundRobin(members, totalWeeks);
+  await writeSchedule(leagueId, schedule);
+  return schedule;
+}
+
+/* =========================================================
+ *  UTILS
+ * ======================================================= */
+
+export function computeSeasonProjected(playersArr) {
+  const totalWeeks = 18;
+  return (playersArr || []).reduce((sum, p) => {
+    for (let w = 1; w <= totalWeeks; w++) sum += projForWeek(p, w);
+    return sum;
+  }, 0);
 }
