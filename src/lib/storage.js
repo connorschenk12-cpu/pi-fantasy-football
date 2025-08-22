@@ -143,6 +143,49 @@ export function currentRound(league) {
   );
 }
 
+/** Set draft status with sensible side-effects */
+export async function setDraftStatus({ leagueId, status }) {
+  const ref = doc(db, "leagues", leagueId);
+
+  if (status === "live") {
+    // go live and start the clock
+    await updateDoc(ref, {
+      "draft.status": "live",
+      "draft.deadline": Date.now() + PICK_CLOCK_MS,
+      "settings.lockAddDuringDraft": true,
+    });
+    return;
+  }
+
+  if (status === "done") {
+    // end draft and unlock add/drop
+    await updateDoc(ref, {
+      "draft.status": "done",
+      "draft.deadline": null,
+      "settings.lockAddDuringDraft": false,
+    });
+    return;
+  }
+
+  if (status === "scheduled") {
+    // keep it simple: just mark scheduled and clear deadline
+    await updateDoc(ref, {
+      "draft.status": "scheduled",
+      "draft.deadline": null,
+      "settings.lockAddDuringDraft": true,
+    });
+    return;
+  }
+
+  if (status === "paused") {
+    await updateDoc(ref, { "draft.status": "paused" });
+    return;
+  }
+
+  // fallback: set whatever status was requested
+  await updateDoc(ref, { "draft.status": status });
+}
+
 /** Configure (or reconfigure) a 12-round draft with a provided order */
 export async function configureDraft({ leagueId, order }) {
   const lref = doc(db, "leagues", leagueId);
