@@ -1,22 +1,29 @@
 /* eslint-disable no-console */
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  listenLeague,
   listenScheduleWeek,
-  listTeams,
   listPlayersMap,
+  listenTeamById,
   computeTeamPoints,
 } from "../lib/storage";
 
-/**
- * Props:
- * - leagueId
- * - currentWeek
- */
-export default function MatchupsTab({ leagueId, currentWeek = 1 }) {
-  const [week, setWeek] = useState(currentWeek);
-  const [schedule, setSchedule] = useState({ week, matchups: [] });
-  const [teams, setTeams] = useState([]);
+export default function MatchupsTab({ leagueId }) {
+  const [league, setLeague] = useState(null);
+  const [week, setWeek] = useState(1);
+  const [schedule, setSchedule] = useState({ week: 1, matchups: [] });
   const [playersMap, setPlayersMap] = useState(new Map());
+  const currentWeek = Number(league?.settings?.currentWeek || 1);
+
+  useEffect(() => {
+    if (!leagueId) return;
+    const unsub = listenLeague(leagueId, setLeague);
+    return () => unsub && unsub();
+  }, [leagueId]);
+
+  useEffect(() => {
+    setWeek(currentWeek || 1);
+  }, [currentWeek]);
 
   useEffect(() => {
     if (!leagueId || !week) return;
@@ -29,87 +36,122 @@ export default function MatchupsTab({ leagueId, currentWeek = 1 }) {
     (async () => {
       try {
         if (!leagueId) return;
-        const [ts, pm] = await Promise.all([
-          listTeams(leagueId),
-          listPlayersMap({ leagueId }),
-        ]);
-        if (mounted) {
-          setTeams(ts);
-          setPlayersMap(pm);
-        }
+        const m = await listPlayersMap({ leagueId });
+        if (mounted) setPlayersMap(m);
       } catch (e) {
-        console.error("MatchupsTab load error:", e);
+        console.error(e);
       }
     })();
-    return () => { mounted = false; };
-  }, [leagueId, week]);
+    return () => {
+      mounted = false;
+    };
+  }, [leagueId]);
 
-  const teamById = useMemo(() => {
-    const m = new Map();
-    teams.forEach((t) => m.set(t.id, t));
-    return m;
-  }, [teams]);
-
-  const rows = useMemo(() => {
-    const out = [];
-    (schedule?.matchups || []).forEach((m) => {
-      const home = teamById.get(m.home);
-      const away = teamById.get(m.away);
-      const homePts = home ? computeTeamPoints({ roster: home.roster || {}, week, playersMap }).total : 0;
-      const awayPts = away ? computeTeamPoints({ roster: away.roster || {}, week, playersMap }).total : 0;
-      out.push({ ...m, homePts, awayPts });
-    });
-    return out;
-  }, [schedule?.matchups, teamById, playersMap, week]);
+  const matchups = Array.isArray(schedule?.matchups) ? schedule.matchups : [];
 
   return (
     <div>
-      <div style={{ marginBottom: 8 }}>
-        <label htmlFor="weekSel"><b>Week</b>: </label>{" "}
-        <select
-          id="weekSel"
-          value={week}
-          onChange={(e) => setWeek(Number(e.target.value))}
-        >
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <b>Week:</b>
+        <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
           {Array.from({ length: 18 }).map((_, i) => (
             <option key={i + 1} value={i + 1}>
-              {i + 1}
+              Week {i + 1}
             </option>
           ))}
         </select>
       </div>
 
-      {!rows.length && (
-        <div style={{ color: "#b35c00" }}>
-          No matchups scheduled for week {week}. Ask your commissioner to (re)generate a schedule in Admin.
+      {matchups.length === 0 ? (
+        <div style={{ color: "#666" }}>No matchups scheduled for week {week}.</div>
+      ) : (
+        <div style={{ display: "grid", gap: 12 }}>
+          {matchups.map((m, idx) => (
+            <MatchupCard
+              key={idx}
+              leagueId={leagueId}
+              week={week}
+              home={m.home}
+              away={m.away}
+              playersMap={playersMap}
+            />
+          ))}
         </div>
-      )}
-
-      {!!rows.length && (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={th}>Home</th>
-              <th style={th}>Projected</th>
-              <th style={th}>Away</th>
-              <th style={th}>Projected</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, idx) => (
-              <tr key={idx}>
-                <td style={td}>{r.home}</td>
-                <td style={td}>{r.homePts.toFixed(1)}</td>
-                <td style={td}>{r.away}</td>
-                <td style={td}>{r.awayPts.toFixed(1)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       )}
     </div>
   );
 }
 
-const th = { textAlign: "left", borderBottom: "1px solid #ddd", padding: "6px 4px" };
-const td = { borderBottom: "1px solid #eee", padding: "6px 4px" };
+function MatchupCard({ leagueId, week, home, away, playersMap }) {
+  const [homeTeam, setHomeTeam] = useState(null);
+  const [awayTeam, setAwayTeam] = useState(null);
+
+  useEffect(() => {
+    if (!leagueId || !home) return;
+    const unsub = listenTeamById(leagueId, home, setHomeTeam);
+    return () => unsub && unsub();
+  }, [leagueId, home]);
+
+  useEffect(() => {
+    if (!leagueId || !away) return;
+    const unsub = listenTeamById(leagueId, away, setAwayTeam);
+    return () => unsub && unsub();
+  }, [leagueId, away]);
+
+  const homeScore = useMemo(() => {
+    if (!homeTeam) return { total: 0, lines: [] };
+    return computeTeamPoints({
+      roster: homeTeam.roster || {},
+      week,
+      playersMap,
+    });
+  }, [homeTeam, playersMap, week]);
+
+  const awayScore = useMemo(() => {
+    if (!awayTeam) return { total: 0, lines: [] };
+    return computeTeamPoints({
+      roster: awayTeam.roster || {},
+      week,
+      playersMap,
+    });
+  }, [awayTeam, playersMap, week]);
+
+  return (
+    <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+        <b>{home}</b>
+        <div>
+          <b>{homeScore.total.toFixed(1)}</b> &nbsp;–&nbsp; <b>{awayScore.total.toFixed(1)}</b>
+        </div>
+        <b>{away}</b>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <Side roster={homeTeam?.roster} week={week} playersMap={playersMap} />
+        <Side roster={awayTeam?.roster} week={week} playersMap={playersMap} />
+      </div>
+    </div>
+  );
+}
+
+function Side({ roster, week, playersMap }) {
+  const slots = Object.keys(roster || {});
+  return (
+    <div>
+      {slots.map((slot) => {
+        const pid = roster?.[slot];
+        const p = pid ? playersMap.get(pid) : null;
+        const name =
+          (p?.name || p?.fullName || p?.playerName || (pid ? String(pid) : "(empty)"));
+        const pts = p?.projections?.[String(week)] ?? 0;
+        return (
+          <div key={slot} style={{ display: "flex", justifyContent: "space-between" }}>
+            <span>
+              <b>{slot}</b>: {name}
+            </span>
+            <span>{Number(pts || 0).toFixed(1)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
