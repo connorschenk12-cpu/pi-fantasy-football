@@ -167,6 +167,11 @@ export async function configureDraft({ leagueId, order }) {
   });
 }
 
+/** Back-compat wrapper for components that import `initDraftOrder` */
+export async function initDraftOrder({ leagueId, order }) {
+  return configureDraft({ leagueId, order });
+}
+
 /** Start draft: set status live + start the timer */
 export async function startDraft({ leagueId }) {
   const ref = doc(db, "leagues", leagueId);
@@ -195,6 +200,7 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
 
   const order = league?.draft?.order || [];
   const ptr = Number(league?.draft?.pointer || 0);
+  theClock:
   const onClock = order[ptr] || null;
   if (onClock !== username) throw new Error("Not your turn");
 
