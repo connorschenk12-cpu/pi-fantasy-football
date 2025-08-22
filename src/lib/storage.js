@@ -76,6 +76,11 @@ export async function listMembers(leagueId){
   const out=[]; snap.forEach(d=>out.push(d.id));
   return out;
 }
+
+// Back-compat alias for components importing listMemberUsernames
+export async function listMemberUsernames(leagueId) {
+  return await listMembers(leagueId);
+}
 export function hasPaidEntry(league, username){
   const en = !!league?.entry?.enabled;
   if(!en) return true;
