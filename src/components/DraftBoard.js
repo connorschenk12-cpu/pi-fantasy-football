@@ -1,95 +1,137 @@
-/* eslint-disable react-hooks/exhaustive-deps */
-// src/components/DraftBoard.js
-import React, { useEffect, useMemo, useRef, useState } from "react";
+/* eslint-disable no-console */
+import React, { useEffect, useMemo, useState } from "react";
 import {
-  listenLeague, projForWeek, autoPickBestAvailable, isMyTurn, canDraft, startDraft, endDraft
+  listenLeague,
+  draftPick,
+  autoDraftIfExpired,
+  isMyTurn,
+  listPlayers,
+  projForWeek,
 } from "../lib/storage";
+import PlayersList from "./PlayersList";
 
-export default function DraftBoard({ league, playersById }) {
-  const leagueId = league?.id;
-  const [liveLeague, setLiveLeague] = useState(league || null);
-  const [now, setNow] = useState(Date.now());
-  const tickRef = useRef(null);
+/**
+ * Props:
+ * - leagueId
+ * - username
+ * - currentWeek
+ */
+export default function DraftBoard({ leagueId, username, currentWeek = 1 }) {
+  const [league, setLeague] = useState(null);
+  const [available, setAvailable] = useState([]);
+  const [loadingPlayers, setLoadingPlayers] = useState(true);
+  const [error, setError] = useState("");
 
+  // League listener
   useEffect(() => {
     if (!leagueId) return;
-    const un = listenLeague(leagueId, (lg) => setLiveLeague(lg));
-    return () => un && un();
+    const unsub = listenLeague(leagueId, (l) => setLeague(l));
+    return () => unsub && unsub();
   }, [leagueId]);
 
-  // local clock tick (500ms)
+  // Fetch available players once (UI filters/sorts)
   useEffect(() => {
-    tickRef.current = setInterval(() => setNow(Date.now()), 500);
-    return () => clearInterval(tickRef.current);
-  }, []);
-
-  const d = liveLeague?.draft || {};
-  const order = Array.isArray(d.order) ? d.order : [];
-  const onClock = order[Number(d.pointer) || 0];
-
-  const currentWeek = Number(liveLeague?.settings?.currentWeek || 1);
-  const msLeft = useMemo(() => {
-    if (!d?.deadline) return 0;
-    return Math.max(0, Number(d.deadline) - now);
-  }, [d?.deadline, now]);
-
-  // Autopick when expired (any client can do this; in test you’re single user anyway)
-  useEffect(() => {
-    if (!liveLeague?.id) return;
-    if (!canDraft(liveLeague)) return;
-    if (!d?.deadline) return;
-    if (msLeft > 0) return;
-
-    // deadline passed -> auto pick best available
+    let alive = true;
     (async () => {
-      await autoPickBestAvailable({ leagueId: liveLeague.id, currentWeek });
+      try {
+        setLoadingPlayers(true);
+        const list = await listPlayers({ leagueId });
+        if (!alive) return;
+        setAvailable(Array.isArray(list) ? list : []);
+      } catch (e) {
+        console.error("DraftBoard listPlayers error:", e);
+        if (alive) setError(String(e?.message || e));
+      } finally {
+        if (alive) setLoadingPlayers(false);
+      }
     })();
-    // next deadline is written by draftPick()
-  }, [msLeft, d?.deadline, liveLeague?.id, currentWeek]);
+    return () => { alive = false; };
+  }, [leagueId]);
 
-  const statusLine = useMemo(() => {
-    const rd = d.round || 1;
-    const tot = d.roundsTotal || 12;
-    const pointerName = onClock || "—";
-    if (d.status === "live") {
-      return `Round ${rd}/${tot} • On the clock: ${pointerName} • ${Math.ceil(msLeft/1000)}s`;
+  // Auto-pick on timer expiry
+  useEffect(() => {
+    let t;
+    const tick = async () => {
+      try {
+        await autoDraftIfExpired({ leagueId, currentWeek });
+      } catch (e) {
+        // not fatal
+      } finally {
+        t = setTimeout(tick, 1000);
+      }
+    };
+    t = setTimeout(tick, 1000);
+    return () => clearTimeout(t);
+  }, [leagueId, currentWeek]);
+
+  const order = useMemo(() => {
+    return Array.isArray(league?.draft?.order) ? league.draft.order : [];
+  }, [league]);
+
+  const pointer = useMemo(() => {
+    const p = league?.draft?.pointer;
+    return Number.isInteger(p) ? p : 0;
+  }, [league]);
+
+  const onClockUser = order[pointer] || null;
+  const myTurn = isMyTurn(league, username);
+
+  const handleDraft = async (player) => {
+    try {
+      setError("");
+      await draftPick({
+        leagueId,
+        username,
+        playerId: player?.id,
+        playerPosition: (player?.position || "").toString().toUpperCase(),
+        slot: null,
+      });
+    } catch (e) {
+      console.error("draftPick error:", e);
+      setError(String(e?.message || e));
     }
-    return `Draft status: ${d.status || "scheduled"}`;
-  }, [d.status, d.round, d.roundsTotal, onClock, msLeft]);
+  };
 
-  async function handleStart() {
-    await startDraft({ leagueId });
-  }
-  async function handleEnd() {
-    await endDraft({ leagueId });
-  }
+  const status = league?.draft?.status || "scheduled";
+  const deadline = Number(league?.draft?.deadline || 0);
+  const msLeft = Math.max(0, deadline ? (deadline - Date.now()) : 0);
+  const secondsLeft = Math.ceil(msLeft / 1000);
 
-  // Simple visual of order & pointer
   return (
-    <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, marginBottom: 12 }}>
-      <div style={{ fontWeight: 700, marginBottom: 6 }}>Draft Board</div>
-      <div style={{ marginBottom: 8 }}>{statusLine}</div>
+    <div>
+      <h3>Draft Board</h3>
 
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-        {order.map((u, i) => (
-          <div key={u + i} style={{
-            padding: "6px 8px",
-            borderRadius: 6,
-            border: "1px solid #ddd",
-            background: i === (d.pointer || 0) ? "#111" : "#fff",
-            color: i === (d.pointer || 0) ? "#fff" : "#111"
-          }}>
-            {u}
-          </div>
-        ))}
+      <div style={{ marginBottom: 6, fontSize: 14 }}>
+        Status: <b>{status}</b>{' '}
+        {status === "live" && (
+          <>· On clock: <b>{onClockUser || "(unknown)"}</b> · Time left: <b>{secondsLeft}s</b></>
+        )}
       </div>
 
-      {d.status === "scheduled" && (
-        <button onClick={handleStart} style={{ padding: "8px 12px" }}>Start Draft</button>
+      {error && <div style={{ color: "red", marginBottom: 8 }}>Error: {error}</div>}
+
+      {status !== "live" && (
+        <div style={{ margin: "8px 0", fontStyle: "italic" }}>
+          Draft is not live yet. Start the draft from Admin when everyone has joined.
+        </div>
       )}
-      {d.status === "live" && (
-        <button onClick={handleEnd} style={{ padding: "8px 12px" }}>End Draft</button>
+
+      {status === "live" && (
+        <div style={{ margin: "10px 0" }}>
+          {myTurn ? (
+            <div>Your turn — pick a player below.</div>
+          ) : (
+            <div>Waiting for <b>{onClockUser || "someone"}</b>…</div>
+          )}
+        </div>
       )}
+
+      <PlayersList
+        leagueId={leagueId}
+        currentWeek={currentWeek}
+        allowDraftButton={status === "live" && myTurn}
+        onDraft={handleDraft}
+      />
     </div>
   );
 }
