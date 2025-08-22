@@ -623,3 +623,49 @@ export async function saveMatchResult(leagueId, result) {
   batch.set(awayRef, { wins: aW, losses: aL }, { merge: true });
   await batch.commit();
 }
+/** =========================
+ *  MATCHUPS / LIVE SCORING HELPERS
+ *  ========================= */
+
+/** Listen to any team by id (not only current user) */
+export function listenTeamById(leagueId, teamId, onChange) {
+  if (!leagueId || !teamId) return () => {};
+  const ref = doc(db, "leagues", leagueId, "teams", teamId);
+  return onSnapshot(ref, (snap) => {
+    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
+  });
+}
+
+/** Fetch all players (league-scoped first, then global) as a map id -> player */
+export async function listPlayersMap({ leagueId }) {
+  const arr = await listPlayers({ leagueId });
+  const map = new Map();
+  arr.forEach((p) => map.set(p.id, p));
+  return map;
+}
+
+/** Friendly player name for rendering */
+export function playerDisplay(p) {
+  if (!p) return "(empty)";
+  return p.name || p.fullName || p.playerName || p.id || "(unknown)";
+}
+
+/** Points for a single player for a given week (uses projections for now) */
+export function pointsForPlayer(p, week) {
+  // Uses your existing proj reader. Later you can swap to live stats seamlessly.
+  return projForWeek(p, week);
+}
+
+/** Compute starter lines and total for a team roster */
+export function computeTeamPoints({ roster, week, playersMap }) {
+  const lines = [];
+  let total = 0;
+  (ROSTER_SLOTS || []).forEach((slot) => {
+    const pid = roster?.[slot] || null;
+    const p = pid ? playersMap.get(pid) : null;
+    const pts = p ? pointsForPlayer(p, week) : 0;
+    total += Number(pts || 0);
+    lines.push({ slot, playerId: pid, player: p, points: pts });
+  });
+  return { lines, total: Math.round(total * 100) / 100 };
+}
