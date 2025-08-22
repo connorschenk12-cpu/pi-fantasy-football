@@ -11,14 +11,15 @@ import {
   onSnapshot,
   query,
   where,
+  orderBy,
   serverTimestamp,
   writeBatch,
 } from "firebase/firestore";
 import { db } from "../firebase";
 
-/** =========================================================
+/* =========================================================
  *  ROSTER / DRAFT CONSTANTS
- *  ========================================================= */
+ * ======================================================= */
 
 // Starters: QB, WR1, WR2, RB1, RB2, TE, FLEX, K, DEF
 export const ROSTER_SLOTS = [
@@ -36,7 +37,7 @@ export const ROSTER_SLOTS = [
 // 9 starters + 3 bench = 12 total rounds
 export const BENCH_SIZE = 3;
 export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE; // 12
-export const PICK_CLOCK_MS = 5000; // 5 second draft timer
+export const PICK_CLOCK_MS = 5000; // 5-second pick clock
 
 export function emptyRoster() {
   const r = {};
@@ -62,26 +63,16 @@ export function defaultSlotForPosition(pos, roster = {}) {
   return "FLEX";
 }
 
-// --- NEW HELPERS: opponent lookup + list teams ---
+/* =========================================================
+ *  OPPONENT + TEAMS
+ * ======================================================= */
 
-/** Try to read a player's opponent/team they face in a given week.
- *  We support several shapes so your data can be flexible:
- *   - p.matchups?.[week]?.opp
- *   - p.oppByWeek?.[week]
- *   - p.opponentByWeek?.[week]
- *   - p[`oppW${week}`]
- *   - p[`opponentW${week}`]
- *  Returns a short string like "vs DAL" or "@ KC" if your data encodes home/away;
- *  otherwise just the opponent code like "DAL".
- */
+/** Read a player's opponent label for a given week (tolerant to schema) */
 export function opponentForWeek(p, week) {
   if (!p || week == null) return "";
   const w = String(week);
 
-  const m =
-    p?.matchups?.[w] ??
-    p?.matchups?.[week] ??
-    null;
+  const m = p?.matchups?.[w] ?? p?.matchups?.[week] ?? null;
   if (m && (m.opp || m.opponent)) return m.opp || m.opponent;
 
   if (p?.oppByWeek && p.oppByWeek[w] != null) return p.oppByWeek[w];
@@ -93,7 +84,7 @@ export function opponentForWeek(p, week) {
   return "";
 }
 
-/** List all teams in the league (one doc per username) */
+/** List all teams in a league */
 export async function listTeams(leagueId) {
   const col = collection(db, "leagues", leagueId, "teams");
   const snap = await getDocs(col);
@@ -102,9 +93,9 @@ export async function listTeams(leagueId) {
   return arr;
 }
 
-/** =========================================================
+/* =========================================================
  *  LEAGUE / TEAM READ & LISTEN
- *  ========================================================= */
+ * ======================================================= */
 
 export function listenLeague(leagueId, onChange) {
   if (!leagueId) return () => {};
@@ -127,9 +118,11 @@ export async function ensureTeam({ leagueId, username }) {
       ref,
       {
         owner: username,
-        name: username, // default team name
+        name: username, // default team name == username
         roster: emptyRoster(),
         bench: [],
+        wins: 0,
+        losses: 0,
         createdAt: serverTimestamp(),
       },
       { merge: true }
@@ -154,22 +147,21 @@ export function listenTeamById(leagueId, teamId, onChange) {
   });
 }
 
-// --- NEW: listMatchups for a given week ---
-import { query, where } from "firebase/firestore"; // ensure these are in your imports at top
+/* =========================================================
+ *  MATCHUPS (list + listen)
+ * ======================================================= */
 
 export async function listMatchups(leagueId, week) {
   const colRef = collection(db, "leagues", leagueId, "matchups");
-  const q = Number.isFinite(week)
+  const qq = Number.isFinite(week)
     ? query(colRef, where("week", "==", Number(week)))
     : colRef;
-  const snap = await getDocs(q);
+  const snap = await getDocs(qq);
   const arr = [];
   snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-  // Expect docs like: { id, week, home: "usernameA", away: "usernameB" }
-  return arr;
+  return arr; // docs like { id, week, home, away }
 }
 
-// --- OPTIONAL: live listener for matchups of a week (use if you prefer real-time) ---
 export function listenMatchups(leagueId, week, onChange) {
   const colRef = collection(db, "leagues", leagueId, "matchups");
   const qq = Number.isFinite(week)
@@ -182,12 +174,12 @@ export function listenMatchups(leagueId, week, onChange) {
   });
 }
 
-/** =========================================================
+/* =========================================================
  *  PLAYERS
- *  ========================================================= */
+ * ======================================================= */
 
 export async function listPlayers({ leagueId }) {
-  // League-scoped players override global list if present
+  // Prefer league-scoped players if present
   if (leagueId) {
     const leaguePlayersRef = collection(db, "leagues", leagueId, "players");
     const leagueSnap = await getDocs(leaguePlayersRef);
@@ -245,7 +237,7 @@ export function computeTeamPoints({ roster, week, playersMap }) {
   return { lines, total: Math.round(total * 100) / 100 };
 }
 
-/** Claims for ownership lookups (during draft/add/drop) */
+/** Ownership claims (during draft/add/drop) */
 export function listenLeagueClaims(leagueId, onChange) {
   const ref = collection(db, "leagues", leagueId, "claims");
   return onSnapshot(ref, (snap) => {
@@ -255,17 +247,17 @@ export function listenLeagueClaims(leagueId, onChange) {
   });
 }
 
-/** =========================================================
+/* =========================================================
  *  ENTRY / PAYMENTS GATE (simple flag)
- *  ========================================================= */
+ * ======================================================= */
 
 export function hasPaidEntry(league, username) {
   return league?.entry?.enabled ? !!league?.entry?.paid?.[username] : true;
 }
 
-/** =========================================================
+/* =========================================================
  *  DRAFT HELPERS
- *  ========================================================= */
+ * ======================================================= */
 
 export function canDraft(league) {
   return league?.draft?.status === "live";
@@ -314,7 +306,7 @@ export async function configureDraft({ leagueId, order }) {
   });
 }
 
-/** Initialize order from members (simple joinedAt order) */
+/** Initialize order from members */
 export async function initDraftOrder({ leagueId }) {
   const memCol = collection(db, "leagues", leagueId, "members");
   const memSnap = await getDocs(memCol);
@@ -351,7 +343,6 @@ export async function setDraftStatus({ leagueId, status }) {
 
 /** Perform a draft pick (handles bench fallback if slot full) */
 export async function draftPick({ leagueId, username, playerId, playerPosition, slot }) {
-  // Load league
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
   if (!leagueSnap.exists()) throw new Error("League not found");
@@ -519,9 +510,9 @@ export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
   return { acted: true, reason: doneAll ? "finished" : "auto-picked" };
 }
 
-/** =========================================================
+/* =========================================================
  *  TEAM UTILITIES (move / bench / release / add-drop)
- *  ========================================================= */
+ * ======================================================= */
 
 export async function moveToStarter({ leagueId, username, playerId, slot }) {
   const tRef = doc(db, "leagues", leagueId, "teams", username);
@@ -616,9 +607,9 @@ export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   await batch.commit();
 }
 
-/** =========================================================
+/* =========================================================
  *  LEAGUE CREATION / MEMBERSHIP
- *  ========================================================= */
+ * ======================================================= */
 
 export async function createLeague({ name, owner, order }) {
   const ref = await addDoc(collection(db, "leagues"), {
@@ -685,11 +676,11 @@ export async function listMyLeagues({ username }) {
   return out;
 }
 
-/** =========================================================
- *  SCHEDULE / MATCHUPS
- *  ========================================================= */
+/* =========================================================
+ *  SCHEDULE / MATCHUPS (league-level utilities)
+ * ======================================================= */
 
-/** Round-robin schedule generator: returns { week, matchups: [{home, away}], ... }[] */
+/** Round-robin schedule generator: returns [{ week, matchups: [{home, away}] }, ...] */
 export function generateScheduleRoundRobin(usernames, totalWeeks) {
   const teams = [...new Set(usernames || [])].filter(Boolean);
   if (teams.length < 2) return [];
@@ -718,18 +709,18 @@ export function generateScheduleRoundRobin(usernames, totalWeeks) {
     schedule.push({ week, matchups });
 
     // rotate (circle method)
-    const l0 = left[0];
-    const rLast = right[right.length - 1];
-    left = [l0, right[0], ...left.slice(1, left.length)];
-    right = [right[1], ...right.slice(2, right.length), left[left.length - 1]];
-    // fix ends
-    left = left.slice(0, half);
-    right = right.slice(0, half).reverse();
+    const fixed = left[0];
+    const moveFromLeft = left.splice(1, 1)[0];
+    right.push(moveFromLeft);
+    const moveFromRight = right.shift();
+    left.push(moveFromRight);
+    left[0] = fixed;
+    right = right; // keep as is
   }
   return schedule;
 }
 
-/** Write a schedule document for a week under leagues/{leagueId}/schedule/week-{week} */
+/** Write schedule docs: leagues/{leagueId}/schedule/week-{week} */
 export async function writeSchedule(leagueId, schedule) {
   if (!leagueId || !Array.isArray(schedule)) throw new Error("Invalid schedule");
   const batch = writeBatch(db);
@@ -740,7 +731,7 @@ export async function writeSchedule(leagueId, schedule) {
   await batch.commit();
 }
 
-/** Listen to a particular week schedule */
+/** Listen to one week of schedule */
 export function listenScheduleWeek(leagueId, week, onChange) {
   if (!leagueId || !week) return () => {};
   const ref = doc(db, "leagues", leagueId, "schedule", `week-${week}`);
