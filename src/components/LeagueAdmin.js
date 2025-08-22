@@ -1,239 +1,242 @@
 /* eslint-disable no-console */
-/* eslint-disable react-hooks/exhaustive-deps */
-
-// src/pages/LeaguePage.js
+// src/components/LeagueAdmin.js
 import React, { useEffect, useMemo, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-
-import PlayersList from "../components/PlayersList";
-import DraftBoard from "../components/DraftBoard";
-import LeagueAdmin from "../components/LeagueAdmin";
-
 import {
   listenLeague,
-  listenTeam,
-  emptyRoster,
+  configureDraft,
+  startDraft,
+  endDraft,
+  setDraftStatus,
 } from "../lib/storage";
 
-/**
- * Props:
- * - username (required)
- * - leagueId (optional, if you don't use /league/:leagueId routing)
- */
-export default function LeaguePage({ username, leagueId: leagueIdProp }) {
-  const params = useParams?.() || {};
-  const leagueId = leagueIdProp || params.leagueId;
-  const navigate = useNavigate?.();
-
+export default function LeagueAdmin({ leagueId, username }) {
   const [league, setLeague] = useState(null);
-  const [team, setTeam] = useState(null);
-  const [tab, setTab] = useState("team"); // "team" | "players" | "draft" | "admin"
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  // --- Load league doc ---
+  // local editor for draft order (one username per line)
+  const [orderText, setOrderText] = useState("");
+
+  // Load league safely
   useEffect(() => {
+    setError("");
+    setLeague(null);
     if (!leagueId) return;
-    const unsub = listenLeague(leagueId, (l) => setLeague(l));
-    return () => unsub && unsub();
-  }, [leagueId]);
-
-  // --- Load my team doc ---
-  useEffect(() => {
-    if (!leagueId || !username) return;
-    const unsub = listenTeam({
-      leagueId,
-      username,
-      onChange: (t) => setTeam(t),
-    });
-    return () => unsub && unsub();
-  }, [leagueId, username]);
-
-  // --- Owner check ---
-  const isOwner = useMemo(
-    () => !!(league && username && league.owner === username),
-    [league, username]
-  );
-
-  // --- Join link helper (to share) ---
-  const joinLink = useMemo(() => {
     try {
-      const base = window.location.origin;
-      return `${base}/?join=${leagueId || ""}`;
-    } catch {
-      return "";
+      const unsub = listenLeague(leagueId, (l) => {
+        setLeague(l);
+        if (l?.draft?.order && Array.isArray(l.draft.order)) {
+          setOrderText(l.draft.order.join("\n"));
+        }
+      });
+      return () => unsub && unsub();
+    } catch (e) {
+      console.error(e);
+      setError(String(e?.message || e));
     }
   }, [leagueId]);
 
-  // --- Basic roster/bench formatting helpers ---
-  const roster = team?.roster || emptyRoster();
-  const bench = Array.isArray(team?.bench) ? team.bench : [];
+  // owner check (case-insensitive)
+  const isOwner = useMemo(() => {
+    const a = (league?.owner || "").trim().toLowerCase();
+    const b = (username || "").trim().toLowerCase();
+    return !!a && !!b && a === b;
+  }, [league?.owner, username]);
 
-  // --- Light styles for tabs ---
-  const TabBtn = ({ id, children }) => (
-    <button
-      onClick={() => setTab(id)}
-      style={{
-        padding: "8px 12px",
-        borderRadius: 8,
-        border: "1px solid #ddd",
-        background: tab === id ? "#f2f6ff" : "white",
-        cursor: "pointer",
-        fontWeight: tab === id ? 700 : 500,
-      }}
-    >
-      {children}
-    </button>
-  );
+  const draft = league?.draft || {};
+  const status = String(draft.status || "scheduled");
+  const orderArray = Array.isArray(draft.order) ? draft.order : [];
+  const roundsTotal = Number(draft.roundsTotal || 12);
+  const pointer = Number.isFinite(draft.pointer) ? draft.pointer : 0;
 
-  // --- Guard rails / empty states ---
+  // Helpers
+  function cleanOrder(text) {
+    return String(text || "")
+      .split(/\r?\n/g)
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }
+
+  async function onSaveOrder() {
+    if (!leagueId) return setError("No leagueId");
+    const arr = cleanOrder(orderText);
+    if (!arr.length) return setError("Enter at least one username for the order.");
+    try {
+      setSaving(true);
+      await configureDraft({ leagueId, order: arr });
+      setSaving(false);
+      alert("Draft order saved & draft set to scheduled.");
+    } catch (e) {
+      console.error(e);
+      setSaving(false);
+      setError(String(e?.message || e));
+    }
+  }
+
+  async function onStart() {
+    if (!leagueId) return setError("No leagueId");
+    try {
+      setSaving(true);
+      await startDraft({ leagueId });
+      setSaving(false);
+      alert("Draft started.");
+    } catch (e) {
+      console.error(e);
+      setSaving(false);
+      setError(String(e?.message || e));
+    }
+  }
+
+  async function onEnd() {
+    if (!leagueId) return setError("No leagueId");
+    try {
+      setSaving(true);
+      await endDraft({ leagueId });
+      setSaving(false);
+      alert("Draft ended.");
+    } catch (e) {
+      console.error(e);
+      setSaving(false);
+      setError(String(e?.message || e));
+    }
+  }
+
+  async function onSetStatus(next) {
+    if (!leagueId) return setError("No leagueId");
+    try {
+      setSaving(true);
+      await setDraftStatus({ leagueId, status: next });
+      setSaving(false);
+      alert(`Draft status set to ${next}.`);
+    } catch (e) {
+      console.error(e);
+      setSaving(false);
+      setError(String(e?.message || e));
+    }
+  }
+
+  // Render guards
   if (!leagueId) {
-    return (
-      <div style={{ padding: 16 }}>
-        <h2>League</h2>
-        <div style={{ color: "#b00" }}>No league selected.</div>
-        {navigate && (
-          <button
-            style={{ marginTop: 12 }}
-            onClick={() => navigate("/")}
-          >
-            Back to Leagues
-          </button>
-        )}
-      </div>
-    );
+    return <Box>
+      <h3>Admin</h3>
+      <Alert type="error">No league loaded. (Missing <code>leagueId</code> prop)</Alert>
+    </Box>;
+  }
+
+  if (!league) {
+    return <Box>
+      <h3>Admin</h3>
+      <div>Loading league…</div>
+    </Box>;
   }
 
   return (
-    <div style={{ padding: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        {navigate && (
-          <button onClick={() => navigate("/")}>&larr; Back</button>
-        )}
-        <h2 style={{ margin: 0 }}>
-          {league?.name || "League"}{" "}
-          <span style={{ fontSize: 12, color: "#666", fontWeight: 400 }}>
-            (ID: {leagueId})
-          </span>
-        </h2>
-      </div>
+    <Box>
+      <h3 style={{ marginTop: 0 }}>Admin</h3>
 
-      <div style={{ fontSize: 13, opacity: 0.8, marginTop: 6 }}>
-        Owner: <b>{league?.owner || "…"}</b> · Your username: <b>{username || "…"}</b>
-      </div>
-
-      <div style={{ marginTop: 10 }}>
-        <span style={{ fontSize: 12, opacity: 0.8 }}>Share Join Link:</span>{" "}
-        <code style={{ fontSize: 12 }}>{joinLink}</code>{" "}
-        <button
-          onClick={async () => {
-            try {
-              await navigator.clipboard.writeText(joinLink);
-              alert("Join link copied to clipboard!");
-            } catch {
-              alert("Copy failed. You can copy the link text manually.");
-            }
-          }}
-          style={{ padding: "4px 8px" }}
-        >
-          Copy
-        </button>
-      </div>
-
-      {error && (
-        <div style={{ marginTop: 8, color: "red" }}>Error: {error}</div>
+      {!isOwner && (
+        <Alert type="warn">
+          You’re not the league owner (<b>{league?.owner || "?"}</b>). Actions are disabled.
+        </Alert>
       )}
 
-      {/* Tabs */}
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          marginTop: 16,
-          borderBottom: "1px solid #eaeaea",
-          paddingBottom: 12,
-          flexWrap: "wrap",
-        }}
-      >
-        <TabBtn id="team">My Team</TabBtn>
-        <TabBtn id="players">Players</TabBtn>
-        <TabBtn id="draft">Draft</TabBtn>
-        {isOwner && <TabBtn id="admin">Admin</TabBtn>}
-      </div>
+      {error && <Alert type="error">Error: {error}</Alert>}
 
-      {/* Content */}
-      <div style={{ marginTop: 16 }}>
-        {tab === "team" && (
-          <div>
-            <h3 style={{ marginTop: 0 }}>My Team</h3>
-            {!team && <div>Loading your team…</div>}
-            {team && (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, maxWidth: 820 }}>
-                {/* Roster */}
-                <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
-                  <div style={{ fontWeight: 700, marginBottom: 8 }}>Starters</div>
-                  <table width="100%" style={{ borderCollapse: "collapse" }}>
-                    <tbody>
-                      {Object.keys(roster).map((slot) => (
-                        <tr key={slot} style={{ borderBottom: "1px solid #f3f3f3" }}>
-                          <td style={{ padding: "6px 4px", width: 70 }}>
-                            <b>{slot}</b>
-                          </td>
-                          <td style={{ padding: "6px 4px" }}>
-                            {roster[slot] ? roster[slot] : <i>empty</i>}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+      {/* Draft status & pointer */}
+      <Section title="Draft Status">
+        <Row><b>Status:</b> <code>{status}</code></Row>
+        <Row><b>Pointer (index):</b> <code>{pointer}</code></Row>
+        <Row><b>Rounds total:</b> <code>{roundsTotal}</code></Row>
 
-                {/* Bench */}
-                <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
-                  <div style={{ fontWeight: 700, marginBottom: 8 }}>Bench</div>
-                  {bench.length === 0 ? (
-                    <div><i>No bench players yet.</i></div>
-                  ) : (
-                    <ul style={{ margin: 0, paddingLeft: 18 }}>
-                      {bench.map((pid) => (
-                        <li key={pid} style={{ padding: "4px 0" }}>{pid}</li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </div>
-            )}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+          <button disabled={!isOwner || saving} onClick={() => onSetStatus("scheduled")}>
+            Set Scheduled
+          </button>
+          <button disabled={!isOwner || saving} onClick={onStart}>
+            Start Draft (live)
+          </button>
+          <button disabled={!isOwner || saving} onClick={onEnd}>
+            End Draft (done)
+          </button>
+        </div>
+      </Section>
+
+      {/* Draft order editor */}
+      <Section title="Draft Order (one username per line)">
+        <textarea
+          value={orderText}
+          onChange={(e) => setOrderText(e.target.value)}
+          placeholder="alice\nbob\ncharlie"
+          rows={Math.max(4, Math.min(12, orderArray.length || 6))}
+          style={{ width: "100%", fontFamily: "monospace", padding: 8 }}
+        />
+        <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button disabled={!isOwner || saving} onClick={onSaveOrder}>
+            Save Order & Schedule
+          </button>
+          <button
+            type="button"
+            onClick={() => setOrderText(orderArray.join("\n"))}
+            disabled={saving}
+          >
+            Reset to current
+          </button>
+        </div>
+        {!!orderArray.length && (
+          <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
+            Current order: {orderArray.join(" → ")}
           </div>
         )}
+      </Section>
+    </Box>
+  );
+}
 
-        {tab === "players" && (
-          <div>
-            <h3 style={{ marginTop: 0 }}>Players</h3>
-            <PlayersList leagueId={leagueId} username={username} />
-          </div>
-        )}
+/** ---------- Tiny UI helpers (no external deps) ---------- */
+function Box({ children }) {
+  return (
+    <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
+      {children}
+    </div>
+  );
+}
 
-        {tab === "draft" && (
-          <div>
-            <h3 style={{ marginTop: 0 }}>Draft</h3>
-            {!league ? (
-              <div>Loading league…</div>
-            ) : (
-              <DraftBoard leagueId={leagueId} username={username} />
-            )}
-          </div>
-        )}
+function Section({ title, children }) {
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div style={{ fontWeight: 700, marginBottom: 6 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
 
-        {tab === "admin" && isOwner && (
-          <div>
-            <h3 style={{ marginTop: 0 }}>Admin</h3>
-            {!league ? (
-              <div>Loading league…</div>
-            ) : (
-              <LeagueAdmin leagueId={leagueId} username={username} />
-            )}
-          </div>
-        )}
-      </div>
+function Row({ children }) {
+  return <div style={{ margin: "4px 0" }}>{children}</div>;
+}
+
+function Alert({ type = "info", children }) {
+  const colors = {
+    info: "#155724",
+    warn: "#856404",
+    error: "#721c24",
+  };
+  const bgs = {
+    info: "#d4edda",
+    warn: "#fff3cd",
+    error: "#f8d7da",
+  };
+  return (
+    <div
+      style={{
+        background: bgs[type] || "#eef5ff",
+        color: colors[type] || "#0c5460",
+        border: "1px solid rgba(0,0,0,0.08)",
+        padding: "8px 10px",
+        borderRadius: 6,
+        marginBottom: 10,
+      }}
+    >
+      {children}
     </div>
   );
 }
