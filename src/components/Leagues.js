@@ -1,94 +1,131 @@
-import React, { useEffect, useState } from "react";
-import { listMyLeagues, createLeague, joinLeague } from "../lib/storage";
+/* eslint-disable no-console */
+import React, { useEffect, useMemo, useState } from "react";
+import { createLeague, listMyLeagues, joinLeague } from "../lib/storage";
 
+/**
+ * Props:
+ * - username (string)
+ * - onOpenLeague(leagueId)
+ */
 export default function Leagues({ username, onOpenLeague }) {
-  const [leagues, setLeagues] = useState([]);
-  const [newLeagueName, setNewLeagueName] = useState("");
-  const [joinId, setJoinId] = useState("");
-  const [msg, setMsg] = useState("");
+  const [myLeagues, setMyLeagues] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [error, setError] = useState("");
 
-  async function refresh() {
-    try {
-      const ls = await listMyLeagues(username);
-      setLeagues(ls);
-    } catch (e) {
-      setMsg(e.message || "Failed to load leagues");
-    }
-  }
+  // Handle ?join=LEAGUE_ID
+  const joinTarget = useMemo(() => {
+    const url = new URL(window.location.href);
+    return url.searchParams.get("join");
+  }, []);
 
   useEffect(() => {
-    refresh();
-    // eslint-disable-next-line
-  }, [username]);
+    let alive = true;
+    (async () => {
+      try {
+        setError("");
+        setLoading(true);
+        if (!username) {
+          // Do not query Firestore with undefined username
+          setMyLeagues([]);
+          return;
+        }
+        // If there's a join param, attempt to join once
+        if (joinTarget) {
+          try {
+            await joinLeague({ leagueId: joinTarget, username });
+          } catch (e) {
+            console.warn("joinLeague error (ignored):", e);
+          }
+        }
+        const list = await listMyLeagues({ username });
+        if (alive) setMyLeagues(Array.isArray(list) ? list : []);
+      } catch (e) {
+        console.error("Leagues load error:", e);
+        if (alive) setError(String(e?.message || e));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username, joinTarget]);
 
-  async function handleCreate() {
-    setMsg("");
-    try {
-      const l = await createLeague({ name: newLeagueName.trim(), owner: username });
-      setNewLeagueName("");
-      setMsg("✅ League created");
-      await refresh();
-      onOpenLeague && onOpenLeague(l);
-    } catch (e) {
-      setMsg(e.message || "Failed to create league");
+  const handleCreate = async (e) => {
+    e.preventDefault();
+    if (!username) {
+      setError("Please log in first.");
+      return;
     }
-  }
-
-  async function handleJoin() {
-    setMsg("");
+    if (!name.trim()) return;
     try {
-      const l = await joinLeague({ leagueId: joinId.trim(), username });
-      setJoinId("");
-      setMsg("✅ Joined league");
-      await refresh();
-      onOpenLeague && onOpenLeague(l);
+      setCreating(true);
+      const res = await createLeague({ name: name.trim(), owner: username, order: [username] });
+      setName("");
+      const list = await listMyLeagues({ username });
+      setMyLeagues(list);
+      if (res?.id && typeof onOpenLeague === "function") onOpenLeague(res.id);
     } catch (e) {
-      setMsg(e.message || "Failed to join league");
+      console.error("createLeague error:", e);
+      setError(String(e?.message || e));
+    } finally {
+      setCreating(false);
     }
-  }
+  };
 
   return (
     <div>
       <h2>My Leagues</h2>
-      {msg && <p>{msg}</p>}
 
-      {!leagues.length ? <p>No leagues yet.</p> : (
-        <ul style={{ paddingLeft: 16 }}>
-          {leagues.map((l) => (
-            <li key={l.id} style={{ marginBottom: 6 }}>
-              <button onClick={() => onOpenLeague(l)} style={{ padding: 8 }}>
-                {l.name} <span style={{ opacity: 0.6 }}>({l.id})</span>
-              </button>
+      {!username && (
+        <div style={{ color: "#b00", marginBottom: 8 }}>
+          You’re not logged in yet. Log in to load your leagues.
+        </div>
+      )}
+
+      {error && <div style={{ color: "red", marginBottom: 8 }}>Error: {error}</div>}
+      {loading && <div>Loading…</div>}
+
+      {!loading && myLeagues.length === 0 && username && (
+        <div style={{ marginBottom: 8 }}>You have no leagues yet. Create one below.</div>
+      )}
+
+      {!loading && myLeagues.length > 0 && (
+        <ul style={{ listStyle: "none", padding: 0 }}>
+          {myLeagues.map((l) => (
+            <li key={l.id} style={{
+              border: "1px solid #eee",
+              borderRadius: 8,
+              padding: 10,
+              marginBottom: 8,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between"
+            }}>
+              <div>
+                <div style={{ fontWeight: 600 }}>{l.name || l.id}</div>
+                <div style={{ fontSize: 12, opacity: 0.8 }}>
+                  Owner: {l.owner || "(unknown)"}
+                </div>
+              </div>
+              <button onClick={() => onOpenLeague && onOpenLeague(l.id)}>Open</button>
             </li>
           ))}
         </ul>
       )}
 
-      <div style={{ marginTop: 16 }}>
-        <h3>Create League</h3>
+      <form onSubmit={handleCreate} style={{ marginTop: 16 }}>
         <input
-          placeholder="League name"
-          value={newLeagueName}
-          onChange={(e) => setNewLeagueName(e.target.value)}
-          style={{ padding: 8, width: "260px" }}
+          type="text"
+          placeholder="New league name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          style={{ padding: 8, marginRight: 8 }}
         />
-        <button onClick={handleCreate} style={{ marginLeft: 8, padding: 8 }}>
-          Create
+        <button disabled={creating || !name.trim()} type="submit">
+          {creating ? "Creating…" : "Create League"}
         </button>
-      </div>
-
-      <div style={{ marginTop: 16 }}>
-        <h3>Join League</h3>
-        <input
-          placeholder="League ID"
-          value={joinId}
-          onChange={(e) => setJoinId(e.target.value)}
-          style={{ padding: 8, width: "260px" }}
-        />
-        <button onClick={handleJoin} style={{ marginLeft: 8, padding: 8 }}>
-          Join
-        </button>
-      </div>
+      </form>
     </div>
   );
 }
