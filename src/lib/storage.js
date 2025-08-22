@@ -707,6 +707,78 @@ export async function writeSchedule(leagueId, schedule) {
   await batch.commit();
 }
 
+/** ------------ MEMBERS / SCHEDULE UTILITIES (ADD THESE) ------------ **/
+
+/**
+ * Return a list of member usernames for a league.
+ * Priority: members subcollection -> team doc IDs -> [owner]
+ */
+export async function listMemberUsernames(leagueId) {
+  const out = new Set();
+
+  // 1) members subcollection
+  const memCol = collection(db, "leagues", leagueId, "members");
+  const memSnap = await getDocs(memCol);
+  memSnap.forEach((d) => out.add(d.id));
+
+  if (out.size === 0) {
+    // 2) team documents
+    const teamsCol = collection(db, "leagues", leagueId, "teams");
+    const teamsSnap = await getDocs(teamsCol);
+    teamsSnap.forEach((d) => out.add(d.id));
+  }
+
+  if (out.size === 0) {
+    // 3) fall back to owner
+    const league = await getLeague(leagueId);
+    if (league?.owner) out.add(league.owner);
+  }
+
+  // remove any falsey values
+  return [...out].filter(Boolean);
+}
+
+/**
+ * Ensure there is a season schedule. If none exists (or force=true),
+ * it (re)creates a round-robin schedule and writes:
+ *   leagues/{leagueId}/schedule/week-{N} -> { week, matchups: [{home, away}] }
+ *
+ * @returns the schedule array in memory: [{ week, matchups: [...] }, ...]
+ */
+export async function ensureOrRecreateSchedule({
+  leagueId,
+  totalWeeks = 14,
+  force = false,
+}) {
+  if (!leagueId) throw new Error("ensureOrRecreateSchedule: leagueId required");
+
+  // Check if a schedule doc already exists (week-1) unless forcing
+  const week1Ref = doc(db, "leagues", leagueId, "schedule", "week-1");
+  const existing = await getDoc(week1Ref);
+
+  if (existing.exists() && !force) {
+    // Read back all existing weeks to return an array
+    const schedCol = collection(db, "leagues", leagueId, "schedule");
+    const snap = await getDocs(schedCol);
+    const arr = [];
+    snap.forEach((d) => arr.push(d.data()));
+    // sort by week in case Firestore returns unordered
+    arr.sort((a, b) => Number(a.week || 0) - Number(b.week || 0));
+    return arr;
+  }
+
+  // Build a new schedule
+  const members = await listMemberUsernames(leagueId);
+  if (members.length < 2) throw new Error("Need at least 2 members to build a schedule.");
+
+  const schedule = generateScheduleRoundRobin(members, totalWeeks);
+
+  // Write it
+  await writeSchedule(leagueId, schedule);
+
+  return schedule;
+}
+
 /** Read schedule for a given week (one doc per week) */
 export async function getScheduleWeek(leagueId, week) {
   const ref = doc(db, "leagues", leagueId, "schedule", `week-${week}`);
