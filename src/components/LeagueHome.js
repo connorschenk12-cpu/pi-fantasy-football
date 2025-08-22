@@ -15,12 +15,13 @@ import {
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
 import LeagueAdmin from "./LeagueAdmin";
+import Matchups from "./Matchups";
 
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
-  const [tab, setTab] = useState("team"); // 'team' | 'players' | 'draft' | 'league' | 'admin'
+  const [tab, setTab] = useState("team"); // team | players | draft | league | matchups | admin
   const [allTeams, setAllTeams] = useState([]);
   const currentWeek = Number(league?.settings?.currentWeek || 1);
 
@@ -87,6 +88,9 @@ export default function LeagueHome({ leagueId, username, onBack }) {
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
+  const draftStatus = league?.draft?.status || "scheduled";
+  const showDraftTab = draftStatus !== "done"; // hide Draft once complete
+
   const handleBenchToSlot = async (playerId, slot) => {
     try {
       await moveToStarter({ leagueId, username, playerId, slot });
@@ -115,8 +119,11 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
         <TabButton label="My Team" active={tab === "team"} onClick={() => setTab("team")} />
         <TabButton label="Players" active={tab === "players"} onClick={() => setTab("players")} />
-        <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
+        {showDraftTab && (
+          <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
+        )}
         <TabButton label="League" active={tab === "league"} onClick={() => setTab("league")} />
+        <TabButton label="Matchups" active={tab === "matchups"} onClick={() => setTab("matchups")} />
         {isOwner && (
           <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
         )}
@@ -189,12 +196,15 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       )}
 
       {/* DRAFT TAB */}
-      {tab === "draft" && (
+      {tab === "draft" && showDraftTab && (
         <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
       )}
 
       {/* LEAGUE TAB */}
       {tab === "league" && <LeagueTab leagueId={leagueId} teams={allTeams} />}
+
+      {/* MATCHUPS TAB */}
+      {tab === "matchups" && <Matchups leagueId={leagueId} defaultWeek={currentWeek} />}
 
       {/* ADMIN TAB */}
       {tab === "admin" && isOwner && (
