@@ -142,10 +142,6 @@ export async function listMembers(leagueId) {
   return arr;
 }
 
-// Back-compat alias for components importing listMemberUsernames
-export async function listMemberUsernames(leagueId) {
-  return await listMembers(leagueId);
-}
 
 /* =========================================================
  *  PLAYERS
@@ -713,6 +709,12 @@ export async function writeSchedule(leagueId, schedule) {
  * Return a list of member usernames for a league.
  * Priority: members subcollection -> team doc IDs -> [owner]
  */
+/** ------------ MEMBERS / SCHEDULE UTILITIES (single source of truth) ------------ **/
+
+/**
+ * Return a list of member usernames for a league.
+ * Priority: members subcollection -> team doc IDs -> [owner]
+ */
 export async function listMemberUsernames(leagueId) {
   const out = new Set();
 
@@ -733,6 +735,50 @@ export async function listMemberUsernames(leagueId) {
     const league = await getLeague(leagueId);
     if (league?.owner) out.add(league.owner);
   }
+
+  return [...out].filter(Boolean);
+}
+
+/**
+ * Ensure there is a season schedule. If none exists (or force=true),
+ * it (re)creates a round-robin schedule and writes:
+ *   leagues/{leagueId}/schedule/week-{N} -> { week, matchups: [{home, away}] }
+ *
+ * @returns the schedule array in memory: [{ week, matchups: [...] }, ...]
+ */
+export async function ensureOrRecreateSchedule({
+  leagueId,
+  totalWeeks = 14,
+  force = false,
+}) {
+  if (!leagueId) throw new Error("ensureOrRecreateSchedule: leagueId required");
+
+  // Check if a schedule doc already exists (week-1) unless forcing
+  const week1Ref = doc(db, "leagues", leagueId, "schedule", "week-1");
+  const existing = await getDoc(week1Ref);
+
+  if (existing.exists() && !force) {
+    // Read back all existing weeks to return an array
+    const schedCol = collection(db, "leagues", leagueId, "schedule");
+    const snap = await getDocs(schedCol);
+    const arr = [];
+    snap.forEach((d) => arr.push(d.data()));
+    arr.sort((a, b) => Number(a.week || 0) - Number(b.week || 0));
+    return arr;
+  }
+
+  // Build a new schedule
+  const members = await listMemberUsernames(leagueId);
+  if (members.length < 2) throw new Error("Need at least 2 members to build a schedule.");
+
+  const schedule = generateScheduleRoundRobin(members, totalWeeks);
+
+  // Write it
+  await writeSchedule(leagueId, schedule);
+
+  return schedule;
+}
+
 
   // remove any falsey values
   return [...out].filter(Boolean);
