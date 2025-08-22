@@ -9,33 +9,66 @@ import {
   setDraftStatus,
 } from "../lib/storage";
 
+// Try to lazily import useParams if react-router-dom exists.
+// This avoids crashing if you aren't using React Router on this screen.
+let useParamsSafe = null;
+try {
+  // eslint-disable-next-line global-require
+  const rrd = require("react-router-dom");
+  useParamsSafe = rrd?.useParams || null;
+} catch {
+  useParamsSafe = null;
+}
+
+function getQueryParam(keys) {
+  try {
+    const url = new URL(window.location.href);
+    for (const k of keys) {
+      const v = url.searchParams.get(k);
+      if (v) return v;
+    }
+  } catch {}
+  return null;
+}
+
 /**
  * Props:
- * - leagueId (optional if league prop provided)
- * - league (optional; if provided, we won't re-fetch)
+ * - leagueId (optional if league prop or route/query has it)
+ * - league   (optional; if provided, we won't re-fetch)
  * - username (required for owner check)
  */
-export default function LeagueAdmin({ leagueId, league: leagueProp, username }) {
+export default function LeagueAdmin({ leagueId: leagueIdProp, league: leagueProp, username }) {
+  // Try multiple fallbacks for the leagueId:
+  const params = useParamsSafe ? useParamsSafe() : {};
+  const routeId = params?.leagueId || params?.id || null;
+  const queryId = getQueryParam(["leagueId", "league"]);
+
+  const effectiveLeagueId =
+    leagueProp?.id || leagueIdProp || routeId || queryId || null;
+
   const [league, setLeague] = useState(leagueProp || null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [orderText, setOrderText] = useState("");
 
-  // If a league object is provided, prefer it and skip listening.
+  // Keep local league in sync with prop if given
   useEffect(() => {
     if (leagueProp) {
       setLeague(leagueProp);
       if (Array.isArray(leagueProp?.draft?.order)) {
         setOrderText(leagueProp.draft.order.join("\n"));
       }
-      return;
     }
-    // Otherwise, listen by leagueId.
+  }, [leagueProp]);
+
+  // If no league object, listen by effectiveLeagueId
+  useEffect(() => {
+    if (leagueProp) return; // already have it
     setError("");
     setLeague(null);
-    if (!leagueId) return;
+    if (!effectiveLeagueId) return;
     try {
-      const unsub = listenLeague(leagueId, (l) => {
+      const unsub = listenLeague(effectiveLeagueId, (l) => {
         setLeague(l);
         if (Array.isArray(l?.draft?.order)) {
           setOrderText(l.draft.order.join("\n"));
@@ -46,7 +79,7 @@ export default function LeagueAdmin({ leagueId, league: leagueProp, username }) 
       console.error(e);
       setError(String(e?.message || e));
     }
-  }, [leagueProp, leagueId]);
+  }, [leagueProp, effectiveLeagueId]);
 
   // owner check (case-insensitive)
   const isOwner = useMemo(() => {
@@ -69,7 +102,7 @@ export default function LeagueAdmin({ leagueId, league: leagueProp, username }) 
   }
 
   async function onSaveOrder() {
-    const id = league?.id || leagueId;
+    const id = league?.id || effectiveLeagueId;
     if (!id) return setError("No leagueId available.");
     const arr = cleanOrder(orderText);
     if (!arr.length) return setError("Enter at least one username for the order.");
@@ -86,7 +119,7 @@ export default function LeagueAdmin({ leagueId, league: leagueProp, username }) 
   }
 
   async function onStart() {
-    const id = league?.id || leagueId;
+    const id = league?.id || effectiveLeagueId;
     if (!id) return setError("No leagueId available.");
     try {
       setSaving(true);
@@ -101,7 +134,7 @@ export default function LeagueAdmin({ leagueId, league: leagueProp, username }) 
   }
 
   async function onEnd() {
-    const id = league?.id || leagueId;
+    const id = league?.id || effectiveLeagueId;
     if (!id) return setError("No leagueId available.");
     try {
       setSaving(true);
@@ -116,7 +149,7 @@ export default function LeagueAdmin({ leagueId, league: leagueProp, username }) 
   }
 
   async function onSetStatus(next) {
-    const id = league?.id || leagueId;
+    const id = league?.id || effectiveLeagueId;
     if (!id) return setError("No leagueId available.");
     try {
       setSaving(true);
@@ -131,13 +164,23 @@ export default function LeagueAdmin({ leagueId, league: leagueProp, username }) 
   }
 
   // Render guards
-  if (!league && !leagueId) {
+  if (!league && !effectiveLeagueId) {
+    // Show debug info to help wiring
     return (
       <Box>
         <h3>Admin</h3>
         <Alert type="error">
-          No league loaded. (Missing <code>league</code> or <code>leagueId</code>)
+          No league loaded. (Missing <code>league</code> and <code>leagueId</code>)
         </Alert>
+        <Debug
+          items={{
+            "prop.leagueId": leagueIdProp || null,
+            "prop.league?.id": leagueProp?.id || null,
+            "route.params.leagueId/id": routeId || null,
+            "query.leagueId/league": queryId || null,
+            username: username || null,
+          }}
+        />
       </Box>
     );
   }
@@ -147,6 +190,12 @@ export default function LeagueAdmin({ leagueId, league: leagueProp, username }) 
       <Box>
         <h3>Admin</h3>
         <div>Loading league…</div>
+        <Debug
+          items={{
+            effectiveLeagueId,
+            username: username || null,
+          }}
+        />
       </Box>
     );
   }
@@ -248,5 +297,23 @@ function Alert({ type = "info", children }) {
     >
       {children}
     </div>
+  );
+}
+function Debug({ items = {} }) {
+  return (
+    <pre
+      style={{
+        marginTop: 10,
+        padding: 8,
+        background: "#f7f7f7",
+        border: "1px dashed #ddd",
+        borderRadius: 6,
+        fontSize: 12,
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+      }}
+    >
+      {JSON.stringify(items, null, 2)}
+    </pre>
   );
 }
