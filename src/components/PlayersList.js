@@ -1,126 +1,155 @@
-/* eslint-disable react-hooks/rules-of-hooks */
-/* eslint-disable react-hooks/exhaustive-deps */
-// src/components/PlayersList.js
+/* eslint-disable no-console */
 import React, { useEffect, useMemo, useState } from "react";
-import { listPlayers, projForWeek, addDropPlayer } from "../lib/storage";
+import { listPlayers, projForWeek } from "../lib/storage";
 
-const th = { textAlign: "left", padding: "6px 8px", borderBottom: "1px solid #eee" };
-const td = { padding: "6px 8px", borderBottom: "1px solid #f3f3f3" };
-
+/**
+ * Props:
+ * - leagueId (string)
+ * - currentWeek (number)   // used for projections sort
+ * - onDraft(player)        // optional: for DraftBoard, shows Draft button
+ * - allowDraftButton (bool)
+ */
 export default function PlayersList({
   leagueId,
-  username,
   currentWeek = 1,
-  onChangeWeek,
-  addLocked = false
+  onDraft,
+  allowDraftButton = false,
 }) {
   const [players, setPlayers] = useState([]);
-  const [search, setSearch] = useState("");
-  const [teamFilter, setTeamFilter] = useState("ALL");
+  const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState("");
   const [posFilter, setPosFilter] = useState("ALL");
+  const [teamFilter, setTeamFilter] = useState("ALL");
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!leagueId) return;
+    let alive = true;
     (async () => {
-      const arr = await listPlayers({ leagueId });
-      setPlayers(arr);
+      try {
+        setLoading(true);
+        const list = await listPlayers({ leagueId });
+        if (!alive) return;
+        setPlayers(Array.isArray(list) ? list : []);
+      } catch (e) {
+        console.error("PlayersList load error:", e);
+        if (alive) setError(String(e?.message || e));
+      } finally {
+        if (alive) setLoading(false);
+      }
     })();
+    return () => { alive = false; };
   }, [leagueId]);
 
-  const teams = useMemo(() => {
-    const s = new Set();
-    players.forEach((p) => { if (p.team) s.add(p.team); });
-    return ["ALL", ...Array.from(s).sort()];
+  const filtered = useMemo(() => {
+    let arr = Array.isArray(players) ? players.slice() : [];
+
+    // Basic sanitization: ensure we can read name/position/team safely
+    arr = arr.map((p) => ({
+      id: p?.id ?? "",
+      name: (p?.name ?? "").toString(),
+      position: (p?.position ?? "").toString().toUpperCase(),
+      team: (p?.team ?? "").toString().toUpperCase(),
+      projections: p?.projections ?? p?.projByWeek ?? {},
+      ...p,
+    }));
+
+    // Text search by name (fallback to id)
+    const needle = (q || "").toString().trim().toLowerCase();
+    if (needle) {
+      arr = arr.filter((p) => {
+        const hay1 = p.name ? p.name.toLowerCase() : "";
+        const hay2 = p.id ? String(p.id).toLowerCase() : "";
+        return hay1.indexOf(needle) >= 0 || hay2.indexOf(needle) >= 0;
+      });
+    }
+
+    // Position filter
+    const pf = (posFilter || "ALL").toUpperCase();
+    if (pf !== "ALL") {
+      arr = arr.filter((p) => p.position === pf);
+    }
+
+    // Team filter
+    const tf = (teamFilter || "ALL").toUpperCase();
+    if (tf !== "ALL") {
+      arr = arr.filter((p) => p.team === tf);
+    }
+
+    // Sort by projected points (desc) for currentWeek
+    arr.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
+    return arr;
+  }, [players, q, posFilter, teamFilter, currentWeek]);
+
+  const uniqueTeams = useMemo(() => {
+    const set = new Set();
+    for (const p of players) {
+      const t = (p?.team ?? "").toString().toUpperCase();
+      if (t) set.add(t);
+    }
+    return ["ALL", ...Array.from(set).sort()];
   }, [players]);
 
-  const filtered = useMemo(() => {
-    const q = (search || "").trim().toLowerCase();
-    return players
-      .filter((p) => (teamFilter === "ALL" ? true : (p.team === teamFilter)))
-      .filter((p) => (posFilter === "ALL" ? true : (String(p.position||"").toUpperCase() === posFilter)))
-      .filter((p) => {
-        if (!q) return true;
-        const name = (p.displayName || p.name || p.id || "").toLowerCase();
-        const pid  = (p.id || "").toLowerCase();
-        return name.includes(q) || pid.includes(q);
-      })
-      .sort((a,b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
-  }, [players, search, teamFilter, posFilter, currentWeek]);
-
-  async function addToBench(p) {
-    try {
-      await addDropPlayer({ leagueId, username, addId: p.id, dropId: null });
-      alert(`Added ${p.displayName || p.name || p.id} to your bench.`);
-    } catch (e) {
-      alert(e.message || "Add failed");
-    }
-  }
+  const positions = ["ALL", "QB", "RB", "WR", "TE", "K", "DEF"];
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+      <h3>Players</h3>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <input
-          value={search}
-          onChange={(e)=>setSearch(e.target.value)}
-          placeholder="Search by player name or id…"
-          style={{ padding: 8, minWidth: 220 }}
+          type="text"
+          placeholder="Search player name…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          style={{ flex: 1, padding: 8 }}
         />
-        <label>
-          Team:&nbsp;
-          <select value={teamFilter} onChange={(e)=>setTeamFilter(e.target.value)}>
-            {teams.map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </label>
-        <label>
-          Pos:&nbsp;
-          <select value={posFilter} onChange={(e)=>setPosFilter(e.target.value)}>
-            {["ALL","QB","RB","WR","TE","K","DEF"].map((p)=>(
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Week:&nbsp;
-          <select value={currentWeek} onChange={(e)=>onChangeWeek && onChangeWeek(Number(e.target.value))}>
-            {Array.from({ length: 18 }).map((_, i) => (
-              <option key={i+1} value={i+1}>Week {i+1}</option>
-            ))}
-          </select>
-        </label>
+        <select value={posFilter} onChange={(e) => setPosFilter(e.target.value)} style={{ padding: 8 }}>
+          {positions.map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+        <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} style={{ padding: 8 }}>
+          {uniqueTeams.map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
       </div>
 
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr>
-            <th style={th}>Player</th>
-            <th style={th}>Pos</th>
-            <th style={th}>NFL</th>
-            <th style={th}>Proj (W{currentWeek})</th>
-            <th style={th}></th>
-          </tr>
-        </thead>
-        <tbody>
+      {loading && <div>Loading players…</div>}
+      {!loading && error && <div style={{ color: "red" }}>Error: {error}</div>}
+      {!loading && !error && filtered.length === 0 && (
+        <div>
+          No players found. Make sure you’ve added data to:
+          <code> /players </code> (global) or <code> /leagues/{leagueId}/players</code> (league-scoped).
+        </div>
+      )}
+
+      {!loading && !error && filtered.length > 0 && (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
           {filtered.map((p) => {
             const proj = projForWeek(p, currentWeek);
             return (
-              <tr key={p.id}>
-                <td style={td}>{p.displayName || p.name || p.id}</td>
-                <td style={td}>{p.position || ""}</td>
-                <td style={td}>{p.team || ""}</td>
-                <td style={td}>{Number.isFinite(proj) ? proj.toFixed(1) : "0.0"}</td>
-                <td style={td}>
-                  <button onClick={() => addToBench(p)} style={{ padding: 6 }} disabled={addLocked}>
-                    {addLocked ? "Locked (draft)" : "Add"}
+              <li key={p.id} style={{
+                border: "1px solid #eee",
+                borderRadius: 8,
+                padding: 10,
+                marginBottom: 8,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between"
+              }}>
+                <div>
+                  <div style={{ fontWeight: 600 }}>{p.name || p.id}</div>
+                  <div style={{ fontSize: 12, opacity: 0.8 }}>
+                    {p.position || "N/A"} · {p.team || "N/A"} · Proj W{currentWeek}: {proj}
+                  </div>
+                </div>
+                {allowDraftButton && typeof onDraft === "function" && (
+                  <button onClick={() => onDraft(p)} style={{ padding: "6px 10px" }}>
+                    Draft
                   </button>
-                </td>
-              </tr>
+                )}
+              </li>
             );
           })}
-          {filtered.length === 0 && (
-            <tr><td style={td} colSpan={5}>(No players match your filters.)</td></tr>
-          )}
-        </tbody>
-      </table>
+        </ul>
+      )}
     </div>
   );
 }
