@@ -9,42 +9,39 @@ import {
   setDraftStatus,
 } from "../lib/storage";
 
-// Try to lazily import useParams if react-router-dom exists.
-// This avoids crashing if you aren't using React Router on this screen.
-let useParamsSafe = null;
-try {
-  // eslint-disable-next-line global-require
-  const rrd = require("react-router-dom");
-  useParamsSafe = rrd?.useParams || null;
-} catch {
-  useParamsSafe = null;
-}
-
-function getQueryParam(keys) {
+/** Try to read a leagueId from the current URL (no React Router needed). */
+function sniffLeagueIdFromUrl() {
   try {
-    const url = new URL(window.location.href);
-    for (const k of keys) {
-      const v = url.searchParams.get(k);
-      if (v) return v;
-    }
-  } catch {}
-  return null;
+    const { href, pathname, search } = window.location || {};
+    // ?leagueId=... or ?league=...
+    const url = new URL(href);
+    const qsId = url.searchParams.get("leagueId") || url.searchParams.get("league");
+    if (qsId) return qsId;
+
+    // /league/<id> or /leagues/<id> or /<id> at the end
+    const path = String(pathname || "");
+    const m =
+      path.match(/\/leagues?\/([^/]+)/i) ||
+      path.match(/\/league\/([^/]+)/i) ||
+      path.match(/\/([^/]+)$/i);
+    if (m && m[1]) return decodeURIComponent(m[1]);
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Props:
- * - leagueId (optional if league prop or route/query has it)
+ * - leagueId (optional if league prop or URL carries it)
  * - league   (optional; if provided, we won't re-fetch)
  * - username (required for owner check)
  */
 export default function LeagueAdmin({ leagueId: leagueIdProp, league: leagueProp, username }) {
-  // Try multiple fallbacks for the leagueId:
-  const params = useParamsSafe ? useParamsSafe() : {};
-  const routeId = params?.leagueId || params?.id || null;
-  const queryId = getQueryParam(["leagueId", "league"]);
-
-  const effectiveLeagueId =
-    leagueProp?.id || leagueIdProp || routeId || queryId || null;
+  // Resolve an effective leagueId from: provided league object -> prop -> URL sniffing.
+  const urlId = sniffLeagueIdFromUrl();
+  const effectiveLeagueId = (leagueProp && leagueProp.id) || leagueIdProp || urlId || null;
 
   const [league, setLeague] = useState(leagueProp || null);
   const [error, setError] = useState("");
@@ -165,7 +162,6 @@ export default function LeagueAdmin({ leagueId: leagueIdProp, league: leagueProp
 
   // Render guards
   if (!league && !effectiveLeagueId) {
-    // Show debug info to help wiring
     return (
       <Box>
         <h3>Admin</h3>
@@ -176,8 +172,7 @@ export default function LeagueAdmin({ leagueId: leagueIdProp, league: leagueProp
           items={{
             "prop.leagueId": leagueIdProp || null,
             "prop.league?.id": leagueProp?.id || null,
-            "route.params.leagueId/id": routeId || null,
-            "query.leagueId/league": queryId || null,
+            "url.sniffed": urlId || null,
             username: username || null,
           }}
         />
