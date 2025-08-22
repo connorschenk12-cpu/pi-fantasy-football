@@ -192,6 +192,40 @@ export function projForWeek(p, week) {
   return 0;
 }
 
+/** ---- Projected season totals helpers ---- **/
+
+/** Sum a single player's projections across the season (default 18 weeks). */
+export function playerProjectedSeason(p, weeks = 18) {
+  if (!p) return 0;
+  let sum = 0;
+  for (let w = 1; w <= weeks; w++) {
+    sum += Number(projForWeek(p, w) || 0);
+  }
+  return Math.round(sum * 100) / 100;
+}
+
+/**
+ * Compute projected season total for a team's starters.
+ * Returns { lines: [{slot, playerId, player, projectedSeason}], total }
+ */
+export function computeSeasonProjected({ roster, playersMap, weeks = 18 }) {
+  const lines = [];
+  let total = 0;
+
+  (ROSTER_SLOTS || []).forEach((slot) => {
+    const pid = roster?.[slot] || null;
+    const p = pid ? playersMap.get(pid) : null;
+    const proj = playerProjectedSeason(p, weeks);
+    total += Number(proj || 0);
+    lines.push({ slot, playerId: pid, player: p, projectedSeason: proj });
+  });
+
+  return { lines, total: Math.round(total * 100) / 100 };
+}
+
+/** Optional: alias – weekly projected team = current computeTeamPoints */
+export const computeWeeklyProjectedTeam = computeTeamPoints;
+
 export function pointsForPlayer(p, week) {
   return projForWeek(p, week);
 }
