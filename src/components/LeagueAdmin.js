@@ -12,7 +12,10 @@ import {
 } from "../lib/storage";
 import { db } from "../firebase";
 import { doc, updateDoc, setDoc } from "firebase/firestore";
+import SeedPlayers from "./SeedPlayers";
 
+// ...inside your component’s JSX, near other admin tools:
+<SeedPlayers leagueId={leagueId} />
 /**
  * Props: { leagueId, username }
  * – Restores draft scheduling controls
