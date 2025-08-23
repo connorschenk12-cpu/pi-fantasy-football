@@ -6,14 +6,13 @@ import {
   ensureTeam,
   moveToStarter,
   moveToBench,
-  listPlayersMap,
   ROSTER_SLOTS,
-  playerDisplay,
 } from "../lib/storage";
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
 import LeagueAdmin from "./LeagueAdmin";
 import MatchupsTab from "./MatchupsTab";
+import PlayerName from "./common/PlayerName";
 
 /**
  * Props:
@@ -24,7 +23,6 @@ import MatchupsTab from "./MatchupsTab";
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
-  const [playersMap, setPlayersMap] = useState(new Map());
   const [tab, setTab] = useState("team"); // team | players | draft | matchups | admin
   const currentWeek = Number(league?.settings?.currentWeek || 1);
 
@@ -50,20 +48,6 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players map (so we can turn IDs into names)
-  useEffect(() => {
-    if (!leagueId) return;
-    (async () => {
-      try {
-        const pm = await listPlayersMap({ leagueId });
-        setPlayersMap(pm);
-      } catch (e) {
-        console.error("listPlayersMap error:", e);
-        setPlayersMap(new Map());
-      }
-    })();
-  }, [leagueId]);
-
   const isOwner = useMemo(() => {
     return league?.owner && username ? league.owner === username : false;
   }, [league?.owner, username]);
@@ -86,11 +70,6 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       console.error("moveToBench error:", e);
       alert(String(e?.message || e));
     }
-  };
-
-  const nameFor = (pid) => {
-    const p = pid ? playersMap.get(pid) : null;
-    return playerDisplay(p); // falls back to id if name missing
   };
 
   return (
@@ -119,7 +98,13 @@ export default function LeagueHome({ leagueId, username, onBack }) {
               <li key={s} style={{ marginBottom: 6 }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <b style={{ width: 40 }}>{s}</b>
-                  <span>{roster[s] ? nameFor(roster[s]) : "(empty)"}</span>
+                  <span>
+                    {roster[s] ? (
+                      <PlayerName leagueId={leagueId} playerId={roster[s]} />
+                    ) : (
+                      "(empty)"
+                    )}
+                  </span>
                   {roster[s] && (
                     <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
                       Send to Bench
@@ -135,7 +120,9 @@ export default function LeagueHome({ leagueId, username, onBack }) {
             {bench.map((pid) => (
               <li key={pid} style={{ marginBottom: 6 }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span>{nameFor(pid)}</span>
+                  <span>
+                    <PlayerName leagueId={leagueId} playerId={pid} />
+                  </span>
                   <select
                     defaultValue=""
                     onChange={(e) => {
@@ -144,6 +131,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
                     }}
                   >
                     <option value="">Move to slot…</option>
+                    {/* You can constrain slot options based on player position if you want */}
                     {ROSTER_SLOTS.map((s) => (
                       <option key={s} value={s}>
                         {s}
@@ -164,9 +152,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
         <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
       )}
 
-      {tab === "matchups" && (
-        <MatchupsTab leagueId={leagueId} currentWeek={currentWeek} playersMap={playersMap} />
-      )}
+      {tab === "matchups" && <MatchupsTab leagueId={leagueId} currentWeek={currentWeek} />}
 
       {tab === "admin" && isOwner && <LeagueAdmin leagueId={leagueId} username={username} />}
     </div>
