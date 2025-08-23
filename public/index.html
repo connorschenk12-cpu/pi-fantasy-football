@@ -4,15 +4,44 @@
     <meta charset="utf-8" />
     <meta
       name="viewport"
-      content="width=device-width,initial-scale=1,shrink-to-fit=no,viewport-fit=cover"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
     <title>Pi Fantasy Football</title>
   </head>
-  <body style="margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+
+    <!-- A visible crash box so we never get a silent white screen -->
+    <pre id="fatal" style="display:none; background:#fee; color:#900; padding:12px; white-space:pre-wrap;"></pre>
+
     <div id="root"></div>
 
-    <!-- Pi SDK (required) -->
+    <!-- Pi SDK (required for login in Pi Browser) -->
     <script src="https://sdk.minepi.com/pi-sdk.js"></script>
-    <!-- Note: We set sandbox mode in src/index.js via Pi.init({ sandbox: true }) -->
+
+    <!-- Global error catchers -->
+    <script>
+      (function () {
+        function showFatal(msg) {
+          var el = document.getElementById("fatal");
+          if (!el) return;
+          el.style.display = "block";
+          el.textContent = String(msg);
+          console.error(msg);
+        }
+        window.addEventListener("error", function (e) {
+          showFatal("Runtime error: " + (e && e.message ? e.message : e));
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          showFatal("Unhandled promise rejection: " + (e && e.reason ? e.reason : e));
+        });
+
+        // Quick check for Pi object (visible when ?debug=1)
+        if (location.search.includes("debug=1")) {
+          var hasPi = !!(window.Pi && window.Pi.init);
+          console.log("Pi SDK present:", hasPi, window.Pi);
+        }
+      })();
+    </script>
   </body>
 </html>
