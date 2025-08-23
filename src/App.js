@@ -1,206 +1,107 @@
 /* eslint-disable no-console */
-// src/App.js
-import React, { useEffect, useMemo, useState } from "react";
-import Leagues from "./components/Leagues";
-import LeagueHome from "./components/LeagueHome";
-
-const APP_ID = "fantasy-football-f6a0c6cf6115e138"; // your slug/appId
-const USE_SANDBOX = true; // testing in Pi Browser sandbox
+import React, { useEffect, useState } from "react";
+import LeagueHome from "./src/components/LeagueHome"; // adjust if your path is "./components/LeagueHome"
+import Leagues from "./src/components/Leagues";
 
 function getPi() {
-  if (typeof window === "undefined") return null;
-  return window.Pi || null;
+  // Pi SDK is injected in index.html
+  if (typeof window !== "undefined" && window.Pi && window.Pi.init) return window.Pi;
+  return null;
 }
 
-async function piInitIfNeeded(Pi) {
-  if (!Pi) return false;
-  try {
-    // If you’ve already initialized elsewhere, this is harmless
-    if (!Pi.initialized) {
-      Pi.init({ appId: APP_ID, version: "2.0", sandbox: USE_SANDBOX });
-    }
-    return true;
-  } catch (e) {
-    console.error("Pi.init failed:", e);
-    return false;
-  }
-}
-
-async function piAuthUsernameOnly() {
-  const Pi = getPi();
-  if (!Pi) throw new Error("Pi SDK not found (are you in Pi Browser?)");
-  await piInitIfNeeded(Pi);
-  const scopes = ["username"];
-  // onIncompletePaymentFound is required; we won’t use payments yet
-  const onIncompletePaymentFound = () => ({});
-  const res = await Pi.authenticate(scopes, onIncompletePaymentFound);
-  const username = res?.user?.username;
-  if (!username) throw new Error("Pi auth returned no username");
-  return { username };
-}
-
-function setCachedUser(u) {
-  try {
-    window.__PI_USER = u || null;
-    if (u) localStorage.setItem("__PI_USER", JSON.stringify(u));
-    else localStorage.removeItem("__PI_USER");
-  } catch {}
-}
-
-function getCachedUser() {
-  try {
-    if (window.__PI_USER?.username) return window.__PI_USER;
-    const raw = localStorage.getItem("__PI_USER");
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed?.username ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-export default function App() {
+export default function App(){
+  const [piReady, setPiReady] = useState(false);
   const [username, setUsername] = useState(null);
   const [leagueId, setLeagueId] = useState(null);
-  const [authError, setAuthError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
 
-  // Pull from cache immediately
+  // Read leagueId from URL (?league=xxxxx)
   useEffect(() => {
-    const cached = getCachedUser();
-    if (cached?.username) {
-      setUsername(cached.username);
-      setLoading(false);
-      return;
-    }
-    setLoading(false);
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const lid = params.get("league");
+      if (lid) setLeagueId(lid);
+    } catch(e){ console.warn("URL parse failed", e); }
   }, []);
 
-  // Optional: dev query param override (?devUser=alice)
+  // Init Pi if present
   useEffect(() => {
-    if (username) return;
-    try {
-      const u = new URL(window.location.href);
-      const devUser = u.searchParams.get("devUser");
-      if (devUser) {
-        setUsername(devUser);
-        setCachedUser({ username: devUser, dev: true });
-      }
-    } catch {}
-  }, [username]);
-
-  // Try automatic Pi login once if in Pi Browser
-  useEffect(() => {
-    (async () => {
-      if (username) return;        // already have a user
-      if (loading) return;         // still booting cache
-      setAuthError("");
-      const Pi = getPi();
-      if (!Pi) return;             // not in Pi Browser; user can use dev login
-      try {
-        setLoading(true);
-        const u = await piAuthUsernameOnly();
-        setUsername(u.username);
-        setCachedUser(u);
-        setLoading(false);
-      } catch (e) {
-        console.error(e);
-        setAuthError(String(e?.message || e));
-        setLoading(false);
-      }
-    })();
-  }, [username, loading]);
-
-  const hasPi = !!getPi();
-  const diag = useMemo(() => {
     const Pi = getPi();
-    const d = {
-      href: typeof window !== "undefined" ? window.location.href : null,
-      hasPi,
-      initialized: Pi?.initialized ?? null,
-      sandboxFlag: USE_SANDBOX,
-      appId: APP_ID,
-      cachedUser: getCachedUser(),
-      username,
-      authError,
-    };
-    return d;
-  }, [hasPi, username, authError]);
-
-  async function handlePiLogin() {
-    setAuthError("");
+    if (!Pi) { setPiReady(false); return; }
     try {
-      setLoading(true);
-      const u = await piAuthUsernameOnly();
-      setUsername(u.username);
-      setCachedUser(u);
-      setLoading(false);
-    } catch (e) {
-      console.error(e);
-      setAuthError(String(e?.message || e));
-      setLoading(false);
+      // Use sandbox if you were using it before; otherwise remove sandbox:true
+      Pi.init({ version:"2.0", sandbox: true }); 
+      setPiReady(true);
+    } catch(e){
+      console.error("Pi.init error", e);
+      setErr(e);
+    }
+  }, []);
+
+  async function doLogin(scope = ["username"]){
+    try {
+      const Pi = getPi();
+      if (!Pi) {
+        setErr(new Error("Pi SDK not found. Open in Pi Browser or try /auth-test.html"));
+        return;
+      }
+      const user = await Pi.authenticate(scope, onIncompletePaymentFound);
+      const uname = user?.user?.username;
+      console.log("Pi.authenticate ->", user);
+      if (!uname) throw new Error("No username returned");
+      setUsername(uname);
+    } catch(e){
+      console.error("Login failed", e);
+      setErr(e);
     }
   }
 
-  function handleDevLogin() {
-    const v = prompt("Enter a dev username (only for testing):", "devuser");
-    if (!v) return;
-    setUsername(v);
-    setCachedUser({ username: v, dev: true });
+  function onIncompletePaymentFound(payment){
+    console.log("onIncompletePaymentFound", payment);
+    // noop for now
   }
 
-  function handleClearCache() {
-    setUsername(null);
-    setCachedUser(null);
-    // reload to clear any state
-    if (typeof window !== "undefined") window.location.reload();
-  }
-
-  // Auth gate
-  if (!username) {
+  // Very defensive UI
+  if (err) {
     return (
-      <div style={{ padding: 16 }}>
-        <h2>Loading Pi user…</h2>
-        <div style={{ color: "#666", marginBottom: 10 }}>
-          If this never finishes, open in <b>Pi Browser</b> and log in.
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-          <button onClick={handlePiLogin} disabled={loading}>
-            {loading ? "Authenticating…" : "Login with Pi (username only)"}
-          </button>
-          <button onClick={handleDevLogin} disabled={loading}>Dev Login (mock)</button>
-          <button onClick={handleClearCache} disabled={loading}>Clear Cached User</button>
-        </div>
-        {authError && (
-          <div style={{ background: "#f8d7da", color: "#721c24", padding: 8, borderRadius: 6 }}>
-            Auth error: {authError}
-          </div>
-        )}
-        <pre
-          style={{
-            marginTop: 12,
-            padding: 8,
-            background: "#f7f7f7",
-            border: "1px dashed #ddd",
-            borderRadius: 6,
-            fontSize: 12,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-          }}
-        >
-{JSON.stringify(diag, null, 2)}
-        </pre>
+      <div style={{padding:16}}>
+        <h2>Login Error</h2>
+        <pre style={{whiteSpace:"pre-wrap"}}>{String(err)}</pre>
+        <p>Try opening <a href="/auth-test.html">/auth-test.html</a> to verify Pi login.</p>
+        <button onClick={() => { setErr(null); }}>Dismiss</button>
       </div>
     );
   }
 
-  // Main app
+  if (!piReady) {
+    return (
+      <div style={{padding:16}}>
+        <h2>Loading Pi user…</h2>
+        <p>If this never finishes, open this app in <b>Pi Browser</b> or test <a href="/auth-test.html">/auth-test.html</a>.</p>
+        <button onClick={() => doLogin(["username"])}>Login with Pi</button>
+      </div>
+    );
+  }
+
+  if (!username) {
+    return (
+      <div style={{padding:16}}>
+        <h2>Welcome to Pi Fantasy Football</h2>
+        <button onClick={() => doLogin(["username"])}>Login with Pi</button>
+        <p style={{opacity:0.7, marginTop:8}}>
+          Trouble? Test <a href="/auth-test.html">/auth-test.html</a>.
+        </p>
+      </div>
+    );
+  }
+
+  // You’re logged in. Show your leagues (and pass a callback to open a league).
   return (
-    <div style={{ padding: 12 }}>
+    <div style={{padding:12}}>
       {!leagueId ? (
         <Leagues
           username={username}
-          onOpenLeague={(id) => setLeagueId(id)}
+          onOpenLeague={(lid) => setLeagueId(lid)}
         />
       ) : (
         <LeagueHome
@@ -209,14 +110,6 @@ export default function App() {
           onBack={() => setLeagueId(null)}
         />
       )}
-      <div style={{ marginTop: 16, fontSize: 12, color: "#666" }}>
-        Logged in as: <b>{username}</b>{" "}
-        {getCachedUser()?.dev ? <i>(dev mock)</i> : null}
-        {" · "}
-        <button onClick={handleClearCache} style={{ fontSize: 12 }}>
-          Sign out
-        </button>
-      </div>
     </div>
   );
 }
