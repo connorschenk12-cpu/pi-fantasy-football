@@ -6,15 +6,14 @@ import {
   ensureTeam,
   moveToStarter,
   moveToBench,
+  listPlayersMap,
   ROSTER_SLOTS,
-  listPlayers,
+  playerDisplay,
 } from "../lib/storage";
-
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
 import LeagueAdmin from "./LeagueAdmin";
-import LeagueTab from "./LeagueTab";              // ← make sure this file exists
-import PlayerName from "./common/PlayerName";     // ← make sure this file exists
+import MatchupsTab from "./MatchupsTab";
 
 /**
  * Props:
@@ -25,23 +24,18 @@ import PlayerName from "./common/PlayerName";     // ← make sure this file exi
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
-  const [tab, setTab] = useState("team"); // team | players | draft | league | admin
   const [playersMap, setPlayersMap] = useState(new Map());
-
+  const [tab, setTab] = useState("team"); // team | players | draft | matchups | admin
   const currentWeek = Number(league?.settings?.currentWeek || 1);
-  const isOwner = useMemo(
-    () => (league?.owner && username ? league.owner === username : false),
-    [league?.owner, username]
-  );
 
-  // Listen to league
+  // League
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
   }, [leagueId]);
 
-  // Ensure team + listen to my team
+  // Ensure team + listen
   useEffect(() => {
     let unsub = null;
     (async () => {
@@ -56,25 +50,23 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Build a players map for name lookups
+  // Load players map (so we can turn IDs into names)
   useEffect(() => {
-    let mounted = true;
+    if (!leagueId) return;
     (async () => {
       try {
-        if (!leagueId) return;
-        const arr = await listPlayers({ leagueId });
-        if (!mounted) return;
-        const m = new Map();
-        arr.forEach((p) => m.set(p.id, p));
-        setPlayersMap(m);
+        const pm = await listPlayersMap({ leagueId });
+        setPlayersMap(pm);
       } catch (e) {
-        console.error("listPlayers error:", e);
+        console.error("listPlayersMap error:", e);
+        setPlayersMap(new Map());
       }
     })();
-    return () => {
-      mounted = false;
-    };
   }, [leagueId]);
+
+  const isOwner = useMemo(() => {
+    return league?.owner && username ? league.owner === username : false;
+  }, [league?.owner, username]);
 
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
@@ -96,6 +88,11 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     }
   };
 
+  const nameFor = (pid) => {
+    const p = pid ? playersMap.get(pid) : null;
+    return playerDisplay(p); // falls back to id if name missing
+  };
+
   return (
     <div>
       <div style={{ marginBottom: 8 }}>
@@ -105,12 +102,12 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       <h2>{league?.name || leagueId}</h2>
 
       <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-        <Tab label="My Team"   active={tab === "team"}   onClick={() => setTab("team")} />
-        <Tab label="Players"   active={tab === "players"} onClick={() => setTab("players")} />
-        <Tab label="Draft"     active={tab === "draft"}   onClick={() => setTab("draft")} />
-        <Tab label="League"    active={tab === "league"}  onClick={() => setTab("league")} />
+        <TabButton label="My Team" active={tab === "team"} onClick={() => setTab("team")} />
+        <TabButton label="Players" active={tab === "players"} onClick={() => setTab("players")} />
+        <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
+        <TabButton label="Matchups" active={tab === "matchups"} onClick={() => setTab("matchups")} />
         {isOwner && (
-          <Tab label="Admin"   active={tab === "admin"}   onClick={() => setTab("admin")} />
+          <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
         )}
       </div>
 
@@ -122,7 +119,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
               <li key={s} style={{ marginBottom: 6 }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <b style={{ width: 40 }}>{s}</b>
-                  <PlayerName playerId={roster[s]} playersMap={playersMap} />
+                  <span>{roster[s] ? nameFor(roster[s]) : "(empty)"}</span>
                   {roster[s] && (
                     <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
                       Send to Bench
@@ -138,7 +135,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
             {bench.map((pid) => (
               <li key={pid} style={{ marginBottom: 6 }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <PlayerName playerId={pid} playersMap={playersMap} />
+                  <span>{nameFor(pid)}</span>
                   <select
                     defaultValue=""
                     onChange={(e) => {
@@ -161,26 +158,22 @@ export default function LeagueHome({ leagueId, username, onBack }) {
         </div>
       )}
 
-      {tab === "players" && (
-        <PlayersList leagueId={leagueId} currentWeek={currentWeek} playersMap={playersMap} />
-      )}
+      {tab === "players" && <PlayersList leagueId={leagueId} currentWeek={currentWeek} />}
 
       {tab === "draft" && (
         <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
       )}
 
-      {tab === "league" && (
-        <LeagueTab leagueId={leagueId} currentWeek={currentWeek} />
+      {tab === "matchups" && (
+        <MatchupsTab leagueId={leagueId} currentWeek={currentWeek} playersMap={playersMap} />
       )}
 
-      {tab === "admin" && isOwner && (
-        <LeagueAdmin leagueId={leagueId} username={username} />
-      )}
+      {tab === "admin" && isOwner && <LeagueAdmin leagueId={leagueId} username={username} />}
     </div>
   );
 }
 
-function Tab({ label, active, onClick }) {
+function TabButton({ label, active, onClick }) {
   return (
     <button
       onClick={onClick}
