@@ -1,25 +1,17 @@
-// Firebase init (Firestore configured for Pi Browser)
-// Replace config values with YOUR Firebase project values.
-import { initializeApp } from "firebase/app";
-import { initializeFirestore, getFirestore } from "firebase/firestore";
+// lib/firebase.js
+import { initializeApp, getApps, getApp } from "firebase/app";
+import { getFirestore } from "firebase/firestore";
 
-// --- Your Firebase config (you shared these earlier) ---
 const firebaseConfig = {
-  apiKey: "AIzaSyBWEBHSEPR8JummZhprqMS80DOptQHoYKg",
-  authDomain: "pi-fantasy-football.firebaseapp.com",
-  projectId: "pi-fantasy-football",
-  storageBucket: "pi-fantasy-football.firebasestorage.app",
-  messagingSenderId: "133234554090",
-  appId: "1:133234554090:web:254d166d2b13640440d393",
-  measurementId: "G-BWFGWS5XWG",
+  apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
+  authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.REACT_APP_FIREBASE_APP_ID,
 };
 
-const app = initializeApp(firebaseConfig);
-
-// Force long polling so Firestore works reliably in Pi Browser
-initializeFirestore(app, {
-  experimentalForceLongPolling: true,
-  useFetchStreams: false,
-});
+// ✅ Use existing app if already initialized
+const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 export const db = getFirestore(app);
