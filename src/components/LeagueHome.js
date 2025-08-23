@@ -7,12 +7,14 @@ import {
   moveToStarter,
   moveToBench,
   ROSTER_SLOTS,
-  listPlayers, // we'll build our own map here
+  listPlayers,
 } from "../lib/storage";
+
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
 import LeagueAdmin from "./LeagueAdmin";
-import PlayerName from "./common/PlayerName";
+import LeagueTab from "./LeagueTab";              // ← make sure this file exists
+import PlayerName from "./common/PlayerName";     // ← make sure this file exists
 
 /**
  * Props:
@@ -23,19 +25,23 @@ import PlayerName from "./common/PlayerName";
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
-  const [tab, setTab] = useState("team"); // team | players | draft | admin
+  const [tab, setTab] = useState("team"); // team | players | draft | league | admin
   const [playersMap, setPlayersMap] = useState(new Map());
 
   const currentWeek = Number(league?.settings?.currentWeek || 1);
+  const isOwner = useMemo(
+    () => (league?.owner && username ? league.owner === username : false),
+    [league?.owner, username]
+  );
 
-  // League
+  // Listen to league
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
   }, [leagueId]);
 
-  // Ensure team + listen
+  // Ensure team + listen to my team
   useEffect(() => {
     let unsub = null;
     (async () => {
@@ -50,7 +56,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players -> map
+  // Build a players map for name lookups
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -69,10 +75,6 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       mounted = false;
     };
   }, [leagueId]);
-
-  const isOwner = useMemo(() => {
-    return league?.owner && username ? league.owner === username : false;
-  }, [league?.owner, username]);
 
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
@@ -102,12 +104,13 @@ export default function LeagueHome({ leagueId, username, onBack }) {
 
       <h2>{league?.name || leagueId}</h2>
 
-      <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
-        <TabButton label="My Team" active={tab === "team"} onClick={() => setTab("team")} />
-        <TabButton label="Players" active={tab === "players"} onClick={() => setTab("players")} />
-        <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
+      <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
+        <Tab label="My Team"   active={tab === "team"}   onClick={() => setTab("team")} />
+        <Tab label="Players"   active={tab === "players"} onClick={() => setTab("players")} />
+        <Tab label="Draft"     active={tab === "draft"}   onClick={() => setTab("draft")} />
+        <Tab label="League"    active={tab === "league"}  onClick={() => setTab("league")} />
         {isOwner && (
-          <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
+          <Tab label="Admin"   active={tab === "admin"}   onClick={() => setTab("admin")} />
         )}
       </div>
 
@@ -159,11 +162,15 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       )}
 
       {tab === "players" && (
-        <PlayersList leagueId={leagueId} currentWeek={currentWeek} />
+        <PlayersList leagueId={leagueId} currentWeek={currentWeek} playersMap={playersMap} />
       )}
 
       {tab === "draft" && (
         <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
+      )}
+
+      {tab === "league" && (
+        <LeagueTab leagueId={leagueId} currentWeek={currentWeek} />
       )}
 
       {tab === "admin" && isOwner && (
@@ -173,7 +180,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
   );
 }
 
-function TabButton({ label, active, onClick }) {
+function Tab({ label, active, onClick }) {
   return (
     <button
       onClick={onClick}
