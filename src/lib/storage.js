@@ -15,6 +15,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { db } from "../firebase";
+import { getNameById } from "./players";
 
 /* ===============================
    ROSTER / DRAFT CONSTANTS
@@ -147,38 +148,33 @@ export async function listPlayersMap({ leagueId }) {
   return map;
 }
 
-/** Robust name resolver so UI doesn’t fall back to numeric ids */
+/** SUPER tolerant name resolver + local fallback */
 export function playerDisplay(p) {
   if (!p) return "(empty)";
 
-  const direct =
-    p.name ??
-    p.fullName ??
-    p.playerName ??
-    p.displayName ??
-    p.Name ??
-    p.PlayerName ??
+  const fromFields =
+    p.name ||
+    p.fullName ||
+    p.playerName ||
+    p.displayName ||
+    p.Player ||
+    p.player ||
+    (p.firstName && p.lastName ? `${p.firstName} ${p.lastName}` : null) ||
+    p.n ||
+    p.N ||
+    p.title ||
+    p.label ||
+    p.info?.name ||
+    p.meta?.name ||
     null;
 
-  if (direct && String(direct).trim()) return String(direct).trim();
+  if (fromFields) return String(fromFields);
 
-  const parts = [
-    p.firstName ?? p.FirstName ?? p.givenName,
-    p.lastName ?? p.LastName ?? p.familyName,
-  ].filter(Boolean);
-  if (parts.length) return parts.join(" ").trim();
+  // Last resort: use local lookup table (src/data/players.js)
+  const fromLocal = getNameById(p.id ?? p.playerId ?? p.pid ?? p.ID);
+  if (fromLocal) return fromLocal;
 
-  const nested = p.meta?.name ?? p.profile?.name ?? p.info?.name ?? null;
-  if (nested && String(nested).trim()) return String(nested).trim();
-
-  return String(p.id ?? "");
-}
-
-/** Convenience helper: fetch a single player by id (uses global players) */
-export async function getPlayerById({ leagueId, playerId }) {
-  if (!playerId) return null;
-  const map = await listPlayersMap({ leagueId });
-  return map.get(playerId) || null;
+  return String(p.id ?? "(unknown)");
 }
 
 /* ===============================
@@ -701,9 +697,4 @@ export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate
 
   await writeSchedule(leagueId, schedule);
   return { weeksCreated: schedule.map((w) => w.week) };
-}
-
-/** Alias kept for components that still import the old name */
-export async function ensureOrRecreateSchedule({ leagueId, totalWeeks = 14 }) {
-  return ensureSeasonSchedule({ leagueId, totalWeeks, recreate: true });
 }
