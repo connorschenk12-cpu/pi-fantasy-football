@@ -34,7 +34,90 @@ export function emptyRoster() {
   ROSTER_SLOTS.forEach((s) => (r[s] = null));
   return r;
 }
+// ---- NAME BACKFILL HELPERS ----
 
+/**
+ * Try to infer a displayable name from whatever fields exist on the player doc.
+ * Returns null if we can't infer.
+ */
+export function inferPlayerName(p) {
+  if (!p) return null;
+  const fromFields =
+    p.name ||
+    p.fullName ||
+    p.playerName ||
+    p.displayName ||
+    (p.firstName && p.lastName ? `${p.firstName} ${p.lastName}` : null) ||
+    null;
+  if (fromFields) return String(fromFields).trim();
+  return null;
+}
+
+/**
+ * Ensure every player in leagues/{leagueId}/players has a `name` field.
+ * If missing, we'll try to infer it. This DOES NOT pull from local data;
+ * for that, use bulkUpsertPlayerNames below.
+ */
+export async function ensurePlayerNameFields({ leagueId }) {
+  const colRef = collection(db, "leagues", leagueId, "players");
+  const snap = await getDocs(colRef);
+  const batch = writeBatch(db);
+  let writes = 0;
+
+  snap.forEach((d) => {
+    const p = { id: d.id, ...d.data() };
+    const hasName = !!(p.name || p.fullName || p.playerName || p.displayName);
+    if (!hasName) {
+      const inferred = inferPlayerName(p);
+      if (inferred) {
+        batch.set(doc(db, "leagues", leagueId, "players", p.id), { name: inferred }, { merge: true });
+        writes++;
+      }
+    }
+  });
+
+  if (writes > 0) await batch.commit();
+  return { updated: writes };
+}
+
+/**
+ * Bulk write name fields from a local map (e.g., data/players.js) into
+ * leagues/{leagueId}/players. Accepts either:
+ *  - namesById: { [playerId]: "Full Name" }
+ *  - playersArray: [{ id, name, ... }, ...]
+ */
+export async function bulkUpsertPlayerNames({ leagueId, namesById = null, playersArray = null }) {
+  const map = new Map();
+
+  if (namesById && typeof namesById === "object") {
+    Object.entries(namesById).forEach(([id, name]) => {
+      if (id && name) map.set(String(id), String(name));
+    });
+  }
+  if (Array.isArray(playersArray)) {
+    playersArray.forEach((p) => {
+      const id = p?.id != null ? String(p.id) : null;
+      const name = p?.name || p?.fullName || p?.playerName || null;
+      if (id && name) map.set(id, String(name));
+    });
+  }
+
+  if (map.size === 0) {
+    return { updated: 0, reason: "no-input" };
+  }
+
+  const batch = writeBatch(db);
+  let writes = 0;
+  for (const [id, name] of map.entries()) {
+    batch.set(doc(db, "leagues", leagueId, "players", id), { name }, { merge: true });
+    writes++;
+    // Commit every ~400 writes to stay well under Firestore limits
+    if (writes % 400 === 0) await batch.commit();
+  }
+  if (writes % 400 !== 0) await batch.commit();
+
+  return { updated: writes };
+}
 function pickFirstOpen(slots, roster) {
   for (const s of slots) if (!roster[s]) return s;
   return null;
