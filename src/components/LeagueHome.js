@@ -1,5 +1,4 @@
 /* eslint-disable no-console */
-
 import React, { useEffect, useMemo, useState } from "react";
 import {
   listenLeague,
@@ -8,34 +7,35 @@ import {
   moveToStarter,
   moveToBench,
   ROSTER_SLOTS,
-  hasPaidEntry,
-  playerDisplay,
-  listPlayersMap,
+  listPlayers, // we'll build our own map here
 } from "../lib/storage";
+import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
 import LeagueAdmin from "./LeagueAdmin";
-import PlayersList from "./PlayersList";
-import MatchupsTab from "./MatchupsTab"; // NEW
-import { db } from "../firebase";
-import { doc, updateDoc } from "firebase/firestore";
+import PlayerName from "./common/PlayerName";
 
 /**
- * Props: { leagueId, username, onBack }
+ * Props:
+ * - leagueId
+ * - username
+ * - onBack()
  */
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
-  const [tab, setTab] = useState("team"); // team | players | draft | matchups | league | admin
+  const [tab, setTab] = useState("team"); // team | players | draft | admin
   const [playersMap, setPlayersMap] = useState(new Map());
 
   const currentWeek = Number(league?.settings?.currentWeek || 1);
 
+  // League
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
   }, [leagueId]);
 
+  // Ensure team + listen
   useEffect(() => {
     let unsub = null;
     (async () => {
@@ -50,16 +50,19 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load player map for name rendering
+  // Load players -> map
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
         if (!leagueId) return;
-        const m = await listPlayersMap({ leagueId });
-        if (mounted) setPlayersMap(m);
+        const arr = await listPlayers({ leagueId });
+        if (!mounted) return;
+        const m = new Map();
+        arr.forEach((p) => m.set(p.id, p));
+        setPlayersMap(m);
       } catch (e) {
-        console.error(e);
+        console.error("listPlayers error:", e);
       }
     })();
     return () => {
@@ -67,7 +70,9 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     };
   }, [leagueId]);
 
-  const isOwner = useMemo(() => league?.owner === username, [league, username]);
+  const isOwner = useMemo(() => {
+    return league?.owner && username ? league.owner === username : false;
+  }, [league?.owner, username]);
 
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
@@ -89,17 +94,6 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     }
   };
 
-  const handleMarkPaid = async () => {
-    try {
-      const lgRef = doc(db, "leagues", leagueId);
-      await updateDoc(lgRef, { [`entry.paid.${username}`]: true });
-      alert("Payment recorded.");
-    } catch (e) {
-      console.error(e);
-      alert("Payment failed: " + (e.message || e));
-    }
-  };
-
   return (
     <div>
       <div style={{ marginBottom: 8 }}>
@@ -111,11 +105,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
         <TabButton label="My Team" active={tab === "team"} onClick={() => setTab("team")} />
         <TabButton label="Players" active={tab === "players"} onClick={() => setTab("players")} />
-        {league?.draft?.status !== "done" && (
-          <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
-        )}
-        <TabButton label="Matchups" active={tab === "matchups"} onClick={() => setTab("matchups")} />
-        <TabButton label="League" active={tab === "league"} onClick={() => setTab("league")} />
+        <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
         {isOwner && (
           <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
         )}
@@ -123,93 +113,62 @@ export default function LeagueHome({ leagueId, username, onBack }) {
 
       {tab === "team" && (
         <div>
-          {league?.draft?.status !== "done" &&
-            league?.entry?.enabled &&
-            !hasPaidEntry(league, username) && (
-              <div style={payBox}>
-                <h3 style={{ marginTop: 0 }}>League Entry Fee</h3>
-                <p style={{ margin: "6px 0" }}>
-                  Amount: <b>{league.entry.amount} Pi</b>
-                </p>
-                <button onClick={handleMarkPaid}>Pay Now</button>
-                <div style={hint}>
-                  Draft is blocked until all members have paid or entry is disabled.
-                </div>
-              </div>
-            )}
-
           <h3>Starters</h3>
           <ul style={{ listStyle: "none", padding: 0 }}>
-            {ROSTER_SLOTS.map((s) => {
-              const pid = roster[s] || null;
-              const p = pid ? playersMap.get(pid) : null;
-              const name = p ? playerDisplay(p) : "(empty)";
-              return (
-                <li key={s} style={{ marginBottom: 6 }}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <b style={{ width: 40 }}>{s}</b>
-                    <span>{name}</span>
-                    {pid && (
-                      <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
-                        Send to Bench
-                      </button>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
+            {ROSTER_SLOTS.map((s) => (
+              <li key={s} style={{ marginBottom: 6 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <b style={{ width: 40 }}>{s}</b>
+                  <PlayerName playerId={roster[s]} playersMap={playersMap} />
+                  {roster[s] && (
+                    <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
+                      Send to Bench
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
           </ul>
 
           <h3>Bench</h3>
           <ul style={{ listStyle: "none", padding: 0 }}>
-            {bench.map((pid) => {
-              const p = playersMap.get(pid);
-              const name = p ? playerDisplay(p) : String(pid);
-              return (
-                <li key={pid} style={{ marginBottom: 6 }}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <span>{name}</span>
-                    <select
-                      defaultValue=""
-                      onChange={(e) => {
-                        const slot = e.target.value;
-                        if (slot) handleBenchToSlot(pid, slot);
-                      }}
-                    >
-                      <option value="">Move to slot…</option>
-                      {ROSTER_SLOTS.map((s) => (
-                        <option key={s} value={s}>
-                          {s}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </li>
-              );
-            })}
+            {bench.map((pid) => (
+              <li key={pid} style={{ marginBottom: 6 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <PlayerName playerId={pid} playersMap={playersMap} />
+                  <select
+                    defaultValue=""
+                    onChange={(e) => {
+                      const slot = e.target.value;
+                      if (slot) handleBenchToSlot(pid, slot);
+                    }}
+                  >
+                    <option value="">Move to slot…</option>
+                    {ROSTER_SLOTS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </li>
+            ))}
             {bench.length === 0 && <li>(no bench players)</li>}
           </ul>
         </div>
       )}
 
-      {tab === "players" && <PlayersList leagueId={leagueId} currentWeek={currentWeek} />}
+      {tab === "players" && (
+        <PlayersList leagueId={leagueId} currentWeek={currentWeek} />
+      )}
 
-      {tab === "draft" && league?.draft?.status !== "done" && (
+      {tab === "draft" && (
         <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
       )}
 
-      {tab === "matchups" && <MatchupsTab leagueId={leagueId} />}
-
-      {tab === "league" && (
-        // This component is provided separately; make sure you replaced it.
-        <React.Suspense fallback={<div>Loading…</div>}>
-          {/** If you’re code-splitting, otherwise just render <LeagueTab leagueId={leagueId} /> */}
-          {/* <LeagueTab leagueId={leagueId} /> */}
-          <div>Open the “League” tab component file; make sure you replaced it with the full version I sent.</div>
-        </React.Suspense>
+      {tab === "admin" && isOwner && (
+        <LeagueAdmin leagueId={leagueId} username={username} />
       )}
-
-      {tab === "admin" && isOwner && <LeagueAdmin leagueId={leagueId} username={username} />}
     </div>
   );
 }
@@ -230,12 +189,3 @@ function TabButton({ label, active, onClick }) {
     </button>
   );
 }
-
-const payBox = {
-  marginBottom: 16,
-  padding: 12,
-  border: "1px solid #ccc",
-  borderRadius: 6,
-  background: "#fffef5",
-};
-const hint = { fontSize: 12, color: "#666", marginTop: 6 };
