@@ -10,7 +10,7 @@ import {
   getScheduleAllWeeks,
 } from "../lib/storage";
 import SeedPlayers from "./SeedPlayers";
-
+import SeedNamesFromLocal from "./SeedNamesFromLocal";
 /**
  * Props:
  * - leagueId? (string)  // preferred
@@ -185,6 +185,9 @@ export default function LeagueAdmin(props) {
         <SeedPlayers leagueId={lid} />
       </section>
 
+<section style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginTop: 12 }}>
+  <SeedNamesFromLocal leagueId={lid} />
+</section>
       {/* ---- Schedule ---- */}
       <section style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
         <h4 style={{ marginTop: 0 }}>Season Schedule</h4>
