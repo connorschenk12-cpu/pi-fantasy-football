@@ -1,98 +1,127 @@
 /* eslint-disable no-console */
-import React, { useEffect, useState } from "react";
-import { listenLeague, listTeams, ROSTER_SLOTS } from "../../lib/storage";
-import PlayerName from "../PlayerName";
+import React, { useEffect, useMemo, useState } from "react";
+import { db } from "../lib/firebase";
+import {
+  collection,
+  getDocs,
+  doc,
+  getDoc,
+} from "firebase/firestore";
+import { listPlayers } from "../lib/storage";
+import PlayerName from "./common/PlayerName";
 
 /**
- * This is a safe, minimal League tab that:
- * - lists teams with W/L (if standings exist)
- * - shows each team’s starters with real names (via PlayerName)
- * It intentionally avoids schedule/admin logic so it won’t crash.
+ * Props:
+ *  - leagueId
+ *  - currentWeek (number)
  */
-export default function LeagueTab({ leagueId }) {
-  const [league, setLeague] = useState(null);
+export default function LeagueTab({ leagueId, currentWeek = 1 }) {
   const [teams, setTeams] = useState([]);
   const [playersMap, setPlayersMap] = useState(new Map());
+  const [weekData, setWeekData] = useState(null); // schedule/week-{currentWeek}
 
-  // league
+  // Load teams
   useEffect(() => {
     if (!leagueId) return;
-    const unsub = listenLeague(leagueId, setLeague);
-    return () => unsub && unsub();
-  }, [leagueId]);
-
-  // teams
-  useEffect(() => {
-    let mounted = true;
     (async () => {
       try {
-        const t = await listTeams(leagueId);
-        if (!mounted) return;
-        setTeams(t || []);
+        const col = collection(db, "leagues", leagueId, "teams");
+        const snap = await getDocs(col);
+        const arr = [];
+        snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+        setTeams(arr);
       } catch (e) {
-        console.error("listTeams error:", e);
+        console.error("LeagueTab teams error:", e);
       }
     })();
-    return () => { mounted = false; };
   }, [leagueId]);
 
-  // players map
+  // Load players -> map
   useEffect(() => {
-    let mounted = true;
+    if (!leagueId) return;
     (async () => {
       try {
-        const { listPlayers } = await import("../../lib/storage");
         const arr = await listPlayers({ leagueId });
-        if (!mounted) return;
         const m = new Map();
         arr.forEach((p) => m.set(p.id, p));
         setPlayersMap(m);
       } catch (e) {
-        console.error("load players in LeagueTab:", e);
-        setPlayersMap(new Map());
+        console.error("LeagueTab players error:", e);
       }
     })();
-    return () => { mounted = false; };
   }, [leagueId]);
+
+  // Load current week schedule doc if present
+  useEffect(() => {
+    if (!leagueId || !currentWeek) return;
+    (async () => {
+      try {
+        const ref = doc(db, "leagues", leagueId, "schedule", `week-${currentWeek}`);
+        const s = await getDoc(ref);
+        setWeekData(s.exists() ? s.data() : null);
+      } catch (e) {
+        console.error("LeagueTab schedule error:", e);
+      }
+    })();
+  }, [leagueId, currentWeek]);
+
+  const teamIndex = useMemo(() => {
+    const m = new Map();
+    teams.forEach((t) => m.set(t.id, t));
+    return m;
+  }, [teams]);
 
   return (
     <div>
-      <h3>League</h3>
-      {league?.standings ? (
-        <p style={{ marginTop: 0 }}>
-          Teams: {Object.keys(league.standings).length}
-        </p>
-      ) : null}
+      <h3>Teams</h3>
+      <div style={{ display: "grid", gap: 12 }}>
+        {teams.map((t) => (
+          <TeamCard key={t.id} team={t} playersMap={playersMap} />
+        ))}
+        {teams.length === 0 && <div>No teams found.</div>}
+      </div>
 
-      {teams.length === 0 ? (
-        <p>No teams yet.</p>
-      ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {teams.map((t) => (
-            <div key={t.id} style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <strong>{t.name || t.id}</strong>
-                <span style={{ opacity: 0.8 }}>
-                  {league?.standings?.[t.id]
-                    ? `W-L: ${league.standings[t.id].wins}-${league.standings[t.id].losses}`
-                    : ""}
-                </span>
-              </div>
-              <div style={{ marginTop: 6 }}>
-                <em>Starters:</em>
-                <ul style={{ listStyle: "none", padding: 0, margin: "6px 0 0 0" }}>
-                  {ROSTER_SLOTS.map((slot) => (
-                    <li key={slot}>
-                      <b style={{ width: 40, display: "inline-block" }}>{slot}</b>{" "}
-                      <PlayerName id={t?.roster?.[slot]} playersMap={playersMap} fallback="(empty)" />
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          ))}
-        </div>
+      <hr style={{ margin: "16px 0" }} />
+
+      <h3>Week {currentWeek} Matchups</h3>
+      {!weekData && <div>No schedule found for this week.</div>}
+      {weekData && Array.isArray(weekData.matchups) && weekData.matchups.length === 0 && (
+        <div>No matchups scheduled for this week.</div>
       )}
+      {weekData && Array.isArray(weekData.matchups) && weekData.matchups.length > 0 && (
+        <ul>
+          {weekData.matchups.map((m, i) => (
+            <li key={i}>
+              <b>{m.home}</b> vs <b>{m.away}</b>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function TeamCard({ team, playersMap }) {
+  const roster = team?.roster || {};
+  const starters = ["QB", "WR1", "WR2", "RB1", "RB2", "TE", "FLEX", "K", "DEF"];
+
+  return (
+    <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
+      <div style={{ fontWeight: 700, marginBottom: 8 }}>
+        {team?.name || team?.id}
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <tbody>
+          {starters.map((s) => (
+            <tr key={s}>
+              <td style={{ padding: "4px 6px", width: 60, opacity: 0.8 }}>{s}</td>
+              <td style={{ padding: "4px 6px" }}>
+                <PlayerName playerId={roster[s]} playersMap={playersMap} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
