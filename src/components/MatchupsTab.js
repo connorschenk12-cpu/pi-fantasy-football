@@ -1,157 +1,170 @@
 /* eslint-disable no-console */
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
-  listenLeague,
-  listenScheduleWeek,
+  listTeams,
   listPlayersMap,
-  listenTeamById,
   computeTeamPoints,
+  playerDisplay,
+  ROSTER_SLOTS,
 } from "../lib/storage";
+import { db } from "../lib/firebase";
+import { doc, getDoc } from "firebase/firestore";
 
-export default function MatchupsTab({ leagueId }) {
-  const [league, setLeague] = useState(null);
-  const [week, setWeek] = useState(1);
-  const [schedule, setSchedule] = useState({ week: 1, matchups: [] });
-  const [playersMap, setPlayersMap] = useState(new Map());
-  const currentWeek = Number(league?.settings?.currentWeek || 1);
+/**
+ * Props:
+ * - leagueId
+ * - currentWeek
+ * - playersMap (optional; if not provided we'll load it)
+ */
+export default function MatchupsTab({ leagueId, currentWeek = 1, playersMap: incomingMap }) {
+  const [schedule, setSchedule] = useState(null); // { week, matchups: [{home, away}] }
+  const [teams, setTeams] = useState([]); // [{id, roster, bench, name}]
+  const [playersMap, setPlayersMap] = useState(incomingMap || new Map());
+  const [loading, setLoading] = useState(true);
 
+  // load week schedule doc
   useEffect(() => {
     if (!leagueId) return;
-    const unsub = listenLeague(leagueId, setLeague);
-    return () => unsub && unsub();
-  }, [leagueId]);
-
-  useEffect(() => {
-    setWeek(currentWeek || 1);
-  }, [currentWeek]);
-
-  useEffect(() => {
-    if (!leagueId || !week) return;
-    const unsub = listenScheduleWeek(leagueId, week, setSchedule);
-    return () => unsub && unsub();
-  }, [leagueId, week]);
-
-  useEffect(() => {
-    let mounted = true;
     (async () => {
       try {
-        if (!leagueId) return;
-        const m = await listPlayersMap({ leagueId });
-        if (mounted) setPlayersMap(m);
+        const ref = doc(db, "leagues", leagueId, "schedule", `week-${currentWeek}`);
+        const snap = await getDoc(ref);
+        setSchedule(snap.exists() ? snap.data() : { week: currentWeek, matchups: [] });
       } catch (e) {
-        console.error(e);
+        console.error("load schedule error:", e);
+        setSchedule({ week: currentWeek, matchups: [] });
       }
     })();
-    return () => {
-      mounted = false;
-    };
+  }, [leagueId, currentWeek]);
+
+  // load teams
+  useEffect(() => {
+    if (!leagueId) return;
+    (async () => {
+      try {
+        const arr = await listTeams(leagueId);
+        setTeams(arr);
+      } catch (e) {
+        console.error("listTeams error:", e);
+        setTeams([]);
+      }
+    })();
   }, [leagueId]);
 
-  const matchups = Array.isArray(schedule?.matchups) ? schedule.matchups : [];
+  // load players map (if not provided)
+  useEffect(() => {
+    if (incomingMap && incomingMap.size) {
+      setPlayersMap(incomingMap);
+      return;
+    }
+    if (!leagueId) return;
+    (async () => {
+      try {
+        const pm = await listPlayersMap({ leagueId });
+        setPlayersMap(pm);
+      } catch (e) {
+        console.error("listPlayersMap error:", e);
+        setPlayersMap(new Map());
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [leagueId, incomingMap]);
+
+  useEffect(() => {
+    if (incomingMap && incomingMap.size) setLoading(false);
+  }, [incomingMap]);
+
+  if (!leagueId) return <div>Missing league.</div>;
+  if (loading) return <div>Loading matchups…</div>;
+
+  const teamById = new Map(teams.map((t) => [t.id, t]));
+
+  const renderTeamBlock = (teamId) => {
+    const team = teamById.get(teamId);
+    if (!team) return <div>Unknown team: {teamId}</div>;
+
+    const { lines, total } = computeTeamPoints({
+      roster: team.roster || {},
+      week: currentWeek,
+      playersMap,
+    });
+
+    return (
+      <div
+        style={{
+          flex: 1,
+          border: "1px solid #ddd",
+          borderRadius: 8,
+          padding: 8,
+          minWidth: 240,
+        }}
+      >
+        <h4 style={{ margin: "0 0 6px" }}>{team.name || team.id}</h4>
+        <table style={{ width: "100%", fontSize: 14 }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left" }}>Slot</th>
+              <th style={{ textAlign: "left" }}>Player</th>
+              <th style={{ textAlign: "right" }}>Pts</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ROSTER_SLOTS.map((slot) => {
+              const line = lines.find((l) => l.slot === slot) || {
+                playerId: null,
+                player: null,
+                points: 0,
+              };
+              return (
+                <tr key={slot}>
+                  <td>{slot}</td>
+                  <td>{line.player ? playerDisplay(line.player) : "(empty)"}</td>
+                  <td style={{ textAlign: "right" }}>{Number(line.points || 0).toFixed(1)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={2} style={{ fontWeight: 700 }}>
+                Total
+              </td>
+              <td style={{ textAlign: "right", fontWeight: 700 }}>{total.toFixed(1)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    );
+  };
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-        <b>Week:</b>
-        <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
-          {Array.from({ length: 18 }).map((_, i) => (
-            <option key={i + 1} value={i + 1}>
-              Week {i + 1}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {matchups.length === 0 ? (
-        <div style={{ color: "#666" }}>No matchups scheduled for week {week}.</div>
+      <h3>Week {currentWeek} Matchups</h3>
+      {!schedule || !schedule.matchups || schedule.matchups.length === 0 ? (
+        <div>No matchups scheduled for week {currentWeek}.</div>
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {matchups.map((m, idx) => (
-            <MatchupCard
-              key={idx}
-              leagueId={leagueId}
-              week={week}
-              home={m.home}
-              away={m.away}
-              playersMap={playersMap}
-            />
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {schedule.matchups.map((m, idx) => (
+            <div
+              key={`${m.home}_vs_${m.away}_${idx}`}
+              style={{
+                display: "flex",
+                gap: 12,
+                alignItems: "stretch",
+                flexWrap: "wrap",
+                border: "1px solid #ccc",
+                padding: 10,
+                borderRadius: 8,
+              }}
+            >
+              {renderTeamBlock(m.home)}
+              <div style={{ alignSelf: "center", fontWeight: 700 }}>vs</div>
+              {renderTeamBlock(m.away)}
+            </div>
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function MatchupCard({ leagueId, week, home, away, playersMap }) {
-  const [homeTeam, setHomeTeam] = useState(null);
-  const [awayTeam, setAwayTeam] = useState(null);
-
-  useEffect(() => {
-    if (!leagueId || !home) return;
-    const unsub = listenTeamById(leagueId, home, setHomeTeam);
-    return () => unsub && unsub();
-  }, [leagueId, home]);
-
-  useEffect(() => {
-    if (!leagueId || !away) return;
-    const unsub = listenTeamById(leagueId, away, setAwayTeam);
-    return () => unsub && unsub();
-  }, [leagueId, away]);
-
-  const homeScore = useMemo(() => {
-    if (!homeTeam) return { total: 0, lines: [] };
-    return computeTeamPoints({
-      roster: homeTeam.roster || {},
-      week,
-      playersMap,
-    });
-  }, [homeTeam, playersMap, week]);
-
-  const awayScore = useMemo(() => {
-    if (!awayTeam) return { total: 0, lines: [] };
-    return computeTeamPoints({
-      roster: awayTeam.roster || {},
-      week,
-      playersMap,
-    });
-  }, [awayTeam, playersMap, week]);
-
-  return (
-    <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 10 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-        <b>{home}</b>
-        <div>
-          <b>{homeScore.total.toFixed(1)}</b> &nbsp;–&nbsp; <b>{awayScore.total.toFixed(1)}</b>
-        </div>
-        <b>{away}</b>
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-        <Side roster={homeTeam?.roster} week={week} playersMap={playersMap} />
-        <Side roster={awayTeam?.roster} week={week} playersMap={playersMap} />
-      </div>
-    </div>
-  );
-}
-
-function Side({ roster, week, playersMap }) {
-  const slots = Object.keys(roster || {});
-  return (
-    <div>
-      {slots.map((slot) => {
-        const pid = roster?.[slot];
-        const p = pid ? playersMap.get(pid) : null;
-        const name =
-          (p?.name || p?.fullName || p?.playerName || (pid ? String(pid) : "(empty)"));
-        const pts = p?.projections?.[String(week)] ?? 0;
-        return (
-          <div key={slot} style={{ display: "flex", justifyContent: "space-between" }}>
-            <span>
-              <b>{slot}</b>: {name}
-            </span>
-            <span>{Number(pts || 0).toFixed(1)}</span>
-          </div>
-        );
-      })}
     </div>
   );
 }
