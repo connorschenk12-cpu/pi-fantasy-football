@@ -1,12 +1,7 @@
 /* eslint-disable no-console */
 import React, { useEffect, useMemo, useState } from "react";
 import { db } from "../lib/firebase";
-import {
-  collection,
-  getDocs,
-  doc,
-  getDoc,
-} from "firebase/firestore";
+import { collection, getDocs, doc, getDoc } from "firebase/firestore";
 import { listPlayers } from "../lib/storage";
 import PlayerName from "./common/PlayerName";
 
@@ -18,7 +13,7 @@ import PlayerName from "./common/PlayerName";
 export default function LeagueTab({ leagueId, currentWeek = 1 }) {
   const [teams, setTeams] = useState([]);
   const [playersMap, setPlayersMap] = useState(new Map());
-  const [weekData, setWeekData] = useState(null); // schedule/week-{currentWeek}
+  const [weekData, setWeekData] = useState(null);
 
   // Load teams
   useEffect(() => {
@@ -51,7 +46,7 @@ export default function LeagueTab({ leagueId, currentWeek = 1 }) {
     })();
   }, [leagueId]);
 
-  // Load current week schedule doc if present
+  // Load schedule for current week (if exists)
   useEffect(() => {
     if (!leagueId || !currentWeek) return;
     (async () => {
