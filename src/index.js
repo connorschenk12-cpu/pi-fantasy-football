@@ -1,33 +1,22 @@
+/* eslint-disable no-console */
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 
-// ---- Pi SDK init helper --------------------------------------------
-const PI_APP_ID = "fantasy-football-f6a0c6cf6115e138"; // your Pi App slug
-export async function initPi() {
-  if (!window.Pi) return { ok: false, error: "Pi SDK not found" };
+function safeRender() {
   try {
-    // Sandbox: keep true while testing in Pi Sandbox wrapper
-    window.Pi.init({ version: "2.0", appId: PI_APP_ID, sandbox: true });
-    return { ok: true };
+    const rootEl = document.getElementById("root");
+    if (!rootEl) throw new Error('#root not found in index.html');
+    const root = createRoot(rootEl);
+    root.render(<App />);
   } catch (e) {
-    // Fallback: init without appId (still works in sandbox)
-    try {
-      window.Pi.init({ version: "2.0", sandbox: true });
-      return { ok: true, note: "Initialized without appId" };
-    } catch (err) {
-      return { ok: false, error: err?.message || "Pi.init failed" };
+    const fatal = document.getElementById("fatal");
+    if (fatal) {
+      fatal.style.display = "block";
+      fatal.textContent = "Bootstrap error: " + (e && e.message ? e.message : e);
     }
+    console.error("Bootstrap error:", e);
   }
 }
 
-export async function piLogin(scopes = ["username"]) {
-  if (!window.Pi) throw new Error("Pi SDK not loaded");
-  const auth = await window.Pi.authenticate(scopes);
-  // Returns { user: { username }, accessToken: string, ... }
-  return auth;
-}
-// --------------------------------------------------------------------
-
-const container = document.getElementById("root");
-createRoot(container).render(<App />);
+safeRender();
