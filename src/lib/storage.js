@@ -282,38 +282,54 @@ export function listenLeagueClaims(leagueId, onChange) {
 }
 
 /**
- * =========================================================
- *  ENTRY / PAYMENTS
- * =========================================================
- */
+/** ===============================
+ *  ENTRY / PAYMENTS (helpers)
+ *  =============================== */
 
+/** Turn league payments on/off and set amount (in π) */
+export async function setEntrySettings({ leagueId, enabled, amount }) {
+  if (!leagueId) throw new Error("leagueId required");
+  const lref = doc(db, "leagues", leagueId);
+  await updateDoc(lref, {
+    "entry.enabled": !!enabled,
+    "entry.amount": Number.isFinite(amount) ? Number(amount) : 0,
+  });
+}
+
+/** Mark a user as paid. You’ll call this after the Pi payment succeeds and you have a tx id. */
+export async function payEntry({ leagueId, username, txId }) {
+  if (!leagueId || !username) throw new Error("leagueId/username required");
+  const lref = doc(db, "leagues", leagueId);
+  const path = `entry.paid.${username}`;
+  await updateDoc(lref, {
+    [path]: { at: serverTimestamp(), txId: String(txId || "") },
+  });
+}
+
+/** True if league has payments enabled and this user has a paid record (else payments are off = true) */
 export function hasPaidEntry(league, username) {
   return league?.entry?.enabled ? !!league?.entry?.paid?.[username] : true;
 }
 
-export async function setEntrySettings({ leagueId, enabled, amount = 0 }) {
-  await updateDoc(doc(db, "leagues", leagueId), {
-    entry: {
-      enabled: !!enabled,
-      amount: Number(amount || 0),
-      // keep existing paid map (merge happens on pay)
-    },
-  });
+/** True if every member has paid (or payments disabled) */
+export async function allMembersPaidOrFree({ leagueId }) {
+  const league = await getLeague(leagueId);
+  if (!league || !league.entry?.enabled) return true;
+  const memRef = collection(db, "leagues", leagueId, "members");
+  const memSnap = await getDocs(memRef);
+  const paid = league.entry?.paid || {};
+  for (const m of memSnap.docs) {
+    const u = m.id;
+    if (!paid[u]) return false;
+  }
+  return true;
 }
 
-export async function payEntryForUser({ leagueId, username, amount }) {
-  const ref = doc(db, "leagues", leagueId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("League not found");
-  const entry = snap.data().entry || {};
-  const required = Number(entry.amount || 0);
-  if (entry.enabled && required > 0 && Number(amount) < required) {
-    throw new Error(`Entry is ${required} PI`);
-  }
-  await updateDoc(ref, {
-    [`entry.paid.${username}`]: true,
-    [`entry.paidAmount.${username}`]: Number(amount || 0),
-  });
+/** (Tiny draft helper) Who’s on the clock right now? */
+export function currentDrafter(league) {
+  const order = Array.isArray(league?.draft?.order) ? league.draft.order : [];
+  const ptr = Number.isInteger(league?.draft?.pointer) ? league.draft.pointer : 0;
+  return order[ptr] || null;
 }
 
 /**
