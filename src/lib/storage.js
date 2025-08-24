@@ -117,6 +117,25 @@ export async function listMemberUsernames(leagueId) {
   return out;
 }
 
+// --- LIVE WEEKLY STATS FETCHER ---
+// Calls /api/stats/week?week=1&ids=pid1,pid2,...
+export async function fetchWeekStats({ week, ids = [] }) {
+  try {
+    const qs = new URLSearchParams();
+    if (week != null) qs.set("week", String(week));
+    if (ids.length) qs.set("ids", ids.join(","));
+    const res = await fetch(`/api/stats/week?${qs.toString()}`);
+    if (!res.ok) return {};
+    const data = await res.json();
+    // Expecting { [playerId]: { passYds, passTd, rushYds, rushTd, recYds, recTd, receptions, fumbles, interceptions, ... } }
+    return data || {};
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("fetchWeekStats error:", e);
+    return {};
+  }
+}
+
 /* ===============================
    PLAYERS
    =============================== */
