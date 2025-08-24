@@ -9,10 +9,11 @@ import {
   listPlayersMap,
   playerDisplay,
   projForWeek,
-  pointsForPlayer,
   moveToStarter,
   moveToBench,
+  fetchWeekStats, // <-- new helper from storage.js (see section 2)
 } from "../lib/storage";
+import { computeFantasyPoints } from "../lib/scoring"; // <-- see section 3
 
 /**
  * Props:
@@ -23,6 +24,7 @@ export default function MyTeam({ leagueId, username }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
+  const [weekStats, setWeekStats] = useState({}); // { [playerId]: rawStatObj }
 
   // Get league (for currentWeek)
   useEffect(() => {
@@ -66,61 +68,37 @@ export default function MyTeam({ leagueId, username }) {
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
-  // ---------- stat helpers (tolerant to several shapes) ----------
-  const getWeekStat = (p, week, keyVariants) => {
-    // Try nested weekly shapes first
-    const w = String(week);
-    const weekly =
-      p?.stats?.week?.[w] ??
-      p?.stats?.byWeek?.[w] ??
-      p?.weeklyStats?.[w] ??
-      null;
+  // Collect all my playerIds for this screen
+  const allMyIds = useMemo(() => {
+    const ids = new Set();
+    ROSTER_SLOTS.forEach((s) => {
+      const pid = roster?.[s];
+      if (pid) ids.add(pid);
+    });
+    (bench || []).forEach((pid) => pid && ids.add(pid));
+    return Array.from(ids);
+  }, [roster, bench]);
 
-    if (weekly) {
-      for (const k of keyVariants) {
-        if (weekly[k] != null) return Number(weekly[k]) || 0;
+  // Fetch LIVE week stats for those players (FPts will be 0 if nothing returned)
+  useEffect(() => {
+    let aborted = false;
+    (async () => {
+      try {
+        if (!leagueId || allMyIds.length === 0) {
+          setWeekStats({});
+          return;
+        }
+        const stats = await fetchWeekStats({ week: currentWeek, ids: allMyIds });
+        if (!aborted) setWeekStats(stats || {});
+      } catch (e) {
+        console.error("fetchWeekStats error:", e);
+        if (!aborted) setWeekStats({});
       }
-    }
-    // Fallback flat keys like statW1 etc.
-    for (const k of keyVariants) {
-      const kk = `${k}W${week}`;
-      if (p?.[kk] != null) return Number(p[kk]) || 0;
-    }
-    return 0;
-  };
-
-  const getSeasonStat = (p, keyVariants) => {
-    const season =
-      p?.stats?.season ??
-      p?.seasonStats ??
-      null;
-    if (season) {
-      for (const k of keyVariants) {
-        if (season[k] != null) return Number(season[k]) || 0;
-      }
-    }
-    // Fallback to flat fields on the player record
-    for (const k of keyVariants) {
-      if (p?.[k] != null) return Number(p[k]) || 0;
-    }
-    return 0;
-  };
-
-  const statExtractors = useMemo(() => {
-    return {
-      passYds: (p) => getSeasonStat(p, ["passYds", "passingYds", "passYards", "seasonPassYds"]),
-      rushYds: (p) => getSeasonStat(p, ["rushYds", "rushingYds", "rushYards", "seasonRushYds"]),
-      recYds:  (p) => getSeasonStat(p, ["recYds", "receivingYds", "recYards", "seasonRecYds"]),
-      tds:     (p) => getSeasonStat(p, ["td", "tds", "touchdowns", "totalTd"]),
-      // Weekly fantasy points + projections
-      fptsWeek: (p) => {
-        // If you have real weekly fantasy scoring, replace this with a scoring function.
-        // For now, use pointsForPlayer (same value as proj unless you store actuals).
-        return Number(pointsForPlayer(p, currentWeek) || 0);
-      },
-      projWeek: (p) => Number(projForWeek(p, currentWeek) || 0),
+    })();
+    return () => {
+      aborted = true;
     };
-  }, [currentWeek]);
+  }, [leagueId, currentWeek, allMyIds]);
 
   const handleBenchToSlot = async (playerId, slot) => {
     try {
@@ -143,41 +121,54 @@ export default function MyTeam({ leagueId, username }) {
     return (ROSTER_SLOTS || []).map((slot) => {
       const pid = roster?.[slot] || null;
       const p = pid ? playersMap.get(pid) : null;
+      const raw = pid ? weekStats[pid] : null; // raw stats for this week from API
+      const fpts = raw ? computeFantasyPoints(raw) : 0; // zero until live stats exist
+      const proj = p ? Number(projForWeek(p, currentWeek) || 0) : 0;
 
-      const row = {
+      return {
         slot,
         id: pid,
         name: p ? playerDisplay(p) : "(empty)",
         pos: p?.position || "-",
         team: p?.team || "-",
-        passYds: p ? statExtractors.passYds(p) : 0,
-        rushYds: p ? statExtractors.rushYds(p) : 0,
-        recYds:  p ? statExtractors.recYds(p) : 0,
-        tds:     p ? statExtractors.tds(p) : 0,
-        fptsWeek: p ? statExtractors.fptsWeek(p) : 0,
-        projWeek: p ? statExtractors.projWeek(p) : 0,
+        // optional show-yards/tds if your raw has them
+        passYds: Number(raw?.passYds || raw?.passingYds || 0),
+        rushYds: Number(raw?.rushYds || raw?.rushingYds || 0),
+        recYds: Number(raw?.recYds || raw?.receivingYds || 0),
+        tds:
+          Number(raw?.passTd || 0) +
+          Number(raw?.rushTd || 0) +
+          Number(raw?.recTd || 0),
+        fptsWeek: fpts,
+        projWeek: proj,
       };
-      return row;
     });
-  }, [roster, playersMap, statExtractors]);
+  }, [roster, playersMap, weekStats, currentWeek]);
 
   const benchRows = useMemo(() => {
     return (bench || []).map((pid) => {
       const p = pid ? playersMap.get(pid) : null;
+      const raw = pid ? weekStats[pid] : null;
+      const fpts = raw ? computeFantasyPoints(raw) : 0;
+      const proj = p ? Number(projForWeek(p, currentWeek) || 0) : 0;
+
       return {
         id: pid,
         name: p ? playerDisplay(p) : String(pid || ""),
         pos: p?.position || "-",
         team: p?.team || "-",
-        passYds: p ? statExtractors.passYds(p) : 0,
-        rushYds: p ? statExtractors.rushYds(p) : 0,
-        recYds:  p ? statExtractors.recYds(p) : 0,
-        tds:     p ? statExtractors.tds(p) : 0,
-        fptsWeek: p ? statExtractors.fptsWeek(p) : 0,
-        projWeek: p ? statExtractors.projWeek(p) : 0,
+        passYds: Number(raw?.passYds || raw?.passingYds || 0),
+        rushYds: Number(raw?.rushYds || raw?.rushingYds || 0),
+        recYds: Number(raw?.recYds || raw?.receivingYds || 0),
+        tds:
+          Number(raw?.passTd || 0) +
+          Number(raw?.rushTd || 0) +
+          Number(raw?.recTd || 0),
+        fptsWeek: fpts,
+        projWeek: proj,
       };
     });
-  }, [bench, playersMap, statExtractors]);
+  }, [bench, playersMap, weekStats, currentWeek]);
 
   const startersTotals = useMemo(() => {
     return startersRows.reduce(
@@ -197,13 +188,13 @@ export default function MyTeam({ leagueId, username }) {
   return (
     <div>
       <div style={{ marginBottom: 8, color: "#555" }}>
-        <b>Week {currentWeek}</b> — manage your starters and bench. Projections show this week.
+        <b>Week {currentWeek}</b> — FPts = live stats (0 if no games yet). Proj = projections.
       </div>
 
-      {/* Starters table */}
+      {/* Starters */}
       <h3 style={{ margin: "16px 0 8px" }}>Starters</h3>
       <div style={{ overflowX: "auto" }}>
-        <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse", minWidth: 720 }}>
+        <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse", minWidth: 840 }}>
           <thead>
             <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
               <th style={{ width: 56 }}>Slot</th>
@@ -256,10 +247,10 @@ export default function MyTeam({ leagueId, username }) {
         </table>
       </div>
 
-      {/* Bench table */}
+      {/* Bench */}
       <h3 style={{ margin: "20px 0 8px" }}>Bench</h3>
       <div style={{ overflowX: "auto" }}>
-        <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse", minWidth: 720 }}>
+        <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse", minWidth: 840 }}>
           <thead>
             <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
               <th>Name</th>
