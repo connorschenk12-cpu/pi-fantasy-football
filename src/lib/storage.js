@@ -317,6 +317,23 @@ export function isMyTurn(league, username) {
   const ptr = Number.isInteger(d.pointer) ? d.pointer : 0;
   return canDraft(league) && order[ptr] === username;
 }
+// Who is currently on the clock?
+export function currentDrafter(league) {
+  const d = league?.draft;
+  if (!d || d.status !== "live") return null;
+  const order = Array.isArray(d.order) ? d.order : [];
+  const ptr = Number.isInteger(d.pointer) ? d.pointer : 0;
+  return order[ptr] ?? null;
+}
+
+// (optional) how many ms left on the clock — some UIs display this
+export function draftClockRemaining(league) {
+  const d = league?.draft;
+  if (!d || d.status !== "live") return 0;
+  const deadline = Number(d.deadline || 0);
+  const now = Date.now();
+  return Math.max(0, deadline - now);
+}
 export function leagueDraftTeamCount(league) {
   return Math.max(1, Array.isArray(league?.draft?.order) ? league.draft.order.length : 1);
 }
