@@ -1,34 +1,63 @@
-// src/components/PlayerNews.js
-import React, { useEffect, useState } from "react";
+/* eslint-disable no-console */
+import React from "react";
 
-export default function PlayerNews({ name, onClose }) {
-  const [items, setItems] = useState([]);
+/** Safely check for '//' in a value that might not be a string */
+function hasDoubleSlash(value) {
+  const s = typeof value === "string" ? value : String(value ?? "");
+  return s.indexOf("//") >= 0;
+}
 
-  useEffect(() => {
-    (async () => {
-      const r = await fetch(`/api/news/player?name=${encodeURIComponent(name)}`);
-      const j = await r.json();
-      setItems(j.items || []);
-    })();
-  }, [name]);
+/**
+ * Very simple player news block.
+ * Props:
+ *   - player (player object) OR playerId (string)
+ *   - news (array) optional; otherwise we just show a friendly placeholder
+ */
+export default function PlayerNews({ player, playerId, news }) {
+  const pid = player?.id ?? playerId ?? "";
+  const name =
+    player?.name ||
+    player?.fullName ||
+    player?.playerName ||
+    (player?.firstName && player?.lastName ? `${player.firstName} ${player.lastName}` : null) ||
+    pid ||
+    "Player";
+
+  // If you later fetch real news, pass it via the `news` prop as an array of:
+  // { id, title, source, url, publishedAt }
+  const items = Array.isArray(news) ? news : [];
+
+  if (!items.length) {
+    return (
+      <div style={{ padding: 8, border: "1px solid #eee", borderRadius: 6 }}>
+        <b>News for {name}</b>
+        <div style={{ color: "#777", marginTop: 6 }}>No recent news available.</div>
+      </div>
+    );
+  }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1000 }}>
-      <div style={{ maxWidth: 700, margin: "40px auto", background: "#fff", borderRadius: 8, padding: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ margin: 0 }}>News: {name}</h3>
-          <button onClick={onClose} style={{ padding: 6 }}>✕</button>
-        </div>
-        <ul style={{ listStyle: "none", padding: 0, marginTop: 12 }}>
-          {items.map((it, i) => (
-            <li key={i} style={{ marginBottom: 8 }}>
-              <a href={it.url} target="_blank" rel="noreferrer">{it.title}</a>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>{it.publishedAt}</div>
+    <div style={{ padding: 8, border: "1px solid #eee", borderRadius: 6 }}>
+      <b>News for {name}</b>
+      <ul style={{ marginTop: 6 }}>
+        {items.map((n) => {
+          const safeUrl = hasDoubleSlash(n?.url) ? n.url : null;
+          return (
+            <li key={n.id || n.url || n.title}>
+              {safeUrl ? (
+                <a href={safeUrl} target="_blank" rel="noreferrer">
+                  {n.title || "(untitled)"}{" "}
+                </a>
+              ) : (
+                <span>{n.title || "(untitled)"} </span>
+              )}
+              <span style={{ color: "#777" }}>
+                {n.source ? `— ${n.source}` : ""} {n.publishedAt ? `(${n.publishedAt})` : ""}
+              </span>
             </li>
-          ))}
-        </ul>
-        {items.length === 0 && <p>No recent headlines found.</p>}
-      </div>
+          );
+        })}
+      </ul>
     </div>
   );
 }
