@@ -2,18 +2,8 @@
 import React, { useState } from "react";
 import { writeBatch, doc, serverTimestamp } from "firebase/firestore";
 import { db } from "../lib/firebase";
-
-// IMPORTANT: This path is correct from src/components/*
 import players from "../data/players";
 
-/**
- * Seeds players into Firestore:
- *  - global:   players/{playerId}
- *  - league:   leagues/{leagueId}/players/{playerId}  (optional box)
- *
- * Props:
- *  - leagueId (optional but recommended)
- */
 export default function ProjectionsSeeder({ leagueId }) {
   const [status, setStatus] = useState("");
   const [limit, setLimit] = useState(500);
@@ -26,7 +16,6 @@ export default function ProjectionsSeeder({ leagueId }) {
       }
       setStatus("Seeding…");
 
-      // write in chunks to avoid 500-limit per batch
       const chunkSize = 450;
       const toWrite = players.slice(0, Number(limit) || players.length);
 
@@ -47,10 +36,8 @@ export default function ProjectionsSeeder({ leagueId }) {
             updatedAt: serverTimestamp(),
           };
 
-          // global doc
           batch.set(doc(db, "players", id), base, { merge: true });
 
-          // league-scoped doc (if chosen and league provided)
           if (writeLeagueScope && leagueId) {
             batch.set(doc(db, "leagues", leagueId, "players", id), base, { merge: true });
           }
