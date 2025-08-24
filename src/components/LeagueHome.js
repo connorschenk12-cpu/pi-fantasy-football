@@ -8,21 +8,35 @@ import {
   moveToBench,
   ROSTER_SLOTS,
 } from "../lib/storage";
+
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
+import LeagueAdmin from "./LeagueAdmin";
 
+// IMPORTANT: use these exact files we set up (NOT Matchups.js)
+import LeagueTab from "./LeagueTab";
+import MatchupsTab from "./MatchupsTab";
+
+/**
+ * Props:
+ * - leagueId
+ * - username
+ * - onBack()
+ */
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
-  const [tab, setTab] = useState("team"); // team | players | draft | admin | matchups | league
+  const [tab, setTab] = useState("team"); // team | players | draft | matchups | league | admin
   const currentWeek = Number(league?.settings?.currentWeek || 1);
 
+  // League
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
   }, [leagueId]);
 
+  // Ensure my team + listen
   useEffect(() => {
     let unsub = null;
     (async () => {
@@ -37,7 +51,9 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  const isOwner = useMemo(() => (league?.owner && username ? league.owner === username : false), [league?.owner, username]);
+  const isOwner = useMemo(() => {
+    return league?.owner && username ? league.owner === username : false;
+  }, [league?.owner, username]);
 
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
@@ -68,16 +84,14 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       <h2>{league?.name || leagueId}</h2>
 
       <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-        <TabButton label="My Team"   active={tab === "team"}    onClick={() => setTab("team")} />
-        <TabButton label="Players"   active={tab === "players"} onClick={() => setTab("players")} />
-        {league?.draft?.status !== "done" && (
-          <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
-        )}
+        <TabButton label="My Team"   active={tab === "team"}     onClick={() => setTab("team")} />
+        <TabButton label="Players"   active={tab === "players"}  onClick={() => setTab("players")} />
+        <TabButton label="Draft"     active={tab === "draft"}    onClick={() => setTab("draft")} />
+        <TabButton label="Matchups"  active={tab === "matchups"} onClick={() => setTab("matchups")} />
+        <TabButton label="League"    active={tab === "league"}   onClick={() => setTab("league")} />
         {isOwner && (
           <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
         )}
-        <TabButton label="Matchups" active={tab === "matchups"} onClick={() => setTab("matchups")} />
-        <TabButton label="League"   active={tab === "league"}   onClick={() => setTab("league")} />
       </div>
 
       {tab === "team" && (
@@ -113,7 +127,9 @@ export default function LeagueHome({ leagueId, username, onBack }) {
                     }}
                   >
                     <option value="">Move to slot…</option>
-                    {ROSTER_SLOTS.map((s) => <option key={s} value={s}>{s}</option>)}
+                    {ROSTER_SLOTS.map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
                   </select>
                 </div>
               </li>
@@ -124,7 +140,7 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       )}
 
       {tab === "players" && (
-        <PlayersList leagueId={leagueId} currentWeek={currentWeek} username={username} />
+        <PlayersList leagueId={leagueId} currentWeek={currentWeek} />
       )}
 
       {tab === "draft" && (
@@ -132,11 +148,15 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       )}
 
       {tab === "matchups" && (
-        <div style={{ color: "#999" }}>(Matchups UI can go here; totals should use actual points.)</div>
+        <MatchupsTab leagueId={leagueId} currentWeek={currentWeek} />
       )}
 
       {tab === "league" && (
-        <div style={{ color: "#999" }}>(League view: other rosters + full season schedule.)</div>
+        <LeagueTab leagueId={leagueId} />
+      )}
+
+      {tab === "admin" && isOwner && (
+        <LeagueAdmin leagueId={leagueId} username={username} />
       )}
     </div>
   );
