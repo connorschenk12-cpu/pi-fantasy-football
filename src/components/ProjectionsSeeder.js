@@ -1,143 +1,104 @@
+/* eslint-disable no-console */
 // src/components/ProjectionsSeeder.js
 import React, { useState } from "react";
-import { db } from "../firebase";
-import { doc, setDoc, getDoc } from "firebase/firestore";
+import { doc, setDoc, writeBatch, collection } from "firebase/firestore";
+import { db } from "../lib/firebase";
+import players from "../data/players"; // ✅ correct path (one "..")
 
 /**
- * ProjectionsSeeder
- * Admin tool: paste JSON to seed weekly projections onto player documents.
+ * Props:
+ * - leagueId (optional): if provided, enables "Seed to League" button
  *
- * Writes to each player doc at:
- *  - projections.{WEEK} = number
- *  - oppByWeek.{WEEK}   = string (e.g., "BUF")
- *  - kickoffByWeek.{WEEK} = number (ms timestamp)
- *
- * Accepts JSON in either of these shapes:
- *
- * SHAPE A (flat map):
- * {
- *   "week": 1,
- *   "projections": {
- *     "patrick_mahomes": { "points": 24.8, "opponent": "CIN", "kickoff": 1757361000000 },
- *     "travis_kelce":    { "points": 17.1, "opponent": "CIN", "kickoff": 1757361000000 }
- *   }
- * }
- *
- * SHAPE B (array):
- * {
- *   "week": 1,
- *   "list": [
- *     { "playerId": "patrick_mahomes", "points": 24.8, "opponent": "CIN", "kickoff": 1757361000000 },
- *     { "playerId": "travis_kelce",    "points": 17.1, "opponent": "CIN", "kickoff": 1757361000000 }
- *   ]
- * }
+ * Usage:
+ * <ProjectionsSeeder leagueId={leagueId} />
  */
-export default function ProjectionsSeeder() {
-  const [jsonText, setJsonText] = useState("");
+export default function ProjectionsSeeder({ leagueId }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
 
-  async function seed(parsed) {
-    const week = Number(parsed?.week);
-    if (!Number.isInteger(week) || week < 1) {
-      throw new Error("Invalid or missing 'week' (must be integer >= 1).");
-    }
-
-    // Normalize to an array [{playerId, points, opponent, kickoff}]
-    let items = [];
-    if (parsed?.projections && typeof parsed.projections === "object") {
-      items = Object.entries(parsed.projections).map(([playerId, v]) => ({
-        playerId,
-        points: Number(v?.points ?? v?.projectedPoints ?? 0),
-        opponent: v?.opponent || "",
-        kickoff: Number(v?.kickoff || 0)
-      }));
-    } else if (Array.isArray(parsed?.list)) {
-      items = parsed.list.map((r) => ({
-        playerId: r.playerId,
-        points: Number(r?.points ?? r?.projectedPoints ?? 0),
-        opponent: r?.opponent || "",
-        kickoff: Number(r?.kickoff || 0)
-      }));
-    } else {
-      throw new Error("Provide either {week, projections:{...}} or {week, list:[...] }.");
-    }
-
-    // Write each player doc
-    let ok = 0, fail = 0;
-    for (const it of items) {
-      if (!it.playerId) { fail++; continue; }
-      try {
-        const ref = doc(db, "players", it.playerId);
-        const exists = await getDoc(ref);
-        if (!exists.exists()) {
-          // Skip players that aren't in your pool yet
-          fail++;
-          continue;
-        }
-        const data = {
-          projections: { [String(week)]: Number.isFinite(it.points) ? it.points : 0 },
-        };
-        if (it.opponent) {
-          data["oppByWeek"] = { [String(week)]: it.opponent };
-        }
-        if (Number.isFinite(it.kickoff) && it.kickoff > 0) {
-          data["kickoffByWeek"] = { [String(week)]: it.kickoff };
-        }
-        await setDoc(ref, data, { merge: true });
-        ok++;
-      } catch (e) {
-        fail++;
-      }
-    }
-    return { ok, fail };
-  }
-
-  async function handleSeed() {
-    setMsg("");
+  async function seedGlobal() {
     try {
       setBusy(true);
-      const parsed = JSON.parse(jsonText);
-      const { ok, fail } = await seed(parsed);
-      setMsg(`Done. Wrote projections for ${ok} players. Skipped/failed: ${fail}.`);
+      setMsg("Seeding global players…");
+      const batch = writeBatch(db);
+
+      players.forEach((p) => {
+        // minimal normalization (ensure id is string, keep name/position/team/projections)
+        const id = String(p.id);
+        const data = {
+          id,
+          name: p.name || p.fullName || `Player ${id}`,
+          position: p.position || "",
+          team: p.team || "",
+          projections: p.projections || {},
+          matchups: p.matchups || {}, // keep if present
+          updatedAt: new Date().toISOString(),
+        };
+        batch.set(doc(db, "players", id), data, { merge: true });
+      });
+
+      await batch.commit();
+      setMsg(`Seeded ${players.length} players to global collection.`);
     } catch (e) {
-      setMsg(e.message || "Seeding failed");
+      console.error(e);
+      setMsg(`Error: ${e.message || e}`);
     } finally {
       setBusy(false);
     }
   }
 
-  async function seedDemoWeek1() {
-    // A tiny demo payload you can tweak before real data
-    const demo = {
-      week: 1,
-      projections: {
-        "patrick_mahomes": { points: 25.3, opponent: "CIN", kickoff: Date.now() + 7*24*3600*1000 },
-        "travis_kelce":    { points: 17.4, opponent: "CIN", kickoff: Date.now() + 7*24*3600*1000 },
-        "ja_marr_chase":   { points: 18.1, opponent: "KC",  kickoff: Date.now() + 7*24*3600*1000 },
-        "christian_mccaffrey": { points: 21.9, opponent: "SEA", kickoff: Date.now() + 7*24*3600*1000 }
-      }
-    };
-    setJsonText(JSON.stringify(demo, null, 2));
+  async function seedLeague() {
+    if (!leagueId) {
+      setMsg("No leagueId provided.");
+      return;
+    }
+    try {
+      setBusy(true);
+      setMsg(`Seeding players to league ${leagueId}…`);
+      const col = collection(db, "leagues", leagueId, "players");
+      const batch = writeBatch(db);
+
+      players.forEach((p) => {
+        const id = String(p.id);
+        const data = {
+          id,
+          name: p.name || p.fullName || `Player ${id}`,
+          position: p.position || "",
+          team: p.team || "",
+          projections: p.projections || {},
+          matchups: p.matchups || {},
+          updatedAt: new Date().toISOString(),
+        };
+        batch.set(doc(col, id), data, { merge: true });
+      });
+
+      await batch.commit();
+      setMsg(`Seeded ${players.length} players to league ${leagueId}.`);
+    } catch (e) {
+      console.error(e);
+      setMsg(`Error: ${e.message || e}`);
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
-    <div style={{ border: "1px solid #eaeaea", borderRadius: 8, padding: 12, marginTop: 12 }}>
-      <div style={{ fontWeight: 700, marginBottom: 8 }}>Projections Seeder (Admin)</div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-        <button onClick={seedDemoWeek1} disabled={busy}>Load demo W1 JSON</button>
-        <button onClick={handleSeed} disabled={busy}>{busy ? "Seeding…" : "Seed Now"}</button>
+    <div style={{ border: "1px solid #eee", padding: 12, borderRadius: 8 }}>
+      <h3>Players / Projections Seeder</h3>
+      <p style={{ marginTop: 0 }}>
+        Use this to (re)seed player docs with names, positions, teams, and projections.
+      </p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button onClick={seedGlobal} disabled={busy}>
+          {busy ? "Working…" : "Seed Global Players"}
+        </button>
+        {leagueId && (
+          <button onClick={seedLeague} disabled={busy}>
+            {busy ? "Working…" : `Seed Players to League (${leagueId})`}
+          </button>
+        )}
       </div>
-      <textarea
-        value={jsonText}
-        onChange={(e)=>setJsonText(e.target.value)}
-        placeholder='Paste JSON: {"week":1,"projections":{"player_id":{"points":12.3,"opponent":"BUF","kickoff":1757...}}}'
-        style={{ width: "100%", minHeight: 180, fontFamily: "monospace" }}
-      />
-      {msg && <div style={{ marginTop: 8 }}>{msg}</div>}
-      <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
-        Notes: Writes to <code>players/{'{playerId}'}</code>. Fields: <code>projections</code>, <code>oppByWeek</code>, <code>kickoffByWeek</code>.
-      </div>
+      {msg && <div style={{ marginTop: 8, color: "#555" }}>{msg}</div>}
     </div>
   );
 }
