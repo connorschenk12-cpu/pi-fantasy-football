@@ -1,6 +1,5 @@
 /* eslint-disable no-console */
 // src/lib/storage.js
-
 import {
   doc,
   getDoc,
@@ -10,52 +9,31 @@ import {
   getDocs,
   addDoc,
   onSnapshot,
-  query,
+  query as fsQuery,
   where,
   serverTimestamp,
   writeBatch,
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
 
-/**
- * =========================================================
- *  SMALL UTILITIES
- * =========================================================
- */
+/* =========================================================
+ * ROSTER / DRAFT CONSTANTS
+ * ========================================================= */
 
-export function asId(x) {
-  if (x == null) return "";
-  return typeof x === "string" ? x : String(x);
-}
-
-function chunk(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-/**
- * =========================================================
- *  ROSTER / DRAFT CONSTANTS
- * =========================================================
- */
-
-export const ROSTER_SLOTS = ["QB", "WR1", "WR2", "RB1", "RB2", "TE", "FLEX", "K", "DEF"];
-export const BENCH_SIZE = 3;
-export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE; // 12
-export const PICK_CLOCK_MS = 5000; // 5s
+export const ROSTER_SLOTS = ["QB", "WR1", "WR2", "RB1", "RB2", "TE", "FLEX", "K", "DEF"]; // 9 starters
+export const BENCH_SIZE = 3; // 12 rounds total
+export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE;
+export const PICK_CLOCK_MS = 5000; // 5s per pick
 
 export function emptyRoster() {
   const r = {};
   ROSTER_SLOTS.forEach((s) => (r[s] = null));
   return r;
 }
-
 function pickFirstOpen(slots, roster) {
   for (const s of slots) if (!roster[s]) return s;
   return null;
 }
-
 export function defaultSlotForPosition(pos, roster = {}) {
   const p = String(pos || "").toUpperCase();
   if (p === "QB") return "QB";
@@ -67,145 +45,75 @@ export function defaultSlotForPosition(pos, roster = {}) {
   return "FLEX";
 }
 
-/**
- * =========================================================
- *  LEAGUE / TEAM IO
- * =========================================================
- */
+/* =========================================================
+ * BASIC LEAGUE / TEAM IO
+ * ========================================================= */
 
 export function listenLeague(leagueId, onChange) {
   if (!leagueId) return () => {};
   const ref = doc(db, "leagues", leagueId);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
-  });
+  return onSnapshot(ref, (snap) => onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null));
 }
-
 export async function getLeague(leagueId) {
   const s = await getDoc(doc(db, "leagues", leagueId));
   return s.exists() ? { id: s.id, ...s.data() } : null;
 }
-
 export async function ensureTeam({ leagueId, username }) {
   const ref = doc(db, "leagues", leagueId, "teams", username);
   const snap = await getDoc(ref);
   if (!snap.exists()) {
     await setDoc(
       ref,
-      {
-        owner: username,
-        name: username,
-        roster: emptyRoster(),
-        bench: [],
-        createdAt: serverTimestamp(),
-      },
+      { owner: username, name: username, roster: emptyRoster(), bench: [], createdAt: serverTimestamp() },
       { merge: true }
     );
   }
   return ref;
 }
-
 export function listenTeam({ leagueId, username, onChange }) {
   if (!leagueId || !username) return () => {};
-  const ref = doc(db, "leagues", leagueId, "teams", username);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
-  });
+  return onSnapshot(doc(db, "leagues", leagueId, "teams", username), (snap) =>
+    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null)
+  );
 }
-
 export function listenTeamById(leagueId, teamId, onChange) {
   if (!leagueId || !teamId) return () => {};
-  const ref = doc(db, "leagues", leagueId, "teams", teamId);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
-  });
+  return onSnapshot(doc(db, "leagues", leagueId, "teams", teamId), (snap) =>
+    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null)
+  );
 }
-
 export async function listTeams(leagueId) {
-  const col = collection(db, "leagues", leagueId, "teams");
-  const snap = await getDocs(col);
+  const snap = await getDocs(collection(db, "leagues", leagueId, "teams"));
   const arr = [];
   snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
   return arr;
 }
-
 export async function listMemberUsernames(leagueId) {
-  const col = collection(db, "leagues", leagueId, "members");
-  const snap = await getDocs(col);
+  const snap = await getDocs(collection(db, "leagues", leagueId, "members"));
   const out = [];
   snap.forEach((d) => out.push(d.id));
   return out;
 }
 
-/**
- * =========================================================
- *  LOCAL DATASET NAME MAP
- * =========================================================
- */
-
-let _localNamesCache = null;
-
-async function getLocalPlayerNameMap() {
-  if (_localNamesCache) return _localNamesCache;
-  try {
-    const mod = await import("../data/players");
-    const arr = (mod && (mod.default || mod.players || mod.PLAYERS)) || [];
-    const m = new Map();
-    for (const raw of arr) {
-      const id = asId(raw.id ?? raw.playerId ?? raw.player_id ?? raw.PlayerID ?? raw.pid);
-      if (!id) continue;
-      const name =
-        raw.name ??
-        raw.fullName ??
-        raw.playerName ??
-        [raw.firstName, raw.lastName].filter(Boolean).join(" ");
-      const team = raw.team ?? raw.Team ?? raw.nfl ?? raw.NFL ?? null;
-      const position = raw.position ?? raw.pos ?? raw.Position ?? raw.POS ?? null;
-      if (name) m.set(id, { name, team: team || null, position: position || null });
-    }
-    _localNamesCache = m;
-    return m;
-  } catch (e) {
-    console.warn("[storage] local players dataset not found or failed to load:", e?.message || e);
-    _localNamesCache = new Map();
-    return _localNamesCache;
-  }
-}
-
-/**
- * =========================================================
- *  PLAYERS
- * =========================================================
- */
+/* =========================================================
+ * PLAYERS (dedupe + resolve names)
+ * ========================================================= */
 
 export async function listPlayers({ leagueId }) {
-  let arr = [];
-  if (leagueId) {
-    const lpRef = collection(db, "leagues", leagueId, "players");
-    const lSnap = await getDocs(lpRef);
-    if (!lSnap.empty) {
-      lSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-    }
-  }
-  if (arr.length === 0) {
-    const snap = await getDocs(collection(db, "players"));
-    snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-  }
+  const byId = new Map();
 
-  const nameMap = await getLocalPlayerNameMap();
-  arr = arr.map((p) => {
-    const id = asId(p.id);
-    const fromLocal = nameMap.get(id);
-    return {
-      ...p,
-      id,
-      name: p.name || (fromLocal ? fromLocal.name : undefined) || String(id),
-      team: p.team || (fromLocal ? fromLocal.team : undefined) || p.NFL || p.nfl || null,
-      position: p.position || (fromLocal ? fromLocal.position : undefined) || p.pos || null,
-    };
+  // 1) League override if present
+  if (leagueId) {
+    const lSnap = await getDocs(collection(db, "leagues", leagueId, "players"));
+    lSnap.forEach((d) => byId.set(d.id, { id: d.id, ...d.data() }));
+  }
+  // 2) Global fallback (won’t overwrite league-scope)
+  const gSnap = await getDocs(collection(db, "players"));
+  gSnap.forEach((d) => {
+    if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...d.data() });
   });
 
-  return arr;
+  return Array.from(byId.values());
 }
 
 export async function listPlayersMap({ leagueId }) {
@@ -217,14 +125,17 @@ export async function listPlayersMap({ leagueId }) {
 
 export function playerDisplay(p) {
   if (!p) return "(empty)";
-  return p.name || p.fullName || p.playerName || String(p.id) || "(unknown)";
+  return p.name || p.fullName || p.playerName || String(p.id);
 }
 
-/**
- * =========================================================
- *  PROJECTIONS / POINTS / OPPONENT
- * =========================================================
- */
+export function asId(x) {
+  // normalize id (some data sources store numeric ids as numbers; claims/rosters as strings)
+  return String(x ?? "");
+}
+
+/* =========================================================
+ * PROJECTIONS / STATS / POINTS
+ * ========================================================= */
 
 export function projForWeek(p, week) {
   const w = String(week);
@@ -235,23 +146,6 @@ export function projForWeek(p, week) {
   const keyed = p?.[`projW${week}`];
   if (keyed != null) return Number(keyed) || 0;
   return 0;
-}
-
-export function pointsForPlayer(p, week) {
-  return projForWeek(p, week); // swap with live stats when available
-}
-
-export function computeTeamPoints({ roster, week, playersMap }) {
-  const lines = [];
-  let total = 0;
-  (ROSTER_SLOTS || []).forEach((slot) => {
-    const pid = roster?.[slot] || null;
-    const p = pid ? playersMap.get(asId(pid)) : null;
-    const pts = p ? pointsForPlayer(p, week) : 0;
-    total += Number(pts || 0);
-    lines.push({ slot, playerId: pid, player: p, points: pts });
-  });
-  return { lines, total: Math.round(total * 10) / 10 };
 }
 
 export function opponentForWeek(p, week) {
@@ -266,77 +160,71 @@ export function opponentForWeek(p, week) {
   return "";
 }
 
-/**
- * =========================================================
- *  CLAIMS (ownership)
- * =========================================================
- */
+/** Stats fetcher: Firestore shape leagues/{leagueId}/stats/week-{week}/{playerId} -> {passingYds, rushingYds, receivingYds, rushTD, recTD, passTD, ...} */
+export async function fetchWeekStats({ leagueId, week }) {
+  const out = new Map();
+  if (!leagueId || !week) return out;
+  const colRef = collection(db, "leagues", leagueId, "stats", `week-${Number(week)}`, "players");
+  const snap = await getDocs(colRef);
+  snap.forEach((d) => out.set(asId(d.id), d.data()));
+  return out;
+}
+
+import { computeFantasyPoints } from "./scoring";
+
+/** Prefer ACTUAL stats; if missing, fall back to projection */
+export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
+  const lines = [];
+  let total = 0;
+  (ROSTER_SLOTS || []).forEach((slot) => {
+    const pid = asId(roster?.[slot]);
+    const p = pid ? playersMap.get(pid) : null;
+    let pts = 0;
+    if (p) {
+      const statLine = statsMap?.get?.(pid) || null;
+      if (statLine) {
+        pts = computeFantasyPoints(statLine); // actual
+      } else {
+        pts = projForWeek(p, week); // fallback
+      }
+    }
+    total += Number(pts || 0);
+    lines.push({ slot, playerId: pid, player: p, points: Number(pts || 0) });
+  });
+  return { lines, total: Math.round(total * 10) / 10 };
+}
+
+/* =========================================================
+ * CLAIMS / OWNERSHIP
+ * ========================================================= */
 
 export function listenLeagueClaims(leagueId, onChange) {
+  if (!leagueId) return () => {};
   const ref = collection(db, "leagues", leagueId, "claims");
   return onSnapshot(ref, (snap) => {
     const m = new Map();
-    snap.forEach((d) => m.set(d.id, d.data()));
+    snap.forEach((d) => m.set(asId(d.id), d.data()));
     onChange(m);
   });
 }
-
-/**
-/** ===============================
- *  ENTRY / PAYMENTS (helpers)
- *  =============================== */
-
-/** Turn league payments on/off and set amount (in π) */
-export async function setEntrySettings({ leagueId, enabled, amount }) {
-  if (!leagueId) throw new Error("leagueId required");
-  const lref = doc(db, "leagues", leagueId);
-  await updateDoc(lref, {
-    "entry.enabled": !!enabled,
-    "entry.amount": Number.isFinite(amount) ? Number(amount) : 0,
-  });
+export async function getClaimsSet(leagueId) {
+  const snap = await getDocs(collection(db, "leagues", leagueId, "claims"));
+  const owned = new Set();
+  snap.forEach((d) => owned.add(asId(d.id)));
+  return owned;
 }
 
-/** Mark a user as paid. You’ll call this after the Pi payment succeeds and you have a tx id. */
-export async function payEntry({ leagueId, username, txId }) {
-  if (!leagueId || !username) throw new Error("leagueId/username required");
-  const lref = doc(db, "leagues", leagueId);
-  const path = `entry.paid.${username}`;
-  await updateDoc(lref, {
-    [path]: { at: serverTimestamp(), txId: String(txId || "") },
-  });
-}
+/* =========================================================
+ * ENTRY / PAYMENTS (flag only)
+ * ========================================================= */
 
-/** True if league has payments enabled and this user has a paid record (else payments are off = true) */
 export function hasPaidEntry(league, username) {
   return league?.entry?.enabled ? !!league?.entry?.paid?.[username] : true;
 }
 
-/** True if every member has paid (or payments disabled) */
-export async function allMembersPaidOrFree({ leagueId }) {
-  const league = await getLeague(leagueId);
-  if (!league || !league.entry?.enabled) return true;
-  const memRef = collection(db, "leagues", leagueId, "members");
-  const memSnap = await getDocs(memRef);
-  const paid = league.entry?.paid || {};
-  for (const m of memSnap.docs) {
-    const u = m.id;
-    if (!paid[u]) return false;
-  }
-  return true;
-}
-
-/** (Tiny draft helper) Who’s on the clock right now? */
-export function currentDrafter(league) {
-  const order = Array.isArray(league?.draft?.order) ? league.draft.order : [];
-  const ptr = Number.isInteger(league?.draft?.pointer) ? league.draft.pointer : 0;
-  return order[ptr] || null;
-}
-
-/**
- * =========================================================
- *  DRAFT HELPERS & ACTIONS
- * =========================================================
- */
+/* =========================================================
+ * DRAFT HELPERS & ACTIONS
+ * ========================================================= */
 
 export function canDraft(league) {
   return league?.draft?.status === "live";
@@ -358,6 +246,7 @@ export function currentRound(league) {
   return Math.min(Math.floor(picksTaken / leagueDraftTeamCount(league)) + 1, DRAFT_ROUNDS_TOTAL);
 }
 
+/** Configure or reconfigure draft order + lock adds during draft */
 export async function configureDraft({ leagueId, order }) {
   const lref = doc(db, "leagues", leagueId);
   const snap = await getDoc(lref);
@@ -378,9 +267,18 @@ export async function configureDraft({ leagueId, order }) {
   });
 }
 
+/** Admin-friendly scheduling helper */
+export async function scheduleDraft({ leagueId, order, startAt }) {
+  // startAt is informational for UI; we still “go live” with startDraft().
+  await configureDraft({ leagueId, order });
+  await updateDoc(doc(db, "leagues", leagueId), {
+    "draft.startAt": startAt || null,
+  });
+  return true;
+}
+
 export async function initDraftOrder({ leagueId }) {
-  const memCol = collection(db, "leagues", leagueId, "members");
-  const memSnap = await getDocs(memCol);
+  const memSnap = await getDocs(collection(db, "leagues", leagueId, "members"));
   const members = [];
   memSnap.forEach((d) => members.push(d.id));
   if (members.length === 0) throw new Error("No members to seed draft order.");
@@ -390,10 +288,7 @@ export async function initDraftOrder({ leagueId }) {
 
 export async function startDraft({ leagueId }) {
   const ref = doc(db, "leagues", leagueId);
-  await updateDoc(ref, {
-    "draft.status": "live",
-    "draft.deadline": Date.now() + PICK_CLOCK_MS,
-  });
+  await updateDoc(ref, { "draft.status": "live", "draft.deadline": Date.now() + PICK_CLOCK_MS });
 }
 
 export async function endDraft({ leagueId }) {
@@ -410,13 +305,12 @@ export async function setDraftStatus({ leagueId, status }) {
   await updateDoc(doc(db, "leagues", leagueId), { "draft.status": status });
 }
 
-/** Perform a draft pick */
+/** Perform a draft pick (sends to bench if slot filled) */
 export async function draftPick({ leagueId, username, playerId, playerPosition, slot }) {
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
   if (!leagueSnap.exists()) throw new Error("League not found");
   const league = leagueSnap.data();
-
   if (!canDraft(league)) throw new Error("Draft is not live");
 
   const order = Array.isArray(league?.draft?.order) ? league.draft.order : [];
@@ -424,7 +318,9 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   const onClock = order[ptr] || null;
   if (onClock !== username) throw new Error("Not your turn");
 
-  const claimRef = doc(db, "leagues", leagueId, "claims", asId(playerId));
+  // deny duplicate
+  const pid = asId(playerId);
+  const claimRef = doc(db, "leagues", leagueId, "claims", pid);
   const claimSnap = await getDoc(claimRef);
   if (claimSnap.exists()) throw new Error("Player already owned");
 
@@ -432,6 +328,7 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   const teamSnap = await getDoc(teamRef);
   const team = teamSnap.exists() ? teamSnap.data() : { roster: emptyRoster(), bench: [] };
 
+  // decide slot
   const rosterCopy = { ...(team.roster || emptyRoster()) };
   let targetSlot = slot;
   if (!targetSlot) {
@@ -446,17 +343,19 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   if (targetSlot === "FLEX" && rosterCopy.FLEX) sendToBench = true;
 
   const batch = writeBatch(db);
-
+  // claim
   batch.set(claimRef, { claimedBy: username, at: serverTimestamp() }, { merge: true });
 
+  // team
   const newTeam = {
     roster: { ...(team.roster || emptyRoster()) },
     bench: Array.isArray(team.bench) ? [...team.bench] : [],
   };
-  if (sendToBench) newTeam.bench.push(asId(playerId));
-  else newTeam.roster[targetSlot] = asId(playerId);
+  if (sendToBench) newTeam.bench.push(pid);
+  else newTeam.roster[targetSlot] = pid;
   batch.set(teamRef, newTeam, { merge: true });
 
+  // advance pointer (snake)
   const teamsCount = Math.max(1, Array.isArray(order) ? order.length : 1);
   const prevPicks = Number(league?.draft?.picksTaken || 0);
   const picksTaken = prevPicks + 1;
@@ -483,30 +382,20 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
 export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   const league = await getLeague(leagueId);
   if (!canDraft(league)) return;
-
   const order = league?.draft?.order || [];
   const ptr = Number(league?.draft?.pointer || 0);
   const username = order[ptr];
   if (!username) return;
 
   const players = await listPlayers({ leagueId });
-  const claimsSnap = await getDocs(collection(db, "leagues", leagueId, "claims"));
-  const owned = new Set();
-  claimsSnap.forEach((d) => owned.add(asId(d.id)));
+  const owned = await getClaimsSet(leagueId);
 
   const available = players.filter((p) => !owned.has(asId(p.id)));
   available.sort((a, b) => projForWeek(b, currentWeek) - projForWeek(a, currentWeek));
-
   const pick = available[0];
   if (!pick) return;
 
-  await draftPick({
-    leagueId,
-    username,
-    playerId: pick.id,
-    playerPosition: pick.position,
-    slot: null,
-  });
+  await draftPick({ leagueId, username, playerId: pick.id, playerPosition: pick.position, slot: null });
 }
 
 export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
@@ -514,7 +403,6 @@ export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
   const leagueSnap = await getDoc(leagueRef);
   if (!leagueSnap.exists()) return { acted: false, reason: "no-league" };
   const league = leagueSnap.data();
-
   if (!canDraft(league)) return { acted: false, reason: "not-live" };
 
   const now = Date.now();
@@ -532,7 +420,6 @@ export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
   const postSnap = await getDoc(leagueRef);
   if (!postSnap.exists()) return { acted: true, reason: "post-missing" };
   const post = postSnap.data();
-
   const teamsCount = leagueDraftTeamCount(post);
   const picksTaken = Number(post?.draft?.picksTaken || 0);
   const roundsTotal = Number(post?.draft?.roundsTotal || DRAFT_ROUNDS_TOTAL);
@@ -540,17 +427,15 @@ export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
 
   await updateDoc(leagueRef, {
     "draft.deadline": doneAll ? null : Date.now() + Number(post?.draft?.clockMs || PICK_CLOCK_MS),
-    ...(doneAll ? { "draft.status": "done" } : {}),
+    ...(doneAll ? { "draft.status": "done", "settings.lockAddDuringDraft": false } : {}),
   });
 
   return { acted: true, reason: doneAll ? "finished" : "auto-picked" };
 }
 
-/**
- * =========================================================
- *  TEAM UTILITIES (move/release/add-drop)
- * =========================================================
- */
+/* =========================================================
+ * TEAM UTILITIES (move/release/add-drop)
+ * ========================================================= */
 
 export async function moveToStarter({ leagueId, username, playerId, slot }) {
   const tRef = doc(db, "leagues", leagueId, "teams", username);
@@ -564,7 +449,7 @@ export async function moveToStarter({ leagueId, username, playerId, slot }) {
   bench.splice(idx, 1);
 
   const roster = { ...(team.roster || emptyRoster()) };
-  if (roster[slot]) bench.push(roster[slot]); // swap
+  if (roster[slot]) bench.push(asId(roster[slot])); // swap
   roster[slot] = asId(playerId);
 
   await updateDoc(tRef, { roster, bench });
@@ -596,7 +481,7 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   const roster = { ...(team.roster || emptyRoster()) };
   const bench = Array.isArray(team.bench) ? [...team.bench] : [];
 
-  for (const s of Object.keys(roster)) if (roster[s] === asId(playerId)) roster[s] = null;
+  for (const s of Object.keys(roster)) if (asId(roster[s]) === asId(playerId)) roster[s] = null;
   const idx = bench.indexOf(asId(playerId));
   if (idx >= 0) bench.splice(idx, 1);
 
@@ -606,6 +491,7 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   await batch.commit();
 }
 
+/** Add/Drop (blocked while draft is live & locked) */
 export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   const league = await getLeague(leagueId);
   if (league?.settings?.lockAddDuringDraft && draftActive(league)) {
@@ -621,7 +507,7 @@ export async function addDropPlayer({ leagueId, username, addId, dropId }) {
     const claimRef = doc(db, "leagues", leagueId, "claims", asId(dropId));
     const roster = { ...(team.roster || emptyRoster()) };
     const bench = Array.isArray(team.bench) ? [...team.bench] : [];
-    for (const s of Object.keys(roster)) if (roster[s] === asId(dropId)) roster[s] = null;
+    for (const s of Object.keys(roster)) if (asId(roster[s]) === asId(dropId)) roster[s] = null;
     const idx = bench.indexOf(asId(dropId));
     if (idx >= 0) bench.splice(idx, 1);
     batch.set(teamRef, { roster, bench }, { merge: true });
@@ -639,11 +525,9 @@ export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   await batch.commit();
 }
 
-/**
- * =========================================================
- *  LEAGUE CREATION / MEMBERSHIP
- * =========================================================
- */
+/* =========================================================
+ * LEAGUE CREATION / MEMBERSHIP
+ * ========================================================= */
 
 export async function createLeague({ name, owner, order }) {
   const ref = await addDoc(collection(db, "leagues"), {
@@ -661,6 +545,7 @@ export async function createLeague({ name, owner, order }) {
       roundsTotal: DRAFT_ROUNDS_TOTAL,
       clockMs: PICK_CLOCK_MS,
       deadline: null,
+      startAt: null,
     },
     standings: {
       [owner]: { wins: 0, losses: 0, ties: 0, pointsFor: 0, pointsAgainst: 0 },
@@ -687,32 +572,26 @@ export async function joinLeague({ leagueId, username }) {
 
 export async function listMyLeagues({ username }) {
   const leaguesCol = collection(db, "leagues");
-
-  const qOwned = query(leaguesCol, where("owner", "==", username));
-  const sOwned = await getDocs(qOwned);
+  // owned
+  const sOwned = await getDocs(fsQuery(leaguesCol, where("owner", "==", username)));
   const out = [];
   sOwned.forEach((d) => out.push({ id: d.id, ...d.data() }));
-
+  // member
   const all = await getDocs(leaguesCol);
   for (const d of all.docs) {
     const memSnap = await getDoc(doc(db, "leagues", d.id, "members", username));
-    if (memSnap.exists()) {
-      if (!out.find((x) => x.id === d.id)) out.push({ id: d.id, ...d.data() });
-    }
+    if (memSnap.exists()) if (!out.find((x) => x.id === d.id)) out.push({ id: d.id, ...d.data() });
   }
   return out;
 }
 
-/**
- * =========================================================
- *  SCHEDULE / MATCHUPS
- * =========================================================
- */
+/* =========================================================
+ * SCHEDULE (round-robin) — unchanged
+ * ========================================================= */
 
 export function generateScheduleRoundRobin(usernames, totalWeeks) {
   const teams = [...new Set(usernames || [])].filter(Boolean);
   if (teams.length < 2) return [];
-
   const arr = [...teams];
   if (arr.length % 2 === 1) arr.push("__BYE__");
   const n = arr.length;
@@ -732,6 +611,7 @@ export function generateScheduleRoundRobin(usernames, totalWeeks) {
     }
     schedule.push({ week, matchups });
 
+    // rotate
     const fixed = left[0];
     const movedFromLeft = left.splice(1, 1)[0];
     const movedFromRight = right.shift();
@@ -753,176 +633,29 @@ export async function writeSchedule(leagueId, schedule) {
 
 export function listenScheduleWeek(leagueId, week, onChange) {
   if (!leagueId || !week) return () => {};
-  const ref = doc(db, "leagues", leagueId, "schedule", `week-${week}`);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? snap.data() : { week, matchups: [] });
-  });
+  return onSnapshot(doc(db, "leagues", leagueId, "schedule", `week-${week}`), (snap) =>
+    onChange(snap.exists() ? snap.data() : { week, matchups: [] })
+  );
 }
-
 export async function getScheduleWeek(leagueId, week) {
-  const ref = doc(db, "leagues", leagueId, "schedule", `week-${week}`);
-  const s = await getDoc(ref);
+  const s = await getDoc(doc(db, "leagues", leagueId, "schedule", `week-${week}`));
   return s.exists() ? s.data() : { week, matchups: [] };
 }
-
 export async function getScheduleAllWeeks(leagueId) {
-  const colRef = collection(db, "leagues", leagueId, "schedule");
-  const snap = await getDocs(colRef);
+  const snap = await getDocs(collection(db, "leagues", leagueId, "schedule"));
   const arr = [];
   snap.forEach((d) => arr.push(d.data()));
   arr.sort((a, b) => Number(a.week) - Number(b.week));
   return arr;
 }
-
 export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate = false }) {
   if (!leagueId) throw new Error("Missing leagueId");
   const members = await listMemberUsernames(leagueId);
   if (members.length < 2) throw new Error("Need at least 2 team members to schedule.");
   const schedule = generateScheduleRoundRobin(members, totalWeeks);
-
   const colRef = collection(db, "leagues", leagueId, "schedule");
   const existing = await getDocs(colRef);
-  const exists = !existing.empty;
-
-  if (exists && !recreate) return { weeksCreated: [] };
-
+  if (!existing.empty && !recreate) return { weeksCreated: [] };
   await writeSchedule(leagueId, schedule);
   return { weeksCreated: schedule.map((w) => w.week) };
-}
-
-/**
- * =========================================================
- *  SEEDERS (LOCAL → FIRESTORE)
- * =========================================================
- */
-
-export async function seedPlayersFromLocalToLeague({ leagueId, max = 5000, overwrite = false }) {
-  if (!leagueId) throw new Error("Missing leagueId");
-  const nameMap = await getLocalPlayerNameMap();
-  const all = [];
-
-  try {
-    const mod = await import("../data/players");
-    const raw = (mod && (mod.default || mod.players || mod.PLAYERS)) || [];
-    raw.forEach((r) => {
-      const id = asId(r.id ?? r.playerId ?? r.player_id ?? r.PlayerID ?? r.pid);
-      if (!id) return;
-
-      const base = nameMap.get(id) || {};
-      const position = r.position ?? r.pos ?? r.Position ?? base.position ?? null;
-      const team = r.team ?? r.Team ?? base.team ?? null;
-
-      // Avoid mixing ?? with || without grouping
-      let name = r.name ?? r.fullName ?? r.playerName;
-      if (!name) {
-        const combined = [r.firstName, r.lastName].filter(Boolean).join(" ");
-        name = combined || base.name || String(id);
-      }
-
-      // Collect projections: tolerant shapes
-      let projections = r.projections || r.projByWeek;
-      if (!projections) {
-        const acc = {};
-        for (let w = 1; w <= 18; w++) {
-          const k1 = `projW${w}`;
-          if (r[k1] != null) acc[String(w)] = Number(r[k1]) || 0;
-        }
-        projections = Object.keys(acc).length ? acc : undefined;
-      }
-
-      all.push({
-        id,
-        name,
-        position,
-        team,
-        projections: projections || {},
-      });
-    });
-  } catch {
-    // Fallback: derive from the names cache
-    nameMap.forEach((v, id) => {
-      all.push({
-        id,
-        name: v.name,
-        position: v.position ?? null,
-        team: v.team ?? null,
-        projections: {},
-      });
-    });
-  }
-
-  const trimmed = all.slice(0, Math.max(0, Math.min(max, all.length)));
-  const batches = chunk(trimmed, 400);
-  for (const group of batches) {
-    const batch = writeBatch(db);
-    for (const p of group) {
-      const ref = doc(db, "leagues", leagueId, "players", asId(p.id));
-      batch.set(ref, overwrite ? p : { ...p }, { merge: !overwrite });
-    }
-    await batch.commit();
-  }
-  return { written: trimmed.length, datasetSize: all.length };
-}
-
-/**
- * =========================================================
- *  LIVE WEEKLY STATS (client fetch -> /api/stats/week)
- * =========================================================
- */
-
-// Simple in-memory cache to avoid repeated network calls
-const _weekStatsCache = new Map(); // key: `${leagueId||'-'}:${week}` -> { [playerId]: { ...stats } }
-
-export async function fetchWeekStats({ leagueId = null, week }) {
-  const w = Number(week || 0);
-  if (!w) return {};
-
-  const cacheKey = `${leagueId || "-"}:${w}`;
-  if (_weekStatsCache.has(cacheKey)) return _weekStatsCache.get(cacheKey);
-
-  try {
-    const qs = new URLSearchParams();
-    qs.set("week", String(w));
-    if (leagueId) qs.set("leagueId", leagueId);
-
-    const res = await fetch(`/api/stats/week?${qs.toString()}`, { method: "GET" });
-    if (!res.ok) {
-      console.warn("[fetchWeekStats] non-200:", res.status);
-      _weekStatsCache.set(cacheKey, {});
-      return {};
-    }
-
-    const json = await res.json();
-    // Expect shape like: { stats: { [playerId]: { passingYds, rushingYds, recYds, tds, fantasy } } }
-    const stats = (json && (json.stats || json.data || {})) || {};
-    _weekStatsCache.set(cacheKey, stats);
-    return stats;
-  } catch (e) {
-    console.warn("[fetchWeekStats] failed:", e?.message || e);
-    _weekStatsCache.set(cacheKey, {});
-    return {};
-  }
-}
-/**
- * =========================================================
- *  QUALITY CHECKS / GUARDS
- * =========================================================
- */
-
-export function allMembersPaid(league) {
-  if (!league?.entry?.enabled) return true;
-  const order = league?.draft?.order || [];
-  if (order.length === 0) return false;
-  for (const u of order) {
-    if (!league.entry.paid || !league.entry.paid[u]) return false;
-  }
-  return true;
-}
-
-export function draftTabAvailable(league) {
-  return league?.draft?.status !== "done";
-}
-
-export function isOwner(league, username) {
-  return !!(league?.owner && username && league.owner === username);
 }
