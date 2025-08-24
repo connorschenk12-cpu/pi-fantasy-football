@@ -24,7 +24,6 @@ import { db } from "../lib/firebase";
  */
 
 export function asId(x) {
-  // Normalize to string id (Firestore doc.id is string; some datasets use numbers)
   if (x == null) return "";
   return typeof x === "string" ? x : String(x);
 }
@@ -41,23 +40,10 @@ function chunk(arr, size) {
  * =========================================================
  */
 
-// Starters: QB, WR1, WR2, RB1, RB2, TE, FLEX, K, DEF
-export const ROSTER_SLOTS = [
-  "QB",
-  "WR1",
-  "WR2",
-  "RB1",
-  "RB2",
-  "TE",
-  "FLEX",
-  "K",
-  "DEF",
-];
-
-// 9 starters + 3 bench = 12 total rounds
+export const ROSTER_SLOTS = ["QB", "WR1", "WR2", "RB1", "RB2", "TE", "FLEX", "K", "DEF"];
 export const BENCH_SIZE = 3;
 export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE; // 12
-export const PICK_CLOCK_MS = 5000; // 5 second pick clock
+export const PICK_CLOCK_MS = 5000; // 5s
 
 export function emptyRoster() {
   const r = {};
@@ -66,9 +52,7 @@ export function emptyRoster() {
 }
 
 function pickFirstOpen(slots, roster) {
-  for (const s of slots) {
-    if (!roster[s]) return s;
-  }
+  for (const s of slots) if (!roster[s]) return s;
   return null;
 }
 
@@ -155,11 +139,8 @@ export async function listMemberUsernames(leagueId) {
 
 /**
  * =========================================================
- *  LOCAL DATASET NAME MAP (fixes “players show as numbers”)
+ *  LOCAL DATASET NAME MAP
  * =========================================================
- *
- * We enrich Firestore player docs with names from src/data/players.js
- * so UI never shows numeric ids.
  */
 
 let _localNamesCache = null;
@@ -167,13 +148,11 @@ let _localNamesCache = null;
 async function getLocalPlayerNameMap() {
   if (_localNamesCache) return _localNamesCache;
   try {
-    // Dynamic import so builds are okay even if file is temporarily missing
     const mod = await import("../data/players");
     const arr = (mod && (mod.default || mod.players || mod.PLAYERS)) || [];
     const m = new Map();
     for (const raw of arr) {
-      const id =
-        asId(raw.id ?? raw.playerId ?? raw.player_id ?? raw.PlayerID ?? raw.pid);
+      const id = asId(raw.id ?? raw.playerId ?? raw.player_id ?? raw.PlayerID ?? raw.pid);
       if (!id) continue;
       const name =
         raw.name ??
@@ -181,8 +160,7 @@ async function getLocalPlayerNameMap() {
         raw.playerName ??
         [raw.firstName, raw.lastName].filter(Boolean).join(" ");
       const team = raw.team ?? raw.Team ?? raw.nfl ?? raw.NFL ?? null;
-      const position =
-        raw.position ?? raw.pos ?? raw.Position ?? raw.POS ?? null;
+      const position = raw.position ?? raw.pos ?? raw.Position ?? raw.POS ?? null;
       if (name) m.set(id, { name, team: team || null, position: position || null });
     }
     _localNamesCache = m;
@@ -201,7 +179,6 @@ async function getLocalPlayerNameMap() {
  */
 
 export async function listPlayers({ leagueId }) {
-  // Prefer league-local players (leagues/{id}/players)
   let arr = [];
   if (leagueId) {
     const lpRef = collection(db, "leagues", leagueId, "players");
@@ -210,13 +187,11 @@ export async function listPlayers({ leagueId }) {
       lSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
     }
   }
-  // Fallback to global /players
   if (arr.length === 0) {
     const snap = await getDocs(collection(db, "players"));
     snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
   }
 
-  // Enrich names/position/team from local dataset if missing
   const nameMap = await getLocalPlayerNameMap();
   arr = arr.map((p) => {
     const id = asId(p.id);
@@ -263,8 +238,7 @@ export function projForWeek(p, week) {
 }
 
 export function pointsForPlayer(p, week) {
-  // Live stats integration could replace this; for now, mirror projections or 0 pre-season
-  return projForWeek(p, week);
+  return projForWeek(p, week); // swap with live stats when available
 }
 
 export function computeTeamPoints({ roster, week, playersMap }) {
@@ -322,7 +296,7 @@ export async function setEntrySettings({ leagueId, enabled, amount = 0 }) {
     entry: {
       enabled: !!enabled,
       amount: Number(amount || 0),
-      paid: {}, // keep old mapping if it exists (merge in next set)
+      // keep existing paid map (merge happens on pay)
     },
   });
 }
@@ -365,10 +339,7 @@ export function leagueDraftTeamCount(league) {
 }
 export function currentRound(league) {
   const picksTaken = Number(league?.draft?.picksTaken || 0);
-  return Math.min(
-    Math.floor(picksTaken / leagueDraftTeamCount(league)) + 1,
-    DRAFT_ROUNDS_TOTAL
-  );
+  return Math.min(Math.floor(picksTaken / leagueDraftTeamCount(league)) + 1, DRAFT_ROUNDS_TOTAL);
 }
 
 export async function configureDraft({ leagueId, order }) {
@@ -423,7 +394,7 @@ export async function setDraftStatus({ leagueId, status }) {
   await updateDoc(doc(db, "leagues", leagueId), { "draft.status": status });
 }
 
-/** Perform a draft pick (handles bench fallback if slot full) */
+/** Perform a draft pick */
 export async function draftPick({ leagueId, username, playerId, playerPosition, slot }) {
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
@@ -437,45 +408,31 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   const onClock = order[ptr] || null;
   if (onClock !== username) throw new Error("Not your turn");
 
-  // deny duplicates
   const claimRef = doc(db, "leagues", leagueId, "claims", asId(playerId));
   const claimSnap = await getDoc(claimRef);
   if (claimSnap.exists()) throw new Error("Player already owned");
 
-  // ensure team
   const teamRef = await ensureTeam({ leagueId, username });
   const teamSnap = await getDoc(teamRef);
   const team = teamSnap.exists() ? teamSnap.data() : { roster: emptyRoster(), bench: [] };
 
-  // decide slot
   const rosterCopy = { ...(team.roster || emptyRoster()) };
   let targetSlot = slot;
   if (!targetSlot) {
     const pos = String(playerPosition || "").toUpperCase();
-    if (pos === "RB") {
-      targetSlot = rosterCopy.RB1 ? (rosterCopy.RB2 ? "FLEX" : "RB2") : "RB1";
-    } else if (pos === "WR") {
-      targetSlot = rosterCopy.WR1 ? (rosterCopy.WR2 ? "FLEX" : "WR2") : "WR1";
-    } else {
-      targetSlot = defaultSlotForPosition(pos, rosterCopy);
-    }
+    if (pos === "RB") targetSlot = rosterCopy.RB1 ? (rosterCopy.RB2 ? "FLEX" : "RB2") : "RB1";
+    else if (pos === "WR") targetSlot = rosterCopy.WR1 ? (rosterCopy.WR2 ? "FLEX" : "WR2") : "WR1";
+    else targetSlot = defaultSlotForPosition(pos, rosterCopy);
   }
 
-  // if filled, bench
   let sendToBench = false;
   if (targetSlot !== "FLEX" && rosterCopy[targetSlot]) sendToBench = true;
   if (targetSlot === "FLEX" && rosterCopy.FLEX) sendToBench = true;
 
   const batch = writeBatch(db);
 
-  // claim ownership
-  batch.set(
-    claimRef,
-    { claimedBy: username, at: serverTimestamp() },
-    { merge: true }
-  );
+  batch.set(claimRef, { claimedBy: username, at: serverTimestamp() }, { merge: true });
 
-  // update team
   const newTeam = {
     roster: { ...(team.roster || emptyRoster()) },
     bench: Array.isArray(team.bench) ? [...team.bench] : [],
@@ -484,7 +441,6 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   else newTeam.roster[targetSlot] = asId(playerId);
   batch.set(teamRef, newTeam, { merge: true });
 
-  // advance pointer (snake)
   const teamsCount = Math.max(1, Array.isArray(order) ? order.length : 1);
   const prevPicks = Number(league?.draft?.picksTaken || 0);
   const picksTaken = prevPicks + 1;
@@ -508,7 +464,6 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   await batch.commit();
 }
 
-/** Auto-pick best available by projection for currentWeek */
 export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   const league = await getLeague(leagueId);
   if (!canDraft(league)) return;
@@ -538,7 +493,6 @@ export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   });
 }
 
-/** Auto-draft if the pick clock has expired */
 export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
@@ -718,13 +672,11 @@ export async function joinLeague({ leagueId, username }) {
 export async function listMyLeagues({ username }) {
   const leaguesCol = collection(db, "leagues");
 
-  // Owned
   const qOwned = query(leaguesCol, where("owner", "==", username));
   const sOwned = await getDocs(qOwned);
   const out = [];
   sOwned.forEach((d) => out.push({ id: d.id, ...d.data() }));
 
-  // Member (scan)
   const all = await getDocs(leaguesCol);
   for (const d of all.docs) {
     const memSnap = await getDoc(doc(db, "leagues", d.id, "members", username));
@@ -741,7 +693,6 @@ export async function listMyLeagues({ username }) {
  * =========================================================
  */
 
-/** Simple round-robin with BYE if odd team count */
 export function generateScheduleRoundRobin(usernames, totalWeeks) {
   const teams = [...new Set(usernames || [])].filter(Boolean);
   if (teams.length < 2) return [];
@@ -765,7 +716,6 @@ export function generateScheduleRoundRobin(usernames, totalWeeks) {
     }
     schedule.push({ week, matchups });
 
-    // circle method rotation
     const fixed = left[0];
     const movedFromLeft = left.splice(1, 1)[0];
     const movedFromRight = right.shift();
@@ -808,7 +758,6 @@ export async function getScheduleAllWeeks(leagueId) {
   return arr;
 }
 
-/** Ensure season schedule exists (or recreate). Writes week-1..N docs. */
 export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate = false }) {
   if (!leagueId) throw new Error("Missing leagueId");
   const members = await listMemberUsernames(leagueId);
@@ -836,36 +785,34 @@ export async function seedPlayersFromLocalToLeague({ leagueId, max = 5000, overw
   const nameMap = await getLocalPlayerNameMap();
   const all = [];
 
-  // Re-open the local dataset to get full rows (id, name, position, team, projections if present)
   try {
     const mod = await import("../data/players");
     const raw = (mod && (mod.default || mod.players || mod.PLAYERS)) || [];
     raw.forEach((r) => {
       const id = asId(r.id ?? r.playerId ?? r.player_id ?? r.PlayerID ?? r.pid);
       if (!id) return;
+
       const base = nameMap.get(id) || {};
       const position = r.position ?? r.pos ?? r.Position ?? base.position ?? null;
       const team = r.team ?? r.Team ?? base.team ?? null;
-      const name =
-        r.name ??
-        r.fullName ??
-        r.playerName ??
-        [r.firstName, r.lastName].filter(Boolean).join(" ") ||
-        base.name ||
-        String(id);
 
-      const projections =
-        r.projections ||
-        r.projByWeek ||
-        // tolerate keyed projW1, projW2... → flatten
-        (() => {
-          const acc = {};
-          for (let w = 1; w <= 18; w++) {
-            const k1 = `projW${w}`;
-            if (r[k1] != null) acc[String(w)] = Number(r[k1]) || 0;
-          }
-          return Object.keys(acc).length ? acc : undefined;
-        })();
+      // Avoid mixing ?? with || without grouping
+      let name = r.name ?? r.fullName ?? r.playerName;
+      if (!name) {
+        const combined = [r.firstName, r.lastName].filter(Boolean).join(" ");
+        name = combined || base.name || String(id);
+      }
+
+      // Collect projections: tolerant shapes
+      let projections = r.projections || r.projByWeek;
+      if (!projections) {
+        const acc = {};
+        for (let w = 1; w <= 18; w++) {
+          const k1 = `projW${w}`;
+          if (r[k1] != null) acc[String(w)] = Number(r[k1]) || 0;
+        }
+        projections = Object.keys(acc).length ? acc : undefined;
+      }
 
       all.push({
         id,
@@ -876,7 +823,7 @@ export async function seedPlayersFromLocalToLeague({ leagueId, max = 5000, overw
       });
     });
   } catch {
-    // Fallback: just use names map keys
+    // Fallback: derive from the names cache
     nameMap.forEach((v, id) => {
       all.push({
         id,
@@ -884,7 +831,7 @@ export async function seedPlayersFromLocalToLeague({ leagueId, max = 5000, overw
         position: v.position ?? null,
         team: v.team ?? null,
         projections: {},
-  });
+      });
     });
   }
 
@@ -903,7 +850,7 @@ export async function seedPlayersFromLocalToLeague({ leagueId, max = 5000, overw
 
 /**
  * =========================================================
- *  QUALITY CHECKS / GUARDS (small helpers used by UI)
+ *  QUALITY CHECKS / GUARDS
  * =========================================================
  */
 
