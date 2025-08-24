@@ -14,8 +14,7 @@ import {
   serverTimestamp,
   writeBatch,
 } from "firebase/firestore";
-import { db } from "../firebase";
-import { getNameById } from "./players";
+import { db } from "../lib/firebase";
 
 /* ===============================
    ROSTER / DRAFT CONSTANTS
@@ -34,90 +33,7 @@ export function emptyRoster() {
   ROSTER_SLOTS.forEach((s) => (r[s] = null));
   return r;
 }
-// ---- NAME BACKFILL HELPERS ----
 
-/**
- * Try to infer a displayable name from whatever fields exist on the player doc.
- * Returns null if we can't infer.
- */
-export function inferPlayerName(p) {
-  if (!p) return null;
-  const fromFields =
-    p.name ||
-    p.fullName ||
-    p.playerName ||
-    p.displayName ||
-    (p.firstName && p.lastName ? `${p.firstName} ${p.lastName}` : null) ||
-    null;
-  if (fromFields) return String(fromFields).trim();
-  return null;
-}
-
-/**
- * Ensure every player in leagues/{leagueId}/players has a `name` field.
- * If missing, we'll try to infer it. This DOES NOT pull from local data;
- * for that, use bulkUpsertPlayerNames below.
- */
-export async function ensurePlayerNameFields({ leagueId }) {
-  const colRef = collection(db, "leagues", leagueId, "players");
-  const snap = await getDocs(colRef);
-  const batch = writeBatch(db);
-  let writes = 0;
-
-  snap.forEach((d) => {
-    const p = { id: d.id, ...d.data() };
-    const hasName = !!(p.name || p.fullName || p.playerName || p.displayName);
-    if (!hasName) {
-      const inferred = inferPlayerName(p);
-      if (inferred) {
-        batch.set(doc(db, "leagues", leagueId, "players", p.id), { name: inferred }, { merge: true });
-        writes++;
-      }
-    }
-  });
-
-  if (writes > 0) await batch.commit();
-  return { updated: writes };
-}
-
-/**
- * Bulk write name fields from a local map (e.g., data/players.js) into
- * leagues/{leagueId}/players. Accepts either:
- *  - namesById: { [playerId]: "Full Name" }
- *  - playersArray: [{ id, name, ... }, ...]
- */
-export async function bulkUpsertPlayerNames({ leagueId, namesById = null, playersArray = null }) {
-  const map = new Map();
-
-  if (namesById && typeof namesById === "object") {
-    Object.entries(namesById).forEach(([id, name]) => {
-      if (id && name) map.set(String(id), String(name));
-    });
-  }
-  if (Array.isArray(playersArray)) {
-    playersArray.forEach((p) => {
-      const id = p?.id != null ? String(p.id) : null;
-      const name = p?.name || p?.fullName || p?.playerName || null;
-      if (id && name) map.set(id, String(name));
-    });
-  }
-
-  if (map.size === 0) {
-    return { updated: 0, reason: "no-input" };
-  }
-
-  const batch = writeBatch(db);
-  let writes = 0;
-  for (const [id, name] of map.entries()) {
-    batch.set(doc(db, "leagues", leagueId, "players", id), { name }, { merge: true });
-    writes++;
-    // Commit every ~400 writes to stay well under Firestore limits
-    if (writes % 400 === 0) await batch.commit();
-  }
-  if (writes % 400 !== 0) await batch.commit();
-
-  return { updated: writes };
-}
 function pickFirstOpen(slots, roster) {
   for (const s of slots) if (!roster[s]) return s;
   return null;
@@ -231,33 +147,9 @@ export async function listPlayersMap({ leagueId }) {
   return map;
 }
 
-/** SUPER tolerant name resolver + local fallback */
 export function playerDisplay(p) {
   if (!p) return "(empty)";
-
-  const fromFields =
-    p.name ||
-    p.fullName ||
-    p.playerName ||
-    p.displayName ||
-    p.Player ||
-    p.player ||
-    (p.firstName && p.lastName ? `${p.firstName} ${p.lastName}` : null) ||
-    p.n ||
-    p.N ||
-    p.title ||
-    p.label ||
-    p.info?.name ||
-    p.meta?.name ||
-    null;
-
-  if (fromFields) return String(fromFields);
-
-  // Last resort: use local lookup table (src/data/players.js)
-  const fromLocal = getNameById(p.id ?? p.playerId ?? p.pid ?? p.ID);
-  if (fromLocal) return fromLocal;
-
-  return String(p.id ?? "(unknown)");
+  return p.name || p.fullName || p.playerName || String(p.id) || "(unknown)";
 }
 
 /* ===============================
@@ -780,152 +672,4 @@ export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate
 
   await writeSchedule(leagueId, schedule);
   return { weeksCreated: schedule.map((w) => w.week) };
-}
-/* ===============================
-   PLAYER SEEDING / UPSERT
-   =============================== */
-
-/** Normalize a wide variety of local player shapes into a common doc */
-function _normalizePlayer(raw) {
-  if (!raw) return null;
-
-  // possible id keys
-  const id =
-    raw.id ?? raw.playerId ?? raw.pid ?? raw.ID ?? raw.key ?? raw.keyId ?? null;
-  if (id == null) return null;
-
-  // possible name keys
-  const name =
-    raw.name ||
-    raw.fullName ||
-    raw.playerName ||
-    raw.displayName ||
-    (raw.firstName && raw.lastName ? `${raw.firstName} ${raw.lastName}` : null) ||
-    raw.Player ||
-    raw.N ||
-    raw.n ||
-    null;
-
-  // position/team
-  const position = (raw.position || raw.pos || raw.Position || "").toString().toUpperCase() || null;
-  const team = raw.team || raw.Team || raw.nflTeam || raw.proTeam || null;
-
-  // projections (if present, accept a few common shapes)
-  let projections = null;
-  if (raw.projections && typeof raw.projections === "object") {
-    projections = raw.projections;
-  } else if (raw.projByWeek && typeof raw.projByWeek === "object") {
-    projections = raw.projByWeek;
-  } else if (typeof raw === "object") {
-    // look for keys like projW1, projW2...
-    const wk = {};
-    Object.keys(raw).forEach((k) => {
-      const m = /^projW(\d+)$/.exec(k);
-      if (m) wk[m[1]] = Number(raw[k]) || 0;
-    });
-    if (Object.keys(wk).length) projections = wk;
-  }
-
-  // opponent / matchup per week (optional)
-  let opponentByWeek = null;
-  if (raw.oppByWeek && typeof raw.oppByWeek === "object") {
-    opponentByWeek = raw.oppByWeek;
-  } else if (raw.opponentByWeek && typeof raw.opponentByWeek === "object") {
-    opponentByWeek = raw.opponentByWeek;
-  } else {
-    const wkOpp = {};
-    Object.keys(raw).forEach((k) => {
-      const m = /^(oppW|opponentW)(\d+)$/.exec(k);
-      if (m) wkOpp[m[2]] = raw[k];
-    });
-    if (Object.keys(wkOpp).length) opponentByWeek = wkOpp;
-  }
-
-  return {
-    id: String(id),
-    name: name ? String(name) : null,
-    position: position || null,
-    team: team || null,
-    ...(projections ? { projections } : {}),
-    ...(opponentByWeek ? { opponentByWeek } : {}),
-  };
-}
-
-/**
- * Upsert a batch of players into Firestore.
- * If leagueId is provided, writes to leagues/{leagueId}/players.
- * Otherwise writes to the global "players" collection.
- */
-export async function upsertPlayers({ leagueId, playersArray }) {
-  if (!Array.isArray(playersArray)) throw new Error("playersArray must be an array");
-  const targetCol = leagueId
-    ? collection(db, "leagues", leagueId, "players")
-    : collection(db, "players");
-
-  // Firestore limit is 500 operations per batch; keep some headroom.
-  const CHUNK = 400;
-  for (let i = 0; i < playersArray.length; i += CHUNK) {
-    const batch = writeBatch(db);
-    const slice = playersArray.slice(i, i + CHUNK);
-    for (const raw of slice) {
-      const p = _normalizePlayer(raw);
-      if (!p || !p.id) continue;
-      // only write fields we know; never wipe extra fields unintentionally
-      const docRef = doc(targetCol, String(p.id));
-      const toWrite = {};
-      if (p.name != null) toWrite.name = p.name;
-      if (p.position != null) toWrite.position = p.position;
-      if (p.team != null) toWrite.team = p.team;
-      if (p.projections != null) toWrite.projections = p.projections;
-      if (p.opponentByWeek != null) toWrite.opponentByWeek = p.opponentByWeek;
-      // also keep an updatedAt timestamp
-      toWrite.updatedAt = serverTimestamp();
-      batch.set(docRef, toWrite, { merge: true });
-    }
-    await batch.commit();
-  }
-  return { ok: true, count: playersArray.length };
-}
-
-/**
- * Seed from a local file (src/data/players.js) via the UI component below.
- * You pass the loaded module’s best array/map into here.
- */
-export async function seedPlayersFromLocal({ leagueId, localModule }) {
-  if (!localModule) throw new Error("No localModule provided");
-  // Try to extract an array from several possible shapes
-  let arr =
-    (Array.isArray(localModule.default) && localModule.default) ||
-    (Array.isArray(localModule.PLAYERS) && localModule.PLAYERS) ||
-    (Array.isArray(localModule.players) && localModule.players) ||
-    null;
-
-  // Or a NAME_BY_ID map -> convert to array
-  if (!arr && localModule.NAME_BY_ID && typeof localModule.NAME_BY_ID === "object") {
-    arr = Object.entries(localModule.NAME_BY_ID).map(([id, name]) => ({
-      id,
-      name,
-    }));
-  }
-  // Or an INDEX map of objects
-  if (!arr && localModule.INDEX && typeof localModule.INDEX === "object") {
-    arr = Object.entries(localModule.INDEX).map(([id, v]) => ({
-      id,
-      name:
-        v?.name ||
-        v?.fullName ||
-        v?.playerName ||
-        v?.displayName ||
-        (v?.firstName && v?.lastName ? `${v.firstName} ${v.lastName}` : null),
-      position: v?.position,
-      team: v?.team || v?.proTeam,
-      projections: v?.projections || v?.projByWeek || undefined,
-    }));
-  }
-
-  if (!Array.isArray(arr)) {
-    throw new Error("Could not detect an array of players in src/data/players.js");
-  }
-
-  return upsertPlayers({ leagueId, playersArray: arr });
 }
