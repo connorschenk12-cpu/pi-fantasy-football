@@ -5,27 +5,24 @@ import {
   playerDisplay,
   projForWeek,
   opponentForWeek,
-  listenLeagueClaims,
+  listenLeague,
   addDropPlayer,
 } from "../lib/storage";
-import PlayerName from "./common/PlayerName";
 
-/**
- * Props:
- *  - leagueId (string)
- *  - currentWeek (number)
- *  - username (string)  <-- IMPORTANT so we don't rely on firebase auth
- */
 export default function PlayersList({ leagueId, currentWeek, username }) {
+  const [league, setLeague] = useState(null);
   const [players, setPlayers] = useState([]);
-  const [claims, setClaims] = useState(new Map());
   const [q, setQ] = useState("");
   const [pos, setPos] = useState("ALL");
   const [teamFilter, setTeamFilter] = useState("ALL");
   const [week, setWeek] = useState(Number(currentWeek || 1));
-  const canManage = !!username && !!leagueId;
 
-  // Load players
+  useEffect(() => {
+    if (!leagueId) return;
+    const unsub = listenLeague(leagueId, setLeague);
+    return () => unsub && unsub();
+  }, [leagueId]);
+
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -36,27 +33,14 @@ export default function PlayersList({ leagueId, currentWeek, username }) {
         console.error("listPlayers error:", e);
       }
     })();
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, [leagueId]);
 
-  // Listen to claims (ownership)
-  useEffect(() => {
-    if (!leagueId) return;
-    const unsub = listenLeagueClaims(leagueId, setClaims);
-    return () => unsub && unsub();
-  }, [leagueId]);
-
-  useEffect(() => {
-    setWeek(Number(currentWeek || 1));
-  }, [currentWeek]);
+  useEffect(() => setWeek(Number(currentWeek || 1)), [currentWeek]);
 
   const teams = useMemo(() => {
     const s = new Set();
-    (players || []).forEach((p) => {
-      if (p.team) s.add(p.team);
-    });
+    (players || []).forEach((p) => { if (p.team) s.add(p.team); });
     return ["ALL", ...Array.from(s).sort()];
   }, [players]);
 
@@ -71,25 +55,22 @@ export default function PlayersList({ leagueId, currentWeek, username }) {
         const idStr = String(p.id || "").toLowerCase();
         return name.includes(needle) || idStr.includes(needle);
       })
-      .sort((a, b) => projForWeek(b, week) - projForWeek(a, week));
+      .sort((a, b) => (projForWeek(b, week) - projForWeek(a, week)));
   }, [players, q, pos, teamFilter, week]);
 
-  const handleAdd = async (playerId) => {
-    if (!canManage) return alert("Please log in to manage players.");
-    try {
-      await addDropPlayer({ leagueId, username, addId: playerId, dropId: null });
-    } catch (e) {
-      console.error("addDropPlayer(add) error:", e);
-      alert(String(e?.message || e));
-    }
-  };
+  const addDropDisabled = Boolean(league?.settings?.lockAddDuringDraft && league?.draft?.status === "live");
 
-  const handleDrop = async (playerId) => {
-    if (!canManage) return alert("Please log in to manage players.");
+  const onAdd = async (p) => {
     try {
-      await addDropPlayer({ leagueId, username, addId: null, dropId: playerId });
+      if (!leagueId || !username) throw new Error("Login to manage");
+      if (addDropDisabled) {
+        alert("Add/Drop is disabled during the draft.");
+        return;
+      }
+      await addDropPlayer({ leagueId, username, addId: p.id, dropId: null });
+      alert(`Added ${playerDisplay(p)} to your bench`);
     } catch (e) {
-      console.error("addDropPlayer(drop) error:", e);
+      console.error(e);
       alert(String(e?.message || e));
     }
   };
@@ -114,16 +95,12 @@ export default function PlayersList({ leagueId, currentWeek, username }) {
         </select>
         <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}>
           {teams.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
+            <option key={t} value={t}>{t}</option>
           ))}
         </select>
         <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
           {Array.from({ length: 18 }).map((_, i) => (
-            <option key={i + 1} value={i + 1}>
-              Week {i + 1}
-            </option>
+            <option key={i + 1} value={i + 1}>Week {i + 1}</option>
           ))}
         </select>
       </div>
@@ -131,50 +108,32 @@ export default function PlayersList({ leagueId, currentWeek, username }) {
       <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
-            <th>Name</th>
-            <th>Pos</th>
-            <th>Team</th>
-            <th>Opp</th>
-            <th>Proj (W{week})</th>
-            <th style={{ width: 160 }}></th>
+            <th>Name</th><th>Pos</th><th>Team</th><th>Opp</th><th>Proj (W{week})</th><th></th>
           </tr>
         </thead>
         <tbody>
-          {filtered.map((p) => {
-            const claim = claims.get(p.id);
-            const ownedBy = claim?.claimedBy || null;
-            const mine = ownedBy && ownedBy === username;
-
-            return (
-              <tr key={p.id} style={{ borderBottom: "1px solid #f1f1f1" }}>
-                <td>
-                  <PlayerName leagueId={leagueId} playerId={p.id} fallback={playerDisplay(p)} />
-                </td>
-                <td>{p.position || "-"}</td>
-                <td>{p.team || "-"}</td>
-                <td>{opponentForWeek(p, week) || "-"}</td>
-                <td>{projForWeek(p, week).toFixed(1)}</td>
-                <td>
-                  {!canManage && <span style={{ color: "#999" }}>Login to manage</span>}
-                  {canManage && !ownedBy && (
-                    <button onClick={() => handleAdd(p.id)}>Add to Bench</button>
-                  )}
-                  {canManage && mine && (
-                    <button onClick={() => handleDrop(p.id)}>Drop</button>
-                  )}
-                  {canManage && ownedBy && !mine && (
-                    <span style={{ color: "#b00" }}>Owned by {ownedBy}</span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-          {filtered.length === 0 && (
-            <tr>
-              <td colSpan={6} style={{ color: "#999", paddingTop: 12 }}>
-                No players match your filters. Add players to Firestore or clear filters.
+          {filtered.map((p) => (
+            <tr key={p.id} style={{ borderBottom: "1px solid #f1f1f1" }}>
+              <td>{playerDisplay(p)}</td>
+              <td>{p.position || "-"}</td>
+              <td>{p.team || "-"}</td>
+              <td>{opponentForWeek(p, week) || "-"}</td>
+              <td>{projForWeek(p, week).toFixed(1)}</td>
+              <td>
+                {username ? (
+                  <button disabled={addDropDisabled} onClick={() => onAdd(p)}>
+                    {addDropDisabled ? "Draft in progress" : "Add"}
+                  </button>
+                ) : (
+                  <span style={{ color: "#999" }}>Login to manage</span>
+                )}
               </td>
             </tr>
+          ))}
+          {filtered.length === 0 && (
+            <tr><td colSpan={6} style={{ color: "#999", paddingTop: 12 }}>
+              No players match your filters.
+            </td></tr>
           )}
         </tbody>
       </table>
