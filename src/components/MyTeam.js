@@ -6,6 +6,7 @@ import {
   listPlayersMap,
   computeTeamPoints,
   ROSTER_SLOTS,
+  asId,
 } from "../lib/storage";
 import PlayerName from "./common/PlayerName";
 
@@ -38,9 +39,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         console.error(e);
       }
     })();
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, [leagueId]);
 
   const roster = team?.roster || {};
@@ -55,13 +54,14 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
       <h3>Starters (Week {week}) — Total: {totals.total.toFixed(1)}</h3>
       <ul style={{ listStyle: "none", padding: 0 }}>
         {ROSTER_SLOTS.map((s) => {
-          const pid = roster[s] || null;
-          const p = pid ? playersMap.get(pid) : null;
+          const raw = roster[s] ?? null;
+          const key = raw == null ? null : (playersMap.has(raw) ? raw : asId(raw));
+          const p = key == null ? null : playersMap.get(key);
           const pts = totals.lines.find((l) => l.slot === s)?.points || 0;
           return (
             <li key={s} style={{ marginBottom: 6 }}>
               <b style={{ width: 40, display: "inline-block" }}>{s}</b>{" "}
-              <PlayerName id={pid} playersMap={playersMap} />{" "}
+              <PlayerName id={raw} playersMap={playersMap} />{" "}
               <span style={{ color: "#888" }}>{p?.position || ""} {p?.team ? `• ${p.team}` : ""}</span>
               <span style={{ float: "right" }}>{pts.toFixed(1)}</span>
             </li>
@@ -72,11 +72,12 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
       <h3>Bench</h3>
       <ul style={{ listStyle: "none", padding: 0 }}>
         {bench.length === 0 && <li>(empty)</li>}
-        {bench.map((pid) => {
-          const p = playersMap.get(pid);
+        {bench.map((raw) => {
+          const key = playersMap.has(raw) ? raw : asId(raw);
+          const p = playersMap.get(key);
           return (
-            <li key={pid} style={{ marginBottom: 6 }}>
-              <PlayerName id={pid} playersMap={playersMap} />{" "}
+            <li key={String(raw)} style={{ marginBottom: 6 }}>
+              <PlayerName id={raw} playersMap={playersMap} />{" "}
               <span style={{ color: "#888" }}>{p?.position || ""} {p?.team ? `• ${p.team}` : ""}</span>
             </li>
           );
