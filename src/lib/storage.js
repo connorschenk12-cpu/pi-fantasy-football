@@ -301,6 +301,41 @@ export async function allMembersPaid(leagueId) {
   }
   return true;
 }
+
+/** =========================================================
+ *  ENTRY / PAYMENTS HELPERS
+ *  ========================================================= */
+
+/**
+ * Sync helper: if entry fees are disabled, returns true.
+ * If enabled, every username in memberUsernames must be marked paid.
+ */
+export function allMembersPaidOrFreeSync(league, memberUsernames = []) {
+  // No gate -> OK to draft
+  if (!league?.entry?.enabled) return true;
+
+  const paid = league?.entry?.paid || {};
+  // require paid[username] truthy for each member
+  return (memberUsernames || []).every((u) => !!paid[u]);
+}
+
+/**
+ * Async convenience: works with a league object or leagueId.
+ * If fees are disabled -> true.
+ * If enabled -> ensure every current member is paid.
+ */
+export async function allMembersPaidOrFree({ leagueId, league }) {
+  // Load league if only leagueId was provided
+  const lg = league || (leagueId ? await getLeague(leagueId) : null);
+  if (!lg) return false;
+
+  if (!lg?.entry?.enabled) return true;
+
+  // Pull current members
+  const usernames = await listMemberUsernames(lg.id || leagueId);
+  const paid = lg?.entry?.paid || {};
+  return usernames.every((u) => !!paid[u]);
+}
 /* =========================================================
  * DRAFT HELPERS & ACTIONS
  * ========================================================= */
