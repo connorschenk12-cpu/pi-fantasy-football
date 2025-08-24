@@ -1,39 +1,44 @@
 /* eslint-disable no-console */
+// src/components/LeagueHome.js
 import React, { useEffect, useMemo, useState } from "react";
+
 import {
   listenLeague,
   listenTeam,
   ensureTeam,
-  moveToStarter,
-  moveToBench,
-  ROSTER_SLOTS,
+  hasPaidEntry,
 } from "../lib/storage";
+
+// Tabs
+import MyTeam from "./MyTeam";
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
-import LeagueAdmin from "./LeagueAdmin";
+import LeagueTab from "./LeagueTab";
 import MatchupsTab from "./MatchupsTab";
-import PlayerName from "./common/PlayerName";
+import LeagueAdmin from "./LeagueAdmin";
+
+// Payments UI (make sure this file exists)
+import EntryFeePanel from "./EntryFeePanel";
 
 /**
  * Props:
- * - leagueId
- * - username
- * - onBack()
+ * - leagueId   (string)
+ * - username   (string)
+ * - onBack?    (function)
  */
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
-  const [tab, setTab] = useState("team"); // team | players | draft | matchups | admin
-  const currentWeek = Number(league?.settings?.currentWeek || 1);
+  const [tab, setTab] = useState("team"); // "team" | "players" | "draft" | "league" | "matchups" | "admin"
 
-  // League
+  // Load / listen to league
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
   }, [leagueId]);
 
-  // Ensure team + listen
+  // Ensure team and listen to it
   useEffect(() => {
     let unsub = null;
     (async () => {
@@ -48,119 +53,107 @@ export default function LeagueHome({ leagueId, username, onBack }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  const isOwner = useMemo(() => {
-    return league?.owner && username ? league.owner === username : false;
-  }, [league?.owner, username]);
+  const currentWeek = Number(league?.settings?.currentWeek || 1);
 
-  const roster = team?.roster || {};
-  const bench = Array.isArray(team?.bench) ? team.bench : [];
+  const isOwner = useMemo(
+    () => !!league?.owner && !!username && league.owner === username,
+    [league?.owner, username]
+  );
 
-  const handleBenchToSlot = async (playerId, slot) => {
-    try {
-      await moveToStarter({ leagueId, username, playerId, slot });
-    } catch (e) {
-      console.error("moveToStarter error:", e);
-      alert(String(e?.message || e));
-    }
-  };
-  const handleSlotToBench = async (slot) => {
-    try {
-      await moveToBench({ leagueId, username, slot });
-    } catch (e) {
-      console.error("moveToBench error:", e);
-      alert(String(e?.message || e));
-    }
-  };
+  const draftStatus = league?.draft?.status || "scheduled"; // scheduled | live | done
+  const showDraftTab = draftStatus !== "done"; // hide draft tab after it completes (per earlier request)
 
-  return (
-    <div>
-      <div style={{ marginBottom: 8 }}>
-        <button onClick={onBack}>&larr; Back</button>
-      </div>
+  const paymentsEnabled = !!league?.entry?.enabled;
+  const userHasPaid = hasPaidEntry(league, username);
 
-      <h2>{league?.name || leagueId}</h2>
+  // Tabs to show
+  const tabs = useMemo(() => {
+    const t = [
+      { key: "team", label: "My Team" },
+      { key: "players", label: "Players" },
+    ];
+    if (showDraftTab) t.push({ key: "draft", label: "Draft" });
+    t.push({ key: "league", label: "League" });
+    t.push({ key: "matchups", label: "Matchups" });
+    if (isOwner) t.push({ key: "admin", label: "Admin" });
+    return t;
+  }, [isOwner, showDraftTab]);
 
-      <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-        <TabButton label="My Team" active={tab === "team"} onClick={() => setTab("team")} />
-        <TabButton label="Players" active={tab === "players"} onClick={() => setTab("players")} />
-        <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
-        <TabButton label="Matchups" active={tab === "matchups"} onClick={() => setTab("matchups")} />
-        {isOwner && (
-          <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
+  if (!leagueId) {
+    return (
+      <div style={{ padding: 12 }}>
+        <h3>No league selected</h3>
+        {onBack && (
+          <button onClick={onBack} style={{ marginTop: 8 }}>
+            &larr; Back
+          </button>
         )}
       </div>
-      - {tab === "players" && (
--   <PlayersList leagueId={leagueId} currentWeek={currentWeek} />
-- )}
-+ {tab === "players" && (
-+   <PlayersList leagueId={leagueId} username={username} currentWeek={currentWeek} />
-+ )}
-          
+    );
+  }
+
+  return (
+    <div style={{ padding: 12 }}>
+      <div style={{ marginBottom: 8, display: "flex", gap: 8, alignItems: "center" }}>
+        {onBack && <button onClick={onBack}>&larr; Back</button>}
+        <h2 style={{ margin: 0 }}>{league?.name || leagueId}</h2>
+        <span style={{ marginLeft: "auto", color: "#666", fontSize: 13 }}>
+          Week {currentWeek}
+        </span>
+      </div>
+
+      {/* Tab bar */}
+      <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
+        {tabs.map((t) => (
+          <TabButton
+            key={t.key}
+            label={t.label}
+            active={tab === t.key}
+            onClick={() => setTab(t.key)}
+          />
+        ))}
+      </div>
+
+      {/* Tab contents */}
       {tab === "team" && (
         <div>
-          <h3>Starters</h3>
-          <ul style={{ listStyle: "none", padding: 0 }}>
-            {ROSTER_SLOTS.map((s) => (
-              <li key={s} style={{ marginBottom: 6 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <b style={{ width: 40 }}>{s}</b>
-                  <span>
-                    {roster[s] ? (
-                      <PlayerName leagueId={leagueId} playerId={roster[s]} />
-                    ) : (
-                      "(empty)"
-                    )}
-                  </span>
-                  {roster[s] && (
-                    <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
-                      Send to Bench
-                    </button>
-                  )}
+          {/* Payments: show in My Team only BEFORE draft starts, if enabled.
+              Also show to unpaid non-admins; owner can still see the panel to verify. */}
+          {paymentsEnabled && draftStatus !== "done" && (
+            <div style={{ marginBottom: 12 }}>
+              <EntryFeePanel leagueId={leagueId} username={username} />
+              {!userHasPaid && (
+                <div style={{ color: "#b00", marginTop: 6 }}>
+                  Entry required before drafting.
                 </div>
-              </li>
-            ))}
-          </ul>
+              )}
+            </div>
+          )}
 
-          <h3>Bench</h3>
-          <ul style={{ listStyle: "none", padding: 0 }}>
-            {bench.map((pid) => (
-              <li key={pid} style={{ marginBottom: 6 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span>
-                    <PlayerName leagueId={leagueId} playerId={pid} />
-                  </span>
-                  <select
-                    defaultValue=""
-                    onChange={(e) => {
-                      const slot = e.target.value;
-                      if (slot) handleBenchToSlot(pid, slot);
-                    }}
-                  >
-                    <option value="">Move to slot…</option>
-                    {/* You can constrain slot options based on player position if you want */}
-                    {ROSTER_SLOTS.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </li>
-            ))}
-            {bench.length === 0 && <li>(no bench players)</li>}
-          </ul>
+          {/* Your MyTeam component (handles lineup, bench, points, etc.) */}
+          <MyTeam leagueId={leagueId} username={username} />
         </div>
       )}
 
-      {tab === "players" && <PlayersList leagueId={leagueId} currentWeek={currentWeek} />}
+      {tab === "players" && (
+        <PlayersList leagueId={leagueId} currentWeek={currentWeek} />
+      )}
 
-      {tab === "draft" && (
+      {tab === "draft" && showDraftTab && (
         <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
       )}
 
-      {tab === "matchups" && <MatchupsTab leagueId={leagueId} currentWeek={currentWeek} />}
+      {tab === "league" && (
+        <LeagueTab leagueId={leagueId} username={username} />
+      )}
 
-      {tab === "admin" && isOwner && <LeagueAdmin leagueId={leagueId} username={username} />}
+      {tab === "matchups" && (
+        <MatchupsTab leagueId={leagueId} currentWeek={currentWeek} />
+      )}
+
+      {tab === "admin" && isOwner && (
+        <LeagueAdmin leagueId={leagueId} username={username} />
+      )}
     </div>
   );
 }
