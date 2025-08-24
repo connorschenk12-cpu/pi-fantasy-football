@@ -281,28 +281,86 @@ export async function getClaimsSet(leagueId) {
 
   return { ownedIds, owners };
 }
-/* =============================================================================
+/* ===============================
    ENTRY / PAYMENTS
-============================================================================= */
+   =============================== */
 
+/** Has this user satisfied the entry fee? (If payments disabled, returns true) */
 export function hasPaidEntry(league, username) {
-  return league?.entry?.enabled ? !!league?.entry?.paid?.[username] : true;
+  if (!league?.entry?.enabled) return true;
+  const fee = Number(league?.entry?.amount || 0);
+  const paidInfo = league?.entry?.paid?.[username];
+  const amt = Number(paidInfo?.amountPaid || 0);
+  return amt >= fee;
 }
 
-/** league.entry: { enabled: boolean, price: number, paid: { [username]: true } } */
-export async function setEntrySettings({ leagueId, enabled, price }) {
+/** Commissioner: enable/disable payments and/or set the fee amount (Pi). */
+export async function setEntrySettings({ leagueId, enabled, amount }) {
+  if (!leagueId) throw new Error("Missing leagueId");
+  const updates = {};
+  if (enabled !== undefined) updates["entry.enabled"] = !!enabled;
+  if (amount !== undefined) updates["entry.amount"] = Math.max(0, Number(amount) || 0);
+  await updateDoc(doc(db, "leagues", leagueId), updates);
+}
+
+/**
+ * Member: record an entry payment.
+ * NOTE: This only *records* a payment in Firestore. You still need to run the
+ * real Pi payment flow in the UI and then call this to mark paid on success.
+ */
+export async function payEntry({ leagueId, username, amount }) {
+  if (!leagueId || !username) throw new Error("Missing leagueId/username");
   const lref = doc(db, "leagues", leagueId);
-  const s = await getDoc(lref);
-  const prev = s.exists() ? s.data() : {};
-  const entryPrev = prev.entry || {};
+  const snap = await getDoc(lref);
+  if (!snap.exists()) throw new Error("League not found");
+  const league = snap.data();
+
+  if (!league?.entry?.enabled) {
+    throw new Error("Entry payments are disabled by the commissioner.");
+  }
+  const fee = Number(league?.entry?.amount || 0);
+  const num = Number(amount);
+  if (!Number.isFinite(num) || num < 0) throw new Error("Invalid amount.");
+  if (fee > 0 && num < fee) {
+    throw new Error(`Minimum entry is ${fee} Pi.`);
+  }
+
   await updateDoc(lref, {
-    entry: {
-      ...entryPrev,
-      enabled: !!enabled,
-      price: Number(price || 0),
-      paid: entryPrev.paid || {},
+    // Store per-user receipt under entry.paid.{username}
+    [`entry.paid.${username}`]: {
+      amountPaid: num,
+      at: serverTimestamp(),
     },
   });
+
+  return { ok: true };
+}
+
+/** True if payments are disabled OR every member has paid at least the fee */
+export async function allMembersPaidOrFree(leagueId) {
+  if (!leagueId) return false;
+  const lref = doc(db, "leagues", leagueId);
+  const lsnap = await getDoc(lref);
+  if (!lsnap.exists()) return false;
+  const league = lsnap.data();
+
+  // If payments are off, we treat it as satisfied
+  if (!league?.entry?.enabled) return true;
+
+  const fee = Number(league?.entry?.amount || 0);
+  const paid = league?.entry?.paid || {};
+
+  // Walk members to verify each has amountPaid >= fee
+  const memSnap = await getDocs(collection(db, "leagues", leagueId, "members"));
+  let allOk = true;
+  memSnap.forEach((d) => {
+    const u = d.id;
+    const info = paid[u];
+    const amt = Number(info?.amountPaid || 0);
+    if (amt < fee) allOk = false;
+  });
+
+  return allOk;
 }
 
 /** Mark a user as paid (you can call this from EntryFeePanel after you “process” Pi Payment) */
