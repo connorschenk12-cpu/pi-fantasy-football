@@ -1,199 +1,123 @@
 /* eslint-disable no-console */
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  listenLeague,
+  listenScheduleWeek,
   listTeams,
   listPlayersMap,
-  listMatchups,
-  opponentForWeek,
+  computeTeamPoints,
+  ROSTER_SLOTS,
+  playerDisplay,
 } from "../lib/storage";
-import { computeTeamProjectedScore } from "../lib/scoring";
 
 /**
  * Props:
- * - leagueId (string)
- * - defaultWeek (number) optional; falls back to league.settings.currentWeek
+ * - leagueId (required)
+ * - currentWeek (number, required)
  */
-export default function Matchups({ leagueId, defaultWeek }) {
-  const [league, setLeague] = useState(null);
+export default function MatchupsTab({ leagueId, currentWeek }) {
+  const [week, setWeek] = useState(Number(currentWeek || 1));
+  const [schedule, setSchedule] = useState({ week: Number(currentWeek || 1), matchups: [] });
+  const [teams, setTeams] = useState([]);
   const [playersMap, setPlayersMap] = useState(new Map());
-  const [teams, setTeams] = useState([]); // [{id, roster, bench, ...}]
-  const [week, setWeek] = useState(defaultWeek || 1);
-  const [matchups, setMatchups] = useState([]); // [{id, week, home, away}]
-  const [selected, setSelected] = useState(null); // matchup id
 
-  // Listen league (for currentWeek, maybe future schedules)
+  // keep local week in sync with prop
+  useEffect(() => setWeek(Number(currentWeek || 1)), [currentWeek]);
+
+  // live schedule for selected week
   useEffect(() => {
-    if (!leagueId) return;
-    const unsub = listenLeague(leagueId, (l) => {
-      setLeague(l);
-      const w = Number(l?.settings?.currentWeek || defaultWeek || 1);
-      setWeek(w);
-    });
+    if (!leagueId || !week) return;
+    const unsub = listenScheduleWeek(leagueId, week, setSchedule);
     return () => unsub && unsub();
-  }, [leagueId, defaultWeek]);
+  }, [leagueId, week]);
 
-  // Load players map
+  // static data we need for scoring display
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
         if (!leagueId) return;
-        const map = await listPlayersMap({ leagueId });
-        if (alive) setPlayersMap(map);
+        const [t, pm] = await Promise.all([listTeams(leagueId), listPlayersMap({ leagueId })]);
+        if (!alive) return;
+        setTeams(t || []);
+        setPlayersMap(pm || new Map());
       } catch (e) {
-        console.error("playersMap error:", e);
+        console.error("MatchupsTab init error:", e);
       }
     })();
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [leagueId]);
-
-  // Load teams
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        if (!leagueId) return;
-        const t = await listTeams(leagueId);
-        if (alive) setTeams(t);
-      } catch (e) {
-        console.error("listTeams error:", e);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [leagueId]);
-
-  // Load matchups for week
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        if (!leagueId || !Number.isFinite(week)) return;
-        const m = await listMatchups(leagueId, week);
-        if (alive) {
-          setMatchups(m);
-          if (m.length && !selected) setSelected(m[0].id);
-        }
-      } catch (e) {
-        console.error("listMatchups error:", e);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [leagueId, week]); // deliberately not including `selected`
 
   const teamsById = useMemo(() => {
     const m = new Map();
-    teams.forEach((t) => m.set(t.id, t));
+    (teams || []).forEach((t) => m.set(t.id, t));
     return m;
   }, [teams]);
 
-  const selMatchup = useMemo(
-    () => matchups.find((m) => m.id === selected) || null,
-    [matchups, selected]
-  );
+  const rendered = useMemo(() => {
+    const out = [];
+    for (const m of schedule?.matchups || []) {
+      const homeTeam = teamsById.get(m.home);
+      const awayTeam = teamsById.get(m.away);
+      if (!homeTeam || !awayTeam) continue;
 
-  const homeScore = useMemo(() => {
-    if (!selMatchup) return { total: 0, parts: [] };
-    const team = teamsById.get(selMatchup.home);
-    return computeTeamProjectedScore(team, playersMap, week, opponentForWeek);
-  }, [selMatchup, teamsById, playersMap, week]);
-
-  const awayScore = useMemo(() => {
-    if (!selMatchup) return { total: 0, parts: [] };
-    const team = teamsById.get(selMatchup.away);
-    return computeTeamProjectedScore(team, playersMap, week, opponentForWeek);
-  }, [selMatchup, teamsById, playersMap, week]);
-
-  const weeks = useMemo(() => {
-    // Offer 1..18 just to explore; you can trim to season length
-    return Array.from({ length: 18 }, (_, i) => i + 1);
-  }, []);
+      const homeScore = computeTeamPoints({ roster: homeTeam.roster || {}, week, playersMap });
+      const awayScore = computeTeamPoints({ roster: awayTeam.roster || {}, week, playersMap });
+      out.push({ m, homeTeam, awayTeam, homeScore, awayScore });
+    }
+    return out;
+  }, [schedule, teamsById, playersMap, week]);
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
         <h3 style={{ margin: 0 }}>Matchups</h3>
-        <label>
-          Week:&nbsp;
-          <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
-            {weeks.map((w) => (
-              <option key={w} value={w}>
-                {w}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label style={{ marginLeft: "auto" }}>
-          View:&nbsp;
-          <select
-            value={selected || ""}
-            onChange={(e) => setSelected(e.target.value || null)}
-          >
-            {matchups.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.home} vs {m.away}
-              </option>
-            ))}
-            {matchups.length === 0 && <option value="">(no matchups)</option>}
-          </select>
-        </label>
+        <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
+          {Array.from({ length: 18 }).map((_, i) => (
+            <option key={i + 1} value={i + 1}>Week {i + 1}</option>
+          ))}
+        </select>
       </div>
 
-      {!selMatchup && <p>No matchup selected.</p>}
-
-      {selMatchup && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-          {/* HOME */}
-          <TeamCard
-            title={`${selMatchup.home} (Home)`}
-            score={homeScore}
-          />
-
-          {/* AWAY */}
-          <TeamCard
-            title={`${selMatchup.away} (Away)`}
-            score={awayScore}
-          />
+      {rendered.length === 0 ? (
+        <div style={{ color: "#999" }}>No matchups scheduled for week {week}.</div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(420px,1fr))", gap: 12 }}>
+          {rendered.map(({ m, homeTeam, awayTeam, homeScore, awayScore }, idx) => (
+            <div key={`${m.home}_${m.away}_${idx}`} style={{ border: "1px solid #eee", borderRadius: 8, padding: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <div><b>{homeTeam.name || m.home}</b></div>
+                <div style={{ fontWeight: 700 }}>{homeScore.total.toFixed(1)}</div>
+              </div>
+              <Lines roster={homeTeam.roster || {}} week={week} playersMap={playersMap} />
+              <hr style={{ margin: "10px 0", border: "none", borderTop: "1px solid #f1f1f1" }} />
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <div><b>{awayTeam.name || m.away}</b></div>
+                <div style={{ fontWeight: 700 }}>{awayScore.total.toFixed(1)}</div>
+              </div>
+              <Lines roster={awayTeam.roster || {}} week={week} playersMap={playersMap} />
+            </div>
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-function TeamCard({ title, score }) {
+function Lines({ roster, week, playersMap }) {
   return (
-    <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-        <h4 style={{ margin: 0 }}>{title}</h4>
-        <div style={{ marginLeft: "auto", fontSize: 18 }}>
-          Total: <b>{score.total.toFixed(1)}</b>
-        </div>
-      </div>
-
-      <ul style={{ listStyle: "none", padding: 0, marginTop: 8 }}>
-        {score.parts.map((p) => (
-          <li key={`${p.slot}-${p.id}`} style={{ padding: "4px 0", borderBottom: "1px solid #f1f1f1" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ width: 42, fontWeight: 600 }}>{p.slot}</div>
-              <div style={{ minWidth: 180 }}>{p.name}</div>
-              <div style={{ width: 60, color: "#666" }}>{p.position}</div>
-              <div style={{ width: 60, color: "#666" }}>{p.team}</div>
-              <div style={{ minWidth: 100, color: "#666" }}>{p.opp ? `Opp: ${p.opp}` : ""}</div>
-              <div style={{ marginLeft: "auto" }}>
-                {p.proj.toFixed(1)}
-              </div>
-            </div>
-          </li>
-        ))}
-        {score.parts.length === 0 && <li>(no starters set)</li>}
-      </ul>
-    </div>
+    <table cellPadding="4" style={{ width: "100%", borderCollapse: "collapse" }}>
+      <tbody>
+        {ROSTER_SLOTS.map((slot) => {
+          const pid = roster[slot] || null;
+          const p = pid ? playersMap.get(pid) : null;
+          return (
+            <tr key={slot} style={{ borderBottom: "1px solid #f9f9f9" }}>
+              <td style={{ width: 48, color: "#666" }}>{slot}</td>
+              <td>{p ? playerDisplay(p) : "(empty)"}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
