@@ -3,85 +3,145 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   listenTeam,
   ensureTeam,
+  ROSTER_SLOTS,
+  moveToStarter,
+  moveToBench,
   listPlayersMap,
   computeTeamPoints,
-  ROSTER_SLOTS,
-  asId,
+  playerDisplay,
 } from "../lib/storage";
 import PlayerName from "./common/PlayerName";
 
-export default function MyTeam({ leagueId, username, currentWeek }) {
+/**
+ * Props:
+ *  - leagueId (string)
+ *  - username (string)
+ */
+export default function MyTeam({ leagueId, username }) {
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
-  const week = Number(currentWeek || 1);
 
+  // ensure + listen to my team
   useEffect(() => {
-    if (!leagueId || !username) return;
     let unsub = null;
     (async () => {
       try {
+        if (!leagueId || !username) return;
         await ensureTeam({ leagueId, username });
         unsub = listenTeam({ leagueId, username, onChange: setTeam });
       } catch (e) {
-        console.error(e);
+        console.error("ensure/listen team error:", e);
       }
     })();
     return () => unsub && unsub();
   }, [leagueId, username]);
 
+  // load players map for names
   useEffect(() => {
-    let mounted = true;
+    let cancelled = false;
     (async () => {
       try {
         const m = await listPlayersMap({ leagueId });
-        if (mounted) setPlayersMap(m);
+        if (!cancelled) setPlayersMap(m);
       } catch (e) {
-        console.error(e);
+        console.error("listPlayersMap error:", e);
       }
     })();
-    return () => { mounted = false; };
+    return () => {
+      cancelled = true;
+    };
   }, [leagueId]);
 
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
-  const totals = useMemo(() => {
-    return computeTeamPoints({ roster, week, playersMap });
-  }, [roster, week, playersMap]);
+  const handleBenchToSlot = async (playerId, slot) => {
+    try {
+      await moveToStarter({ leagueId, username, playerId, slot });
+    } catch (e) {
+      console.error("moveToStarter error:", e);
+      alert(String(e?.message || e));
+    }
+  };
+
+  const handleSlotToBench = async (slot) => {
+    try {
+      await moveToBench({ leagueId, username, slot });
+    } catch (e) {
+      console.error("moveToBench error:", e);
+      alert(String(e?.message || e));
+    }
+  };
+
+  // (Optional) compute projected total if you pass a week in from parent later
+  const week = 1;
+  const totals = useMemo(
+    () => computeTeamPoints({ roster, week, playersMap }),
+    [roster, week, playersMap]
+  );
 
   return (
     <div>
-      <h3>Starters (Week {week}) — Total: {totals.total.toFixed(1)}</h3>
+      <h3 style={{ marginTop: 0 }}>Starters</h3>
       <ul style={{ listStyle: "none", padding: 0 }}>
         {ROSTER_SLOTS.map((s) => {
-          const raw = roster[s] ?? null;
-          const key = raw == null ? null : (playersMap.has(raw) ? raw : asId(raw));
-          const p = key == null ? null : playersMap.get(key);
-          const pts = totals.lines.find((l) => l.slot === s)?.points || 0;
+          const pid = roster[s];
+          const p = pid ? playersMap.get(pid) : null;
           return (
             <li key={s} style={{ marginBottom: 6 }}>
-              <b style={{ width: 40, display: "inline-block" }}>{s}</b>{" "}
-              <PlayerName id={raw} playersMap={playersMap} />{" "}
-              <span style={{ color: "#888" }}>{p?.position || ""} {p?.team ? `• ${p.team}` : ""}</span>
-              <span style={{ float: "right" }}>{pts.toFixed(1)}</span>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <b style={{ width: 44 }}>{s}</b>
+                <span>
+                  {pid ? (
+                    <PlayerName leagueId={leagueId} playerId={pid} fallback={playerDisplay(p)} />
+                  ) : (
+                    "(empty)"
+                  )}
+                </span>
+                {pid && (
+                  <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
+                    Send to Bench
+                  </button>
+                )}
+              </div>
             </li>
           );
         })}
       </ul>
 
+      <div style={{ marginTop: 12, marginBottom: 8, color: "#444" }}>
+        Projected total (W{week}): <b>{totals.total.toFixed(1)}</b>
+      </div>
+
       <h3>Bench</h3>
       <ul style={{ listStyle: "none", padding: 0 }}>
-        {bench.length === 0 && <li>(empty)</li>}
-        {bench.map((raw) => {
-          const key = playersMap.has(raw) ? raw : asId(raw);
-          const p = playersMap.get(key);
+        {bench.map((pid) => {
+          const p = playersMap.get(pid);
           return (
-            <li key={String(raw)} style={{ marginBottom: 6 }}>
-              <PlayerName id={raw} playersMap={playersMap} />{" "}
-              <span style={{ color: "#888" }}>{p?.position || ""} {p?.team ? `• ${p.team}` : ""}</span>
+            <li key={pid} style={{ marginBottom: 6 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ minWidth: 220 }}>
+                  <PlayerName leagueId={leagueId} playerId={pid} fallback={playerDisplay(p)} />
+                </span>
+                <select
+                  defaultValue=""
+                  onChange={(e) => {
+                    const slot = e.target.value;
+                    if (slot) handleBenchToSlot(pid, slot);
+                  }}
+                >
+                  <option value="">Move to slot…</option>
+                  {ROSTER_SLOTS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </li>
           );
         })}
+        {bench.length === 0 && <li>(no bench players)</li>}
       </ul>
     </div>
   );
