@@ -1,104 +1,106 @@
 /* eslint-disable no-console */
-// src/components/ProjectionsSeeder.js
 import React, { useState } from "react";
-import { doc, setDoc, writeBatch, collection } from "firebase/firestore";
+import { writeBatch, doc, serverTimestamp } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import players from "../data/players"; // ✅ correct path (one "..")
+
+// IMPORTANT: This path is correct from src/components/*
+import players from "../data/players";
 
 /**
- * Props:
- * - leagueId (optional): if provided, enables "Seed to League" button
+ * Seeds players into Firestore:
+ *  - global:   players/{playerId}
+ *  - league:   leagues/{leagueId}/players/{playerId}  (optional box)
  *
- * Usage:
- * <ProjectionsSeeder leagueId={leagueId} />
+ * Props:
+ *  - leagueId (optional but recommended)
  */
 export default function ProjectionsSeeder({ leagueId }) {
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
+  const [status, setStatus] = useState("");
+  const [limit, setLimit] = useState(500);
+  const [writeLeagueScope, setWriteLeagueScope] = useState(true);
 
-  async function seedGlobal() {
+  const onSeed = async () => {
     try {
-      setBusy(true);
-      setMsg("Seeding global players…");
-      const batch = writeBatch(db);
+      if (!Array.isArray(players) || players.length === 0) {
+        return setStatus("No local players found in src/data/players.js");
+      }
+      setStatus("Seeding…");
 
-      players.forEach((p) => {
-        // minimal normalization (ensure id is string, keep name/position/team/projections)
-        const id = String(p.id);
-        const data = {
-          id,
-          name: p.name || p.fullName || `Player ${id}`,
-          position: p.position || "",
-          team: p.team || "",
-          projections: p.projections || {},
-          matchups: p.matchups || {}, // keep if present
-          updatedAt: new Date().toISOString(),
-        };
-        batch.set(doc(db, "players", id), data, { merge: true });
-      });
+      // write in chunks to avoid 500-limit per batch
+      const chunkSize = 450;
+      const toWrite = players.slice(0, Number(limit) || players.length);
 
-      await batch.commit();
-      setMsg(`Seeded ${players.length} players to global collection.`);
+      for (let i = 0; i < toWrite.length; i += chunkSize) {
+        const batch = writeBatch(db);
+        const slice = toWrite.slice(i, i + chunkSize);
+        slice.forEach((p) => {
+          const id = String(p.id || p.playerId || p.srid || p.key || "").trim();
+          if (!id) return;
+
+          const base = {
+            id,
+            name: p.name || p.fullName || p.playerName || String(id),
+            position: p.position || "",
+            team: p.team || "",
+            projections: p.projections || p.projByWeek || {},
+            matchups: p.matchups || {},
+            updatedAt: serverTimestamp(),
+          };
+
+          // global doc
+          batch.set(doc(db, "players", id), base, { merge: true });
+
+          // league-scoped doc (if chosen and league provided)
+          if (writeLeagueScope && leagueId) {
+            batch.set(doc(db, "leagues", leagueId, "players", id), base, { merge: true });
+          }
+        });
+        await batch.commit();
+      }
+
+      setStatus(`Seeded ${toWrite.length} players${writeLeagueScope && leagueId ? " (global + league)" : " (global only)"}.`);
     } catch (e) {
       console.error(e);
-      setMsg(`Error: ${e.message || e}`);
-    } finally {
-      setBusy(false);
+      setStatus(`Error: ${e.message || e}`);
     }
-  }
-
-  async function seedLeague() {
-    if (!leagueId) {
-      setMsg("No leagueId provided.");
-      return;
-    }
-    try {
-      setBusy(true);
-      setMsg(`Seeding players to league ${leagueId}…`);
-      const col = collection(db, "leagues", leagueId, "players");
-      const batch = writeBatch(db);
-
-      players.forEach((p) => {
-        const id = String(p.id);
-        const data = {
-          id,
-          name: p.name || p.fullName || `Player ${id}`,
-          position: p.position || "",
-          team: p.team || "",
-          projections: p.projections || {},
-          matchups: p.matchups || {},
-          updatedAt: new Date().toISOString(),
-        };
-        batch.set(doc(col, id), data, { merge: true });
-      });
-
-      await batch.commit();
-      setMsg(`Seeded ${players.length} players to league ${leagueId}.`);
-    } catch (e) {
-      console.error(e);
-      setMsg(`Error: ${e.message || e}`);
-    } finally {
-      setBusy(false);
-    }
-  }
+  };
 
   return (
-    <div style={{ border: "1px solid #eee", padding: 12, borderRadius: 8 }}>
-      <h3>Players / Projections Seeder</h3>
-      <p style={{ marginTop: 0 }}>
-        Use this to (re)seed player docs with names, positions, teams, and projections.
-      </p>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <button onClick={seedGlobal} disabled={busy}>
-          {busy ? "Working…" : "Seed Global Players"}
-        </button>
-        {leagueId && (
-          <button onClick={seedLeague} disabled={busy}>
-            {busy ? "Working…" : `Seed Players to League (${leagueId})`}
-          </button>
-        )}
+    <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+      <h4>Seed Players</h4>
+      <div style={{ fontSize: 13, color: "#666", marginBottom: 8 }}>
+        Loads players from <code>src/data/players.js</code> into Firestore.
       </div>
-      {msg && <div style={{ marginTop: 8, color: "#555" }}>{msg}</div>}
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+        <label>
+          Limit:{" "}
+          <input
+            type="number"
+            min={1}
+            value={limit}
+            onChange={(e) => setLimit(e.target.value)}
+            style={{ width: 90 }}
+          />
+        </label>
+
+        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input
+            type="checkbox"
+            checked={writeLeagueScope}
+            onChange={(e) => setWriteLeagueScope(e.target.checked)}
+          />
+          Also write to this league’s players collection
+        </label>
+      </div>
+
+      <button onClick={onSeed}>
+        Seed {limit} players {writeLeagueScope && leagueId ? "(global + league)" : "(global only)"}
+      </button>
+
+      <div style={{ marginTop: 8, color: status.startsWith("Error") ? "#b22" : "#444" }}>
+        {status || "Idle"}
+      </div>
     </div>
   );
 }
