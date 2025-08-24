@@ -1,20 +1,77 @@
-// super small starter pool; we’ll swap to a real NFL API later
-export const PLAYERS = [
-  { id: "qb_mahomes", name: "Patrick Mahomes", pos: "QB" },
-  { id: "qb_allen",   name: "Josh Allen",      pos: "QB" },
+// src/data/players.js
+// Starter player dataset with names, positions, teams, and projections.
 
-  { id: "rb_mccaffrey", name: "Christian McCaffrey", pos: "RB" },
-  { id: "rb_bijan",      name: "Bijan Robinson",     pos: "RB" },
-
-  { id: "wr_jefferson",  name: "Justin Jefferson", pos: "WR" },
-  { id: "wr_chase",      name: "Ja'Marr Chase",   pos: "WR" },
-
-  { id: "te_kelce", name: "Travis Kelce", pos: "TE" },
-  { id: "te_sam",   name: "Sam LaPorta",  pos: "TE" },
-
-  { id: "k_butker", name: "Harrison Butker", pos: "K" },
-  { id: "k_tucker", name: "Justin Tucker",   pos: "K" },
-
-  { id: "def_49ers", name: "49ers DEF", pos: "DEF" },
-  { id: "def_ravens", name: "Ravens DEF", pos: "DEF" },
+const players = [
+  {
+    id: "1",
+    name: "Patrick Mahomes",
+    position: "QB",
+    team: "KC",
+    projections: { "1": 25.3, "2": 22.1 }
+  },
+  {
+    id: "2",
+    name: "Josh Allen",
+    position: "QB",
+    team: "BUF",
+    projections: { "1": 24.5, "2": 23.0 }
+  },
+  {
+    id: "3",
+    name: "Christian McCaffrey",
+    position: "RB",
+    team: "SF",
+    projections: { "1": 20.4, "2": 18.6 }
+  },
+  {
+    id: "4",
+    name: "Derrick Henry",
+    position: "RB",
+    team: "TEN",
+    projections: { "1": 19.2, "2": 17.8 }
+  },
+  {
+    id: "5",
+    name: "Justin Jefferson",
+    position: "WR",
+    team: "MIN",
+    projections: { "1": 21.1, "2": 19.5 }
+  },
+  {
+    id: "6",
+    name: "Ja'Marr Chase",
+    position: "WR",
+    team: "CIN",
+    projections: { "1": 20.8, "2": 18.2 }
+  },
+  {
+    id: "7",
+    name: "Travis Kelce",
+    position: "TE",
+    team: "KC",
+    projections: { "1": 18.0, "2": 16.9 }
+  },
+  {
+    id: "8",
+    name: "George Kittle",
+    position: "TE",
+    team: "SF",
+    projections: { "1": 15.5, "2": 14.3 }
+  },
+  {
+    id: "9",
+    name: "Justin Tucker",
+    position: "K",
+    team: "BAL",
+    projections: { "1": 10.0, "2": 9.5 }
+  },
+  {
+    id: "10",
+    name: "49ers Defense",
+    position: "DEF",
+    team: "SF",
+    projections: { "1": 11.2, "2": 9.8 }
+  }
 ];
+
+export default players;
