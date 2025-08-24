@@ -850,6 +850,45 @@ export async function seedPlayersFromLocalToLeague({ leagueId, max = 5000, overw
 
 /**
  * =========================================================
+ *  LIVE WEEKLY STATS (client fetch -> /api/stats/week)
+ * =========================================================
+ */
+
+// Simple in-memory cache to avoid repeated network calls
+const _weekStatsCache = new Map(); // key: `${leagueId||'-'}:${week}` -> { [playerId]: { ...stats } }
+
+export async function fetchWeekStats({ leagueId = null, week }) {
+  const w = Number(week || 0);
+  if (!w) return {};
+
+  const cacheKey = `${leagueId || "-"}:${w}`;
+  if (_weekStatsCache.has(cacheKey)) return _weekStatsCache.get(cacheKey);
+
+  try {
+    const qs = new URLSearchParams();
+    qs.set("week", String(w));
+    if (leagueId) qs.set("leagueId", leagueId);
+
+    const res = await fetch(`/api/stats/week?${qs.toString()}`, { method: "GET" });
+    if (!res.ok) {
+      console.warn("[fetchWeekStats] non-200:", res.status);
+      _weekStatsCache.set(cacheKey, {});
+      return {};
+    }
+
+    const json = await res.json();
+    // Expect shape like: { stats: { [playerId]: { passingYds, rushingYds, recYds, tds, fantasy } } }
+    const stats = (json && (json.stats || json.data || {})) || {};
+    _weekStatsCache.set(cacheKey, stats);
+    return stats;
+  } catch (e) {
+    console.warn("[fetchWeekStats] failed:", e?.message || e);
+    _weekStatsCache.set(cacheKey, {});
+    return {};
+  }
+}
+/**
+ * =========================================================
  *  QUALITY CHECKS / GUARDS
  * =========================================================
  */
