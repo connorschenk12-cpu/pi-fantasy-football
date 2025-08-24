@@ -7,11 +7,6 @@ import {
   opponentForWeek,
 } from "../lib/storage";
 
-/**
- * Props:
- *  - leagueId
- *  - currentWeek
- */
 export default function PlayersList({ leagueId, currentWeek }) {
   const [players, setPlayers] = useState([]);
   const [q, setQ] = useState("");
