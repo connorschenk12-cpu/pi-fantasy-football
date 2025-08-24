@@ -1,127 +1,124 @@
-/* eslint-disable no-console */
 // src/components/common/PlayerName.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import { onSnapshot, collection, getDocs } from "firebase/firestore";
+/* eslint-disable no-console */
+import React, { useEffect, useState } from "react";
+import { doc, getDoc } from "firebase/firestore";
 import { db } from "../../lib/firebase";
 
-// A very small global cache so we don't refetch on every mount
-let _globalPlayersMap = null;
-let _leagueMaps = new Map(); // leagueId -> Map
+/**
+ * Props:
+ *   id          (string|number) player id
+ *   leagueId    (string) optional; if provided we try league-scoped players first
+ *   fallback    (string|ReactNode) optional fallback UI while loading / missing
+ *   preferShort (boolean) if true, show short/last name when available
+ *
+ * This component is intentionally tiny and self-contained so you can use it anywhere.
+ * It memo-caches lookups per session to avoid repeat reads for the same id.
+ */
 
-async function loadPlayersCollection(colRef) {
-  const snap = await getDocs(colRef);
-  const map = new Map();
-  snap.forEach((d) => {
-    const p = { id: d.id, ...d.data() };
-    // normalize common fields
-    p.name = p.name || p.fullName || p.playerName || null;
-    p.position = p.position || p.pos || null;
-    p.team = p.team || p.nflTeam || p.proTeam || null;
-    map.set(p.id, p);
-  });
-  return map;
+// Simple in-memory cache: { "<leagueId>|<id>": { name, team, position } }
+const nameCache = new Map();
+
+function idKey(leagueId, id) {
+  const pid = String(id ?? "").trim();
+  const lid = String(leagueId ?? "").trim();
+  return `${lid}|${pid}`;
 }
 
-/** Get a cached global players map (from /players). */
-export async function getGlobalPlayersMap() {
-  if (_globalPlayersMap) return _globalPlayersMap;
-  const colRef = collection(db, "players");
-  _globalPlayersMap = await loadPlayersCollection(colRef);
-  return _globalPlayersMap;
-}
+async function fetchNameOnce(leagueId, id) {
+  const key = idKey(leagueId, id);
+  if (nameCache.has(key)) return nameCache.get(key);
 
-/** Get a cached league-local map (leagues/{leagueId}/players), falling back to global. */
-export async function getLeaguePlayersMap(leagueId) {
-  if (!leagueId) return getGlobalPlayersMap();
-  if (_leagueMaps.has(leagueId)) return _leagueMaps.get(leagueId);
-
-  // Try league-scoped first
-  const colRef = collection(db, "leagues", leagueId, "players");
-  const leagueSnap = await getDocs(colRef);
-  if (!leagueSnap.empty) {
-    const map = await loadPlayersCollection(colRef);
-    _leagueMaps.set(leagueId, map);
-    return map;
+  const pid = String(id ?? "").trim();
+  if (!pid) {
+    nameCache.set(key, null);
+    return null;
   }
 
-  // Fallback to global
-  const g = await getGlobalPlayersMap();
-  _leagueMaps.set(leagueId, g);
-  return g;
+  // 1) league-scoped player doc
+  if (leagueId) {
+    try {
+      const leagueDoc = await getDoc(doc(db, "leagues", leagueId, "players", pid));
+      if (leagueDoc.exists()) {
+        const d = leagueDoc.data();
+        const rec = normalizePlayerRecord(pid, d);
+        nameCache.set(key, rec);
+        return rec;
+      }
+    } catch (e) {
+      // Non-fatal: just fall through to global
+      console.warn("[PlayerName] league lookup failed:", e);
+    }
+  }
+
+  // 2) global players/{id}
+  try {
+    const globalDoc = await getDoc(doc(db, "players", pid));
+    if (globalDoc.exists()) {
+      const d = globalDoc.data();
+      const rec = normalizePlayerRecord(pid, d);
+      nameCache.set(key, rec);
+      return rec;
+    }
+  } catch (e) {
+    console.warn("[PlayerName] global lookup failed:", e);
+  }
+
+  // 3) give up
+  nameCache.set(key, null);
+  return null;
 }
 
-export function usePlayersMap(leagueId) {
-  const [map, setMap] = useState(null);
+function normalizePlayerRecord(id, data) {
+  // Try common name fields; fall back to the id
+  const name =
+    data?.name ||
+    data?.fullName ||
+    data?.playerName ||
+    data?.displayName ||
+    String(id);
+
+  // Provide a "short" name if you want to show condensed format elsewhere
+  // e.g., "Mahomes P." / "P. Mahomes" — here we’ll use last name if possible.
+  let short = name;
+  const parts = String(name).split(/\s+/).filter(Boolean);
+  if (parts.length > 1) short = parts[parts.length - 1];
+  // Expose some helpful extras, but only `name` is required by <PlayerName />
+  return {
+    id: String(id),
+    name,
+    shortName: short,
+    team: data?.team ?? data?.nflTeam ?? "",
+    position: data?.position ?? data?.pos ?? "",
+  };
+}
+
+export default function PlayerName({ id, leagueId, fallback = null, preferShort = false }) {
+  const [rec, setRec] = useState(() => nameCache.get(idKey(leagueId, id)) ?? undefined);
 
   useEffect(() => {
-    let unsub = null;
     let cancelled = false;
     (async () => {
-      try {
-        // Watch league collection if it exists; else watch global
-        const leagueCol = collection(db, "leagues", leagueId || "_skip_", "players");
-        // We try league first; if empty, watch global instead:
-        const leagueFirst = await getDocs(leagueCol);
-        if (!cancelled && !leagueFirst.empty) {
-          unsub = onSnapshot(leagueCol, (snap) => {
-            const m = new Map();
-            snap.forEach((d) => {
-              const p = { id: d.id, ...d.data() };
-              p.name = p.name || p.fullName || p.playerName || null;
-              p.position = p.position || p.pos || null;
-              p.team = p.team || p.nflTeam || p.proTeam || null;
-              m.set(p.id, p);
-            });
-            setMap(m);
-            _leagueMaps.set(leagueId, m);
-          });
-          return;
-        }
-
-        // Global fallback live listener
-        const globalCol = collection(db, "players");
-        unsub = onSnapshot(globalCol, (snap) => {
-          const m = new Map();
-          snap.forEach((d) => {
-            const p = { id: d.id, ...d.data() };
-            p.name = p.name || p.fullName || p.playerName || null;
-            p.position = p.position || p.pos || null;
-            p.team = p.team || p.nflTeam || p.proTeam || null;
-            m.set(p.id, p);
-          });
-          setMap(m);
-          _globalPlayersMap = m;
-        });
-      } catch (e) {
-        console.error("usePlayersMap error:", e);
+      const key = idKey(leagueId, id);
+      if (nameCache.has(key)) {
+        if (!cancelled) setRec(nameCache.get(key));
+        return;
       }
+      const r = await fetchNameOnce(leagueId, id);
+      if (!cancelled) setRec(r);
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, [leagueId, id]);
 
-    return () => unsub && unsub();
-  }, [leagueId]);
+  if (rec === undefined) {
+    // loading state
+    return fallback ?? <span style={{ color: "#999" }}>…</span>;
+  }
+  if (!rec) {
+    // unknown
+    return <span style={{ color: "#999" }}>{String(id || "(unknown)")}</span>;
+  }
 
-  return map;
-}
-
-export function displayNameFrom(p) {
-  if (!p) return null;
-  return p.name || p.fullName || p.playerName || null;
-}
-
-/** PlayerName — resolves an id (string/number) to a human name, with fallbacks. */
-export default function PlayerName({ id, leagueId, fallback = null }) {
-  const map = usePlayersMap(leagueId);
-
-  const text = useMemo(() => {
-    if (!id) return fallback ?? "(empty)";
-    // If map loaded & has the id, use it
-    if (map && map.has(String(id))) {
-      const p = map.get(String(id));
-      return displayNameFrom(p) || String(id);
-    }
-    // If we haven't loaded yet, at least show the id to avoid blanks
-    return String(id);
-  }, [id, map, fallback]);
-
-  return <span>{text}</span>;
+  return <span>{preferShort ? rec.shortName : rec.name}</span>;
 }
