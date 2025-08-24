@@ -1,81 +1,87 @@
-// src/components/AdminDraftSetup.js
-import React, { useMemo, useState } from "react";
-import { configureDraft, startDraft, endDraft } from "../lib/storage";
+/* eslint-disable no-console */
+import React, { useEffect, useState } from "react";
+import {
+  listenLeague,
+  initDraftOrder,
+  configureDraft,
+  startDraft,
+  endDraft,
+} from "../lib/storage";
 
-export default function AdminDraftSetup({ league }) {
-  const leagueId = league?.id;
-  const [orderText, setOrderText] = useState(
-    // prefill with current order if it exists
-    Array.isArray(league?.draft?.order) ? league.draft.order.join(",") : "you,bot1,bot2,bot3"
-  );
-  const [busy, setBusy] = useState(false);
-  const status = league?.draft?.status || "scheduled";
-  const rounds = league?.draft?.roundsTotal || 12;
+/**
+ * Simple Admin panel section for draft setup.
+ * Props: { leagueId }
+ */
+export default function AdminDraftSetup({ leagueId }) {
+  const [league, setLeague] = useState(null);
+  const [status, setStatus] = useState("");
 
-  const order = useMemo(() => orderText.split(",").map(s => s.trim()).filter(Boolean), [orderText]);
+  useEffect(() => {
+    if (!leagueId) return;
+    const unsub = listenLeague(leagueId, setLeague);
+    return () => unsub && unsub();
+  }, [leagueId]);
 
-  async function handleConfigure() {
-    if (!leagueId) return alert("No league loaded.");
-    if (order.length === 0) return alert("Enter at least one username in the order list.");
+  const doInitOrder = async () => {
     try {
-      setBusy(true);
+      setStatus("Initializing draft order…");
+      const members = await initDraftOrder({ leagueId });
+      setStatus(`Draft order set from members: ${members.join(", ")}`);
+    } catch (e) {
+      console.error(e);
+      setStatus(`Error: ${e.message || e}`);
+    }
+  };
+
+  const doConfigure = async () => {
+    try {
+      setStatus("Configuring draft…");
+      const order = league?.draft?.order || [];
       await configureDraft({ leagueId, order });
-      alert(`Draft configured with ${order.length} teams • ${rounds} rounds.`);
+      setStatus("Draft configured.");
     } catch (e) {
-      alert(e.message || "Configure failed.");
-    } finally {
-      setBusy(false);
+      console.error(e);
+      setStatus(`Error: ${e.message || e}`);
     }
-  }
+  };
 
-  async function handleStart() {
+  const doStart = async () => {
     try {
-      setBusy(true);
+      setStatus("Starting draft…");
       await startDraft({ leagueId });
+      setStatus("Draft started.");
     } catch (e) {
-      alert(e.message || "Start failed.");
-    } finally {
-      setBusy(false);
+      console.error(e);
+      setStatus(`Error: ${e.message || e}`);
     }
-  }
+  };
 
-  async function handleEnd() {
+  const doEnd = async () => {
     try {
-      setBusy(true);
+      setStatus("Ending draft…");
       await endDraft({ leagueId });
+      setStatus("Draft ended.");
     } catch (e) {
-      alert(e.message || "End failed.");
-    } finally {
-      setBusy(false);
+      console.error(e);
+      setStatus(`Error: ${e.message || e}`);
     }
-  }
+  };
 
   return (
-    <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, marginTop: 8 }}>
-      <div style={{ fontWeight: 700, marginBottom: 6 }}>Draft Admin</div>
-
-      <div style={{ marginBottom: 6, fontSize: 14 }}>
-        Status: <b>{status}</b> · Rounds: <b>{rounds}</b>
+    <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
+      <h4>Draft Setup</h4>
+      <div style={{ marginBottom: 8, color: "#555" }}>
+        Status: <b>{league?.draft?.status || "scheduled"}</b>
+        {" · "}
+        Teams: <b>{(league?.draft?.order || []).length}</b>
       </div>
-
-      <label style={{ display: "block", marginBottom: 6 }}>
-        Draft Order (comma separated usernames):
-      </label>
-      <textarea
-        value={orderText}
-        onChange={(e)=>setOrderText(e.target.value)}
-        style={{ width: "100%", minHeight: 70, fontFamily: "monospace" }}
-      />
-
-      <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-        <button onClick={handleConfigure} disabled={busy}>Configure Draft</button>
-        <button onClick={handleStart} disabled={busy || status === "live"}>Start Draft</button>
-        <button onClick={handleEnd} disabled={busy || status !== "live"}>End Draft</button>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button onClick={doInitOrder}>Init Order (from members)</button>
+        <button onClick={doConfigure}>Configure Draft</button>
+        <button onClick={doStart}>Start Draft</button>
+        <button onClick={doEnd}>End Draft</button>
       </div>
-
-      <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-        Configure sets the order and enables a 5s pick clock. During a live draft, add/drop is locked.
-      </div>
+      {status && <div style={{ marginTop: 8 }}>{status}</div>}
     </div>
   );
 }
