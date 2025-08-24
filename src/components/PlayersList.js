@@ -6,8 +6,12 @@ import {
   projForWeek,
   opponentForWeek,
 } from "../lib/storage";
-import PlayerName from "./common/PlayerName";
 
+/**
+ * Props:
+ *  - leagueId
+ *  - currentWeek
+ */
 export default function PlayersList({ leagueId, currentWeek }) {
   const [players, setPlayers] = useState([]);
   const [q, setQ] = useState("");
@@ -103,10 +107,7 @@ export default function PlayersList({ leagueId, currentWeek }) {
         <tbody>
           {filtered.map((p) => (
             <tr key={p.id} style={{ borderBottom: "1px solid #f1f1f1" }}>
-              <td>
-                {/* Use PlayerName to normalize anything weird */}
-                <PlayerName leagueId={leagueId} playerId={p.id} fallback={playerDisplay(p)} />
-              </td>
+              <td>{playerDisplay(p)}</td>
               <td>{p.position || "-"}</td>
               <td>{p.team || "-"}</td>
               <td>{opponentForWeek(p, week) || "-"}</td>
