@@ -264,6 +264,23 @@ export function listenLeagueClaims(leagueId, onChange) {
   });
 }
 
+// Return a set of all claimed player IDs, plus a map of playerId -> claimedBy
+export async function getClaimsSet(leagueId) {
+  if (!leagueId) throw new Error("Missing leagueId");
+  const colRef = collection(db, "leagues", leagueId, "claims");
+  const snap = await getDocs(colRef);
+
+  const ownedIds = new Set();
+  const owners = new Map(); // playerId -> username
+
+  snap.forEach((d) => {
+    ownedIds.add(d.id);
+    const data = d.data() || {};
+    owners.set(d.id, data.claimedBy || null);
+  });
+
+  return { ownedIds, owners };
+}
 /* =============================================================================
    ENTRY / PAYMENTS
 ============================================================================= */
