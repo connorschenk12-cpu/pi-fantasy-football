@@ -1,180 +1,126 @@
-/* eslint-disable no-console */
-import React, { useEffect, useMemo, useState } from "react";
+// src/components/LeagueHome.js
+import React, { useEffect, useState } from "react";
 import {
-  listenLeague,
   listenTeam,
-  ensureTeam,
-  moveToStarter,
-  moveToBench,
+  computeTeamPoints,
+  listPlayersMap,
+  pointsForPlayer,
+  projForWeek,
   ROSTER_SLOTS,
 } from "../lib/storage";
+import PlayerName from "./common/PlayerName";
 
-import PlayersList from "./PlayersList";
-import DraftBoard from "./DraftBoard";
-import LeagueAdmin from "./LeagueAdmin";
-
-// IMPORTANT: use these exact files we set up (NOT Matchups.js)
-import LeagueTab from "./LeagueTab";
-import MatchupsTab from "./MatchupsTab";
-
-/**
- * Props:
- * - leagueId
- * - username
- * - onBack()
- */
-export default function LeagueHome({ leagueId, username, onBack }) {
-  const [league, setLeague] = useState(null);
+export default function LeagueHome({ leagueId, username, currentWeek = 1 }) {
   const [team, setTeam] = useState(null);
-  const [tab, setTab] = useState("team"); // team | players | draft | matchups | league | admin
-  const currentWeek = Number(league?.settings?.currentWeek || 1);
+  const [playersMap, setPlayersMap] = useState(new Map());
 
-  // League
+  // Subscribe to my team
   useEffect(() => {
-    if (!leagueId) return;
-    const unsub = listenLeague(leagueId, setLeague);
-    return () => unsub && unsub();
-  }, [leagueId]);
-
-  // Ensure my team + listen
-  useEffect(() => {
-    let unsub = null;
-    (async () => {
-      try {
-        if (!leagueId || !username) return;
-        await ensureTeam({ leagueId, username });
-        unsub = listenTeam({ leagueId, username, onChange: setTeam });
-      } catch (e) {
-        console.error("ensureTeam/listenTeam error:", e);
-      }
-    })();
-    return () => unsub && unsub();
+    if (!leagueId || !username) return;
+    return listenTeam({
+      leagueId,
+      username,
+      onChange: setTeam,
+    });
   }, [leagueId, username]);
 
-  const isOwner = useMemo(() => {
-    return league?.owner && username ? league.owner === username : false;
-  }, [league?.owner, username]);
+  // Load all players for mapping
+  useEffect(() => {
+    if (!leagueId) return;
+    (async () => {
+      const map = await listPlayersMap({ leagueId });
+      setPlayersMap(map);
+    })();
+  }, [leagueId]);
 
-  const roster = team?.roster || {};
-  const bench = Array.isArray(team?.bench) ? team.bench : [];
+  if (!team) return <div>Loading team…</div>;
 
-  const handleBenchToSlot = async (playerId, slot) => {
-    try {
-      await moveToStarter({ leagueId, username, playerId, slot });
-    } catch (e) {
-      console.error("moveToStarter error:", e);
-      alert(String(e?.message || e));
-    }
-  };
-  const handleSlotToBench = async (slot) => {
-    try {
-      await moveToBench({ leagueId, username, slot });
-    } catch (e) {
-      console.error("moveToBench error:", e);
-      alert(String(e?.message || e));
-    }
-  };
+  const { roster = {}, bench = [] } = team;
+  const computed = computeTeamPoints({ roster, week: currentWeek, playersMap });
 
   return (
-    <div>
-      <div style={{ marginBottom: 8 }}>
-        <button onClick={onBack}>&larr; Back</button>
-      </div>
+    <div style={{ padding: 16 }}>
+      <h2>{username} — My Team (Week {currentWeek})</h2>
 
-      <h2>{league?.name || leagueId}</h2>
-
-      <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-        <TabButton label="My Team"   active={tab === "team"}     onClick={() => setTab("team")} />
-        <TabButton label="Players"   active={tab === "players"}  onClick={() => setTab("players")} />
-        <TabButton label="Draft"     active={tab === "draft"}    onClick={() => setTab("draft")} />
-        <TabButton label="Matchups"  active={tab === "matchups"} onClick={() => setTab("matchups")} />
-        <TabButton label="League"    active={tab === "league"}   onClick={() => setTab("league")} />
-        {isOwner && (
-          <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
-        )}
-      </div>
-
-      {tab === "team" && (
-        <div>
-          <h3>Starters</h3>
-          <ul style={{ listStyle: "none", padding: 0 }}>
-            {ROSTER_SLOTS.map((s) => (
-              <li key={s} style={{ marginBottom: 6 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <b style={{ width: 40 }}>{s}</b>
-                  <span>{roster[s] || "(empty)"}</span>
-                  {roster[s] && (
-                    <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
-                      Send to Bench
-                    </button>
+      {/* Starters */}
+      <h3>Starters</h3>
+      <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid #ccc" }}>
+            <th>Slot</th>
+            <th>Player</th>
+            <th>Team</th>
+            <th>Pos</th>
+            <th>Proj (W{currentWeek})</th>
+            <th>Points</th>
+          </tr>
+        </thead>
+        <tbody>
+          {ROSTER_SLOTS.map((slot) => {
+            const pid = roster[slot];
+            const p = pid ? playersMap.get(pid) : null;
+            return (
+              <tr key={slot} style={{ borderBottom: "1px solid #eee" }}>
+                <td>{slot}</td>
+                <td>
+                  {pid ? (
+                    <PlayerName id={pid} leagueId={leagueId} />
+                  ) : (
+                    <span style={{ color: "#999" }}>(empty)</span>
                   )}
-                </div>
-              </li>
-            ))}
-          </ul>
+                </td>
+                <td>{p?.team || "-"}</td>
+                <td>{p?.position || "-"}</td>
+                <td>{projForWeek(p, currentWeek).toFixed(1)}</td>
+                <td>{pointsForPlayer(p, currentWeek).toFixed(1)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
 
-          <h3>Bench</h3>
-          <ul style={{ listStyle: "none", padding: 0 }}>
-            {bench.map((pid) => (
-              <li key={pid} style={{ marginBottom: 6 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span>{pid}</span>
-                  <select
-                    defaultValue=""
-                    onChange={(e) => {
-                      const slot = e.target.value;
-                      if (slot) handleBenchToSlot(pid, slot);
-                    }}
-                  >
-                    <option value="">Move to slot…</option>
-                    {ROSTER_SLOTS.map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                </div>
-              </li>
-            ))}
-            {bench.length === 0 && <li>(no bench players)</li>}
-          </ul>
-        </div>
-      )}
+      {/* Bench */}
+      <h3 style={{ marginTop: 24 }}>Bench</h3>
+      <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid #ccc" }}>
+            <th>Player</th>
+            <th>Team</th>
+            <th>Pos</th>
+            <th>Proj (W{currentWeek})</th>
+            <th>Points</th>
+          </tr>
+        </thead>
+        <tbody>
+          {bench.map((pid) => {
+            const p = playersMap.get(pid);
+            return (
+              <tr key={pid} style={{ borderBottom: "1px solid #eee" }}>
+                <td>
+                  <PlayerName id={pid} leagueId={leagueId} />
+                </td>
+                <td>{p?.team || "-"}</td>
+                <td>{p?.position || "-"}</td>
+                <td>{projForWeek(p, currentWeek).toFixed(1)}</td>
+                <td>{pointsForPlayer(p, currentWeek).toFixed(1)}</td>
+              </tr>
+            );
+          })}
+          {bench.length === 0 && (
+            <tr>
+              <td colSpan={5} style={{ color: "#999" }}>
+                No players on bench
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
 
-      {tab === "players" && (
-        <PlayersList leagueId={leagueId} currentWeek={currentWeek} />
-      )}
-
-      {tab === "draft" && (
-        <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
-      )}
-
-      {tab === "matchups" && (
-        <MatchupsTab leagueId={leagueId} currentWeek={currentWeek} />
-      )}
-
-      {tab === "league" && (
-        <LeagueTab leagueId={leagueId} />
-      )}
-
-      {tab === "admin" && isOwner && (
-        <LeagueAdmin leagueId={leagueId} username={username} />
-      )}
+      {/* Team Total */}
+      <h3 style={{ marginTop: 24 }}>Team Total (Week {currentWeek})</h3>
+      <p>
+        <b>{computed.total.toFixed(1)} points</b>
+      </p>
     </div>
-  );
-}
-
-function TabButton({ label, active, onClick }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: "6px 10px",
-        borderRadius: 6,
-        border: active ? "2px solid #333" : "1px solid #ccc",
-        background: active ? "#f2f2f2" : "#fff",
-        fontWeight: active ? 700 : 400,
-      }}
-    >
-      {label}
-    </button>
   );
 }
