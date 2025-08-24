@@ -1,113 +1,143 @@
 /* eslint-disable no-console */
-// src/components/LeagueHome.js
 import React, { useEffect, useMemo, useState } from "react";
-import { listenLeague } from "../lib/storage";
-
-import MyTeam from "./MyTeam";
+import {
+  listenLeague,
+  listenTeam,
+  ensureTeam,
+  moveToStarter,
+  moveToBench,
+  ROSTER_SLOTS,
+} from "../lib/storage";
 import PlayersList from "./PlayersList";
 import DraftBoard from "./DraftBoard";
-import LeagueAdmin from "./LeagueAdmin";
-import LeagueTab from "./LeagueTab";
-import MatchupsTab from "./MatchupsTab";
 
-/**
- * Props:
- *  - leagueId   (string, required)
- *  - username   (string, required)
- *  - onBack?    (function) optional back handler
- */
 export default function LeagueHome({ leagueId, username, onBack }) {
   const [league, setLeague] = useState(null);
-  const [tab, setTab] = useState("team"); // team | players | draft | league | matchups | admin
+  const [team, setTeam] = useState(null);
+  const [tab, setTab] = useState("team"); // team | players | draft | admin | matchups | league
+  const currentWeek = Number(league?.settings?.currentWeek || 1);
 
-  // Live league listener
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
   }, [leagueId]);
 
-  const isOwner = useMemo(() => {
-    return !!league?.owner && !!username && league.owner === username;
-  }, [league?.owner, username]);
-
-  const currentWeek = Number(league?.settings?.currentWeek || 1);
-  const draftStatus = league?.draft?.status || "scheduled"; // scheduled | live | done
-
-  // Hide "Draft" tab after draft is done
-  const tabs = useMemo(() => {
-    const base = [
-      { key: "team", label: "My Team" },
-      { key: "players", label: "Players" },
-      ...(draftStatus === "done" ? [] : [{ key: "draft", label: "Draft" }]),
-      { key: "league", label: "League" },
-      { key: "matchups", label: "Matchups" },
-    ];
-    if (isOwner) base.push({ key: "admin", label: "Admin" });
-    return base;
-  }, [draftStatus, isOwner]);
-
-  // If current tab disappeared (e.g., draft finished), bounce to "team"
   useEffect(() => {
-    if (!tabs.find((t) => t.key === tab)) setTab("team");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabs.length]);
+    let unsub = null;
+    (async () => {
+      try {
+        if (!leagueId || !username) return;
+        await ensureTeam({ leagueId, username });
+        unsub = listenTeam({ leagueId, username, onChange: setTeam });
+      } catch (e) {
+        console.error("ensureTeam/listenTeam error:", e);
+      }
+    })();
+    return () => unsub && unsub();
+  }, [leagueId, username]);
 
-  if (!leagueId || !username) {
-    return (
-      <div style={{ padding: 12, color: "#b00" }}>
-        Missing league or user context. (leagueId={String(leagueId)}, username={String(username)})
-      </div>
-    );
-  }
+  const isOwner = useMemo(() => (league?.owner && username ? league.owner === username : false), [league?.owner, username]);
+
+  const roster = team?.roster || {};
+  const bench = Array.isArray(team?.bench) ? team.bench : [];
+
+  const handleBenchToSlot = async (playerId, slot) => {
+    try {
+      await moveToStarter({ leagueId, username, playerId, slot });
+    } catch (e) {
+      console.error("moveToStarter error:", e);
+      alert(String(e?.message || e));
+    }
+  };
+  const handleSlotToBench = async (slot) => {
+    try {
+      await moveToBench({ leagueId, username, slot });
+    } catch (e) {
+      console.error("moveToBench error:", e);
+      alert(String(e?.message || e));
+    }
+  };
 
   return (
     <div>
-      <div style={{ marginBottom: 10, display: "flex", alignItems: "center", gap: 12 }}>
-        {onBack && (
-          <button onClick={onBack}>&larr; Back</button>
-        )}
-        <h2 style={{ margin: 0 }}>{league?.name || "League"}</h2>
-        <span style={{ color: "#666", fontSize: 13 }}>
-          Week {currentWeek} • Draft: {draftStatus}
-          {isOwner ? " • (Commissioner)" : ""}
-        </span>
+      <div style={{ marginBottom: 8 }}>
+        <button onClick={onBack}>&larr; Back</button>
       </div>
+
+      <h2>{league?.name || leagueId}</h2>
 
       <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-        {tabs.map((t) => (
-          <TabButton
-            key={t.key}
-            label={t.label}
-            active={tab === t.key}
-            onClick={() => setTab(t.key)}
-          />
-        ))}
+        <TabButton label="My Team"   active={tab === "team"}    onClick={() => setTab("team")} />
+        <TabButton label="Players"   active={tab === "players"} onClick={() => setTab("players")} />
+        {league?.draft?.status !== "done" && (
+          <TabButton label="Draft" active={tab === "draft"} onClick={() => setTab("draft")} />
+        )}
+        {isOwner && (
+          <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
+        )}
+        <TabButton label="Matchups" active={tab === "matchups"} onClick={() => setTab("matchups")} />
+        <TabButton label="League"   active={tab === "league"}   onClick={() => setTab("league")} />
       </div>
 
-      <div style={{ marginTop: 8 }}>
-        {tab === "team" && <MyTeam leagueId={leagueId} username={username} />}
+      {tab === "team" && (
+        <div>
+          <h3>Starters</h3>
+          <ul style={{ listStyle: "none", padding: 0 }}>
+            {ROSTER_SLOTS.map((s) => (
+              <li key={s} style={{ marginBottom: 6 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <b style={{ width: 40 }}>{s}</b>
+                  <span>{roster[s] || "(empty)"}</span>
+                  {roster[s] && (
+                    <button onClick={() => handleSlotToBench(s)} style={{ marginLeft: 8 }}>
+                      Send to Bench
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
 
-        {tab === "players" && (
-          <PlayersList leagueId={leagueId} currentWeek={currentWeek} username={username} />
-        )}
+          <h3>Bench</h3>
+          <ul style={{ listStyle: "none", padding: 0 }}>
+            {bench.map((pid) => (
+              <li key={pid} style={{ marginBottom: 6 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span>{pid}</span>
+                  <select
+                    defaultValue=""
+                    onChange={(e) => {
+                      const slot = e.target.value;
+                      if (slot) handleBenchToSlot(pid, slot);
+                    }}
+                  >
+                    <option value="">Move to slot…</option>
+                    {ROSTER_SLOTS.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+              </li>
+            ))}
+            {bench.length === 0 && <li>(no bench players)</li>}
+          </ul>
+        </div>
+      )}
 
-        {tab === "draft" && draftStatus !== "done" && (
-          <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
-        )}
+      {tab === "players" && (
+        <PlayersList leagueId={leagueId} currentWeek={currentWeek} username={username} />
+      )}
 
-        {tab === "league" && (
-          <LeagueTab leagueId={leagueId} username={username} />
-        )}
+      {tab === "draft" && (
+        <DraftBoard leagueId={leagueId} username={username} currentWeek={currentWeek} />
+      )}
 
-        {tab === "matchups" && (
-          <MatchupsTab leagueId={leagueId} username={username} currentWeek={currentWeek} />
-        )}
+      {tab === "matchups" && (
+        <div style={{ color: "#999" }}>(Matchups UI can go here; totals should use actual points.)</div>
+      )}
 
-        {tab === "admin" && isOwner && (
-          <LeagueAdmin leagueId={leagueId} username={username} />
-        )}
-      </div>
+      {tab === "league" && (
+        <div style={{ color: "#999" }}>(League view: other rosters + full season schedule.)</div>
+      )}
     </div>
   );
 }
@@ -122,7 +152,6 @@ function TabButton({ label, active, onClick }) {
         border: active ? "2px solid #333" : "1px solid #ccc",
         background: active ? "#f2f2f2" : "#fff",
         fontWeight: active ? 700 : 400,
-        cursor: "pointer",
       }}
     >
       {label}
