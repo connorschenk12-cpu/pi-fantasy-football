@@ -222,6 +222,85 @@ export function hasPaidEntry(league, username) {
   return league?.entry?.enabled ? !!league?.entry?.paid?.[username] : true;
 }
 
+/** ===============================
+ *  ENTRY / PAYMENTS (settings + pay)
+ *  =============================== */
+
+/**
+ * Update entry-fee settings for a league.
+ * - enabled: boolean (turn payments on/off)
+ * - amountPi: number (can be 0 for free leagues)
+ * Keeps any existing paid map intact.
+ */
+export async function setEntrySettings({ leagueId, enabled, amountPi }) {
+  if (!leagueId) throw new Error("setEntrySettings: leagueId is required");
+  const lref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(lref);
+  const prev = snap.exists() ? snap.data() : {};
+
+  const entryPrev = prev.entry || {};
+  const next = {
+    enabled: !!enabled,
+    amountPi: Number.isFinite(Number(amountPi)) ? Number(amountPi) : 0,
+    // preserve who already paid
+    paid: entryPrev.paid || {},
+    // optional metadata
+    updatedAt: serverTimestamp(),
+  };
+
+  await updateDoc(lref, { entry: next });
+  return next;
+}
+
+/**
+ * Mark a user as paid in this league (UI calls this after a successful Pi payment).
+ */
+export async function payEntry({ leagueId, username }) {
+  if (!leagueId || !username) throw new Error("payEntry: leagueId and username are required");
+  const lref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(lref);
+  if (!snap.exists()) throw new Error("League not found");
+  const league = snap.data() || {};
+  const paid = { ...(league.entry?.paid || {}) };
+  paid[username] = true;
+
+  await updateDoc(lref, {
+    "entry.paid": paid,
+    "entry.updatedAt": serverTimestamp(),
+  });
+  return true;
+}
+
+/**
+ * (Optional) Read entry settings in one shot.
+ */
+export async function getEntrySettings(leagueId) {
+  const s = await getDoc(doc(db, "leagues", leagueId));
+  return s.exists() ? (s.data().entry || { enabled: false, amountPi: 0, paid: {} }) : { enabled: false, amountPi: 0, paid: {} };
+}
+
+/**
+ * (Optional) Helper to check if all members have paid (respecting free leagues).
+ */
+export async function allMembersPaid(leagueId) {
+  const s = await getDoc(doc(db, "leagues", leagueId));
+  if (!s.exists()) return false;
+  const league = s.data() || {};
+  const entry = league.entry || { enabled: false, amountPi: 0, paid: {} };
+
+  // Free league or payments disabled → treat as paid
+  if (!entry.enabled || Number(entry.amountPi || 0) <= 0) return true;
+
+  // Need every member to be paid
+  const membersCol = collection(db, "leagues", leagueId, "members");
+  const membersSnap = await getDocs(membersCol);
+  if (membersSnap.empty) return false;
+  for (const d of membersSnap.docs) {
+    const u = d.id;
+    if (!entry.paid || !entry.paid[u]) return false;
+  }
+  return true;
+}
 /* =========================================================
  * DRAFT HELPERS & ACTIONS
  * ========================================================= */
