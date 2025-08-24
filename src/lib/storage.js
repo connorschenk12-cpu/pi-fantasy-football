@@ -86,7 +86,12 @@ function pickFirstOpen(slots, roster) {
   for (const s of slots) if (!roster[s]) return s;
   return null;
 }
-
+// ID normalization helper used by some components
+export function asId(x) {
+  if (x === null || x === undefined) return "";
+  // normalize numbers and strings consistently
+  return String(x).trim();
+}
 export function defaultSlotForPosition(pos, roster = {}) {
   const p = String(pos || "").toUpperCase();
   if (p === "QB") return "QB";
