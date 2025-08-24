@@ -1,59 +1,57 @@
-// src/components/SeedNamesFromLocal.js
 /* eslint-disable no-console */
 import React, { useState } from "react";
-import { bulkUpsertPlayerNames, ensurePlayerNameFields } from "../lib/storage";
+import { writeBatch, doc } from "firebase/firestore";
+import { db } from "../lib/firebase";
+import players from "../data/players";
 
-// IMPORTANT: This imports your local player list.
-// Expecting data/players.js to export an array like:
-//   export default [{ id: "123", name: "Patrick Mahomes", position:"QB", team:"KC" }, ...]
-import LOCAL_PLAYERS from "../../data/players";
-
+/**
+ * Only patches the `name` field (and position/team if present) for existing player ids.
+ */
 export default function SeedNamesFromLocal({ leagueId }) {
-  const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
 
-  const runLocalSeed = async () => {
+  const onPatch = async () => {
     try {
-      setBusy(true);
-      setMsg("Writing names from data/players.js …");
-      const res = await bulkUpsertPlayerNames({
-        leagueId,
-        playersArray: Array.isArray(LOCAL_PLAYERS) ? LOCAL_PLAYERS : [],
-      });
-      setMsg(`Updated ${res.updated} player docs with 'name'.`);
+      if (!Array.isArray(players) || players.length === 0) {
+        return setStatus("No local players found in src/data/players.js");
+      }
+      setStatus("Patching names…");
+
+      const chunkSize = 450;
+      for (let i = 0; i < players.length; i += chunkSize) {
+        const batch = writeBatch(db);
+        const slice = players.slice(i, i + chunkSize);
+
+        slice.forEach((p) => {
+          const id = String(p.id || p.playerId || p.srid || p.key || "").trim();
+          if (!id) return;
+
+          const patch = {
+            name: p.name || p.fullName || p.playerName || String(id),
+          };
+          if (p.position) patch.position = p.position;
+          if (p.team) patch.team = p.team;
+
+          batch.set(doc(db, "players", id), patch, { merge: true });
+          if (leagueId) {
+            batch.set(doc(db, "leagues", leagueId, "players", id), patch, { merge: true });
+          }
+        });
+
+        await batch.commit();
+      }
+
+      setStatus("Patched player names.");
     } catch (e) {
       console.error(e);
-      setMsg(String(e?.message || e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const runInfer = async () => {
-    try {
-      setBusy(true);
-      setMsg("Inferring names from existing fields …");
-      const res = await ensurePlayerNameFields({ leagueId });
-      setMsg(`Inferred & set ${res.updated} missing names.`);
-    } catch (e) {
-      console.error(e);
-      setMsg(String(e?.message || e));
-    } finally {
-      setBusy(false);
+      setStatus(`Error: ${e.message || e}`);
     }
   };
 
   return (
-    <div style={{ border: "1px dashed #ddd", padding: 10, borderRadius: 8 }}>
-      <h4 style={{ margin: 0 }}>Player Name Fix</h4>
-      <p style={{ marginTop: 6, color: "#666" }}>
-        If players show as numbers, they’re missing a <code>name</code> field. Use one of these:
-      </p>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <button onClick={runLocalSeed} disabled={busy}>Seed from <code>data/players.js</code></button>
-        <button onClick={runInfer} disabled={busy}>Infer from existing fields</button>
-      </div>
-      {msg && <div style={{ marginTop: 8 }}>{msg}</div>}
+    <div style={{ padding: 10, border: "1px dashed #ccc", borderRadius: 6, marginTop: 10 }}>
+      <button onClick={onPatch}>Patch Names from Local Dataset</button>
+      <div style={{ marginTop: 6 }}>{status}</div>
     </div>
   );
 }
