@@ -89,7 +89,13 @@ export default function LeagueHome({ leagueId, username, onBack }) {
           <TabButton label="Admin" active={tab === "admin"} onClick={() => setTab("admin")} />
         )}
       </div>
-
+      - {tab === "players" && (
+-   <PlayersList leagueId={leagueId} currentWeek={currentWeek} />
+- )}
++ {tab === "players" && (
++   <PlayersList leagueId={leagueId} username={username} currentWeek={currentWeek} />
++ )}
+          
       {tab === "team" && (
         <div>
           <h3>Starters</h3>
