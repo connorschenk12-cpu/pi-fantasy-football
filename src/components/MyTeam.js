@@ -6,12 +6,13 @@ import {
   listenTeam,
   ensureTeam,
   listPlayersMap,
+  getPlayerById,
+  asId,
   playerDisplay,
   projForWeek,
   opponentForWeek,
   moveToStarter,
   moveToBench,
-  asId,
 } from "../lib/storage";
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
@@ -34,7 +35,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players (for id → name lookups)
+  // Load initial players map
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -50,27 +51,58 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     };
   }, [leagueId]);
 
+  // Canonical roster + bench ids
   const roster = team?.roster || {};
-  const bench = Array.isArray(team?.bench) ? team.bench : [];
+  const benchIds = Array.isArray(team?.bench) ? team.bench : [];
+  const allNeededIds = useMemo(() => {
+    const ids = new Set();
+    ROSTER_SLOTS.forEach((slot) => {
+      const pid = roster?.[slot];
+      if (pid != null) ids.add(asId(pid));
+    });
+    benchIds.forEach((pid) => ids.add(asId(pid)));
+    return Array.from(ids).filter(Boolean);
+  }, [roster, benchIds]);
 
-  // defensive resolver: try direct key, then a linear search fallback
-  function resolvePlayerById(idLike) {
-    const key = asId(idLike);
-    if (!key) return null;
-    const direct = playersMap.get(key);
-    if (direct) return direct;
-    // fallback: some historical docs might have odd id fields; search values
-    for (const p of playersMap.values()) {
-      if (asId(p?.id) === key) return p;
-    }
-    return null;
-  }
+  // If some roster/bench ids are missing from playersMap, lazy-fetch them and cache
+  useEffect(() => {
+    if (!leagueId || allNeededIds.length === 0) return;
+    let cancelled = false;
 
+    (async () => {
+      const missing = allNeededIds.filter((pid) => pid && !playersMap.has(pid));
+      if (missing.length === 0) return;
+
+      try {
+        const updates = [];
+        for (const pid of missing) {
+          const p = await getPlayerById({ leagueId, id: pid });
+          if (p) updates.push([pid, p]);
+        }
+        if (!cancelled && updates.length) {
+          setPlayersMap((prev) => {
+            const next = new Map(prev);
+            for (const [pid, p] of updates) next.set(pid, p);
+            return next;
+          });
+        }
+      } catch (e) {
+        console.error("lazy load players by id:", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [leagueId, allNeededIds, playersMap]);
+
+  // Build starters view
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
-      const id = roster[slot] ?? null;
-      const p = id ? resolvePlayerById(id) : null;
-      return { slot, id, p };
+      const raw = roster[slot] ?? null;
+      const key = asId(raw);
+      const p = key ? playersMap.get(key) : null;
+      return { slot, id: key, p };
     });
   }, [roster, playersMap]);
 
@@ -92,14 +124,23 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
-  const nameOf = (p, id) => (p ? playerDisplay(p) : asId(id) || "(empty)");
-  const posOf = (p) => p?.position || "-";
-  const teamOf = (p) => p?.team || "-";
-  const oppOf = (p) => (p ? opponentForWeek(p, week) || "-" : "-");
-  const projOf = (p) => {
+  // Safe field helpers
+  function nameOf(p) {
+    return p ? playerDisplay(p) : "(empty)";
+  }
+  function posOf(p) {
+    return p?.position || "-";
+  }
+  function teamOf(p) {
+    return p?.team || "-";
+  }
+  function oppOf(p) {
+    return p ? (opponentForWeek(p, week) || "-") : "-";
+  }
+  function projOf(p) {
     const val = p ? projForWeek(p, week) : 0;
     return (Number.isFinite(val) ? val : 0).toFixed(1);
-  };
+  }
 
   return (
     <div>
@@ -120,7 +161,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           {starters.map(({ slot, id, p }) => (
             <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
               <td><b>{slot}</b></td>
-              <td>{nameOf(p, id)}</td>
+              <td>{nameOf(p)}</td>
               <td>{posOf(p)}</td>
               <td>{teamOf(p)}</td>
               <td>{oppOf(p)}</td>
@@ -150,11 +191,12 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {bench.map((pid) => {
-            const p = resolvePlayerById(pid);
+          {benchIds.map((rawId) => {
+            const pid = asId(rawId);
+            const p = pid ? playersMap.get(pid) : null;
             return (
-              <tr key={asId(pid)} style={{ borderBottom: "1px solid #f5f5f5" }}>
-                <td>{nameOf(p, pid)}</td>
+              <tr key={pid || String(rawId)} style={{ borderBottom: "1px solid #f5f5f5" }}>
+                <td>{nameOf(p)}</td>
                 <td>{posOf(p)}</td>
                 <td>{teamOf(p)}</td>
                 <td>{oppOf(p)}</td>
@@ -178,7 +220,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
               </tr>
             );
           })}
-          {bench.length === 0 && (
+          {benchIds.length === 0 && (
             <tr>
               <td colSpan={6} style={{ color: "#999" }}>(no bench players)</td>
             </tr>
