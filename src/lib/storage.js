@@ -940,33 +940,6 @@ export async function getScheduleAllWeeks(leagueId) {
   return arr;
 }
 
-// --- Add these to src/lib/storage.js (SCHEDULE / MATCHUPS section) ---
-
-export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate = false }) {
-  if (!leagueId) throw new Error("Missing leagueId");
-  const members = await listMemberUsernames(leagueId);
-  if (members.length < 2) throw new Error("Need at least 2 team members to schedule.");
-
-  const schedule = generateScheduleRoundRobin(members, totalWeeks);
-
-  // If a schedule already exists and we're not recreating, no-op
-  const colRef = collection(db, "leagues", leagueId, "schedule");
-  const existing = await getDocs(colRef);
-  const exists = !existing.empty;
-
-  if (exists && !recreate) {
-    return { weeksCreated: [] };
-  }
-
-  await writeSchedule(leagueId, schedule);
-  return { weeksCreated: schedule.map((w) => w.week) };
-}
-
-// Convenience wrapper used by callers that want to always recreate
-export async function ensureOrRecreateSchedule(leagueId, totalWeeks = 14) {
-  return ensureSeasonSchedule({ leagueId, totalWeeks, recreate: true });
-}
-
 /** Ensure schedule exists (or recreate). Writes week-1..N docs. */
 export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate = false }) {
   if (!leagueId) throw new Error("Missing leagueId");
@@ -987,8 +960,17 @@ export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate
   return { weeksCreated: schedule.map((w) => w.week) };
 }
 
-/** Back-compat wrapper that some components import */
-export async function ensureOrRecreateSchedule(leagueId, totalWeeks = 14) {
+/** Back-compat wrapper (supports both call styles) */
+export async function ensureOrRecreateSchedule(arg1, maybeTotalWeeks = 14) {
+  // Style A: ensureOrRecreateSchedule({ leagueId, totalWeeks })
+  if (typeof arg1 === "object" && arg1 !== null) {
+    const leagueId = arg1.leagueId;
+    const totalWeeks = arg1.totalWeeks ?? 14;
+    return ensureSeasonSchedule({ leagueId, totalWeeks, recreate: true });
+  }
+  // Style B: ensureOrRecreateSchedule(leagueId, totalWeeks)
+  const leagueId = arg1;
+  const totalWeeks = maybeTotalWeeks ?? 14;
   return ensureSeasonSchedule({ leagueId, totalWeeks, recreate: true });
 }
 
