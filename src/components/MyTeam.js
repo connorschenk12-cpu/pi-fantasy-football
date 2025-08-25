@@ -11,12 +11,14 @@ import {
   opponentForWeek,
   moveToStarter,
   moveToBench,
-  asId, // <-- IMPORTANT: use canonical ids for lookups
+  asId,
+  getPlayerById, // fallback fetch if a mapped player lacks name
 } from "../lib/storage";
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
+  const [resolved, setResolved] = useState(new Map()); // id -> richer player
   const week = Number(currentWeek || 1);
 
   // Ensure team + subscribe
@@ -53,14 +55,59 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
+  // Build starter rows (matchups uses this same style)
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
       const raw = roster[slot] ?? null;
-      const key = asId(raw);                 // <-- canonicalize
-      const p = key ? playersMap.get(key) : null;
-      return { slot, id: key, p };
+      const pid = asId(raw);
+      // prefer resolved → playersMap
+      const p = pid
+        ? (resolved.get(pid) || playersMap.get(pid) || null)
+        : null;
+      return { slot, pid, p };
     });
-  }, [roster, playersMap]);
+  }, [roster, playersMap, resolved]);
+
+  // Opportunistically resolve any players that still show up as (unknown)
+  useEffect(() => {
+    if (!leagueId) return;
+    const want = new Set();
+
+    // collect ids from starters + bench
+    ROSTER_SLOTS.forEach((slot) => {
+      const pid = asId(roster[slot]);
+      if (pid) want.add(pid);
+    });
+    (bench || []).forEach((b) => {
+      const pid = asId(b);
+      if (pid) want.add(pid);
+    });
+
+    // for any id that maps to a player without a usable display name, fetch by doc id
+    (async () => {
+      const updates = new Map(resolved);
+      for (const pid of want) {
+        const p0 = playersMap.get(pid);
+        const hasGoodName =
+          !!(p0 && playerDisplay(p0) && playerDisplay(p0) !== "(unknown)" && playerDisplay(p0) !== "(empty)");
+
+        if (!hasGoodName) {
+          try {
+            const fetched = await getPlayerById({ leagueId, id: pid });
+            if (fetched && playerDisplay(fetched) && playerDisplay(fetched) !== "(unknown)") {
+              updates.set(pid, fetched);
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
+      if (updates.size !== resolved.size) {
+        setResolved(updates);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leagueId, roster, bench, playersMap]);
 
   async function handleBenchToSlot(playerId, slot) {
     try {
@@ -105,7 +152,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {starters.map(({ slot, id, p }) => (
+          {starters.map(({ slot, pid, p }) => (
             <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
               <td><b>{slot}</b></td>
               <td>{nameOf(p)}</td>
@@ -114,7 +161,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
               <td>{oppOf(p)}</td>
               <td>{projOf(p)}</td>
               <td>
-                {id ? (
+                {pid ? (
                   <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
                 ) : (
                   <span style={{ color: "#999" }}>(empty)</span>
@@ -139,8 +186,8 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </thead>
         <tbody>
           {bench.map((pidRaw) => {
-            const pid = asId(pidRaw);           // <-- canonicalize
-            const p = pid ? playersMap.get(pid) : null;
+            const pid = asId(pidRaw);
+            const p = pid ? (resolved.get(pid) || playersMap.get(pid) || null) : null;
             return (
               <tr key={pid || String(pidRaw)} style={{ borderBottom: "1px solid #f5f5f5" }}>
                 <td>{nameOf(p)}</td>
