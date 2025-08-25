@@ -5,7 +5,7 @@ import {
   ROSTER_SLOTS,
   listenTeam,
   ensureTeam,
-  listPlayers,       // ← use the same source as Players tab
+  listPlayers,       // same source as Players tab
   playerDisplay,
   projForWeek,
   opponentForWeek,
@@ -13,7 +13,7 @@ import {
   moveToBench,
 } from "../lib/storage";
 
-// Build a tolerant index for many possible id shapes
+/** Build a tolerant index for many possible id shapes */
 function buildPlayerIndex(players = []) {
   const idx = new Map();
   const put = (k, p) => {
@@ -24,8 +24,8 @@ function buildPlayerIndex(players = []) {
   };
 
   for (const p of players) {
-    // canonical and numeric forms
     put(p.id, p);
+    // numeric/string coercions
     if (p?.id != null && !Number.isNaN(Number(p.id))) put(String(Number(p.id)), p);
 
     // common alternates we’ve seen in data
@@ -35,55 +35,90 @@ function buildPlayerIndex(players = []) {
     put(p.yahooId, p);
     put(p.sleeperId, p);
     put(p.externalId, p);
+    put(p.PlayerID, p);       // some caps variants
+    put(p.player_id, p);
+    put(p.PlayerId, p);
 
-    // sometimes roster stores {id: "..."} objects; this lets us match JSONified forms
-    if (typeof p.id === "object" && p.id?.id != null) put(p.id.id, p);
+    // some old seeds saved name as id (rare)
+    if (p.name) put(p.name, p);
+
+    // object-y ids
+    if (typeof p.id === "object" && p.id?.id != null) {
+      put(p.id.id, p);
+      if (!Number.isNaN(Number(p.id.id))) put(String(Number(p.id.id)), p);
+    }
   }
   return idx;
 }
 
-// Try to resolve any roster value (string/number/object) to a player using the index.
-// Falls back to a slow scan once (rare).
+/** Normalize any roster value into possible lookup keys */
+function* candidateKeys(raw) {
+  if (raw == null) return;
+  // simple
+  yield String(raw);
+  // number coercion
+  if (!Number.isNaN(Number(raw))) yield String(Number(raw));
+  // arrays: sometimes stored like ["123"]
+  if (Array.isArray(raw)) {
+    for (const x of raw) {
+      yield String(x);
+      if (!Number.isNaN(Number(x))) yield String(Number(x));
+    }
+  }
+  // objects: { id }, { playerId }, { pid }, { value }, DocumentReference-like
+  if (typeof raw === "object") {
+    const cand = [
+      raw.id,
+      raw.playerId,
+      raw.pid,
+      raw.value,
+      raw.key,
+      raw.ref?.id,
+      raw.doc?.id,
+    ].filter((v) => v != null);
+    for (const v of cand) {
+      yield String(v);
+      if (!Number.isNaN(Number(v))) yield String(Number(v));
+    }
+    // brute force: any enumerable prop that looks like an id
+    for (const k of Object.keys(raw)) {
+      const v = raw[k];
+      if (v != null && (k.toLowerCase().includes("id") || typeof v === "string" || typeof v === "number")) {
+        yield String(v);
+        if (!Number.isNaN(Number(v))) yield String(Number(v));
+      }
+    }
+  }
+}
+
+/** Resolve any roster value (string/number/object/array) to a player */
 function resolvePlayer(raw, idx, players) {
-  if (raw == null) return null;
-
-  // (a) direct try
-  const direct = idx.get(String(raw));
-  if (direct) return direct;
-
-  // (b) number/string coercion
-  const coerce = idx.get(String(Number(raw)));
-  if (coerce) return coerce;
-
-  // (c) object like {id: "..."}
-  if (typeof raw === "object" && raw.id != null) {
-    const objHit =
-      idx.get(String(raw.id)) || idx.get(String(Number(raw.id)));
-    if (objHit) return objHit;
+  // fast path: index lookups
+  for (const key of candidateKeys(raw)) {
+    const hit = idx.get(key);
+    if (hit) return hit;
   }
 
-  // (d) last-resort scan by any known id field
-  const candidate = players.find((p) => {
-    const keys = [
-      p.id,
-      p.playerId,
-      p.pid,
-      p.espnId,
-      p.yahooId,
-      p.sleeperId,
-      p.externalId,
-    ].filter((k) => k != null);
-    const rawStr = String(raw);
-    const rawNum = String(Number(raw));
-    return keys.some((k) => rawStr === String(k) || rawNum === String(Number(k)));
+  // slow path: scan by any likely id field
+  const rawStr = String(raw);
+  const rawNum = String(Number(raw));
+  const hit = players.find((p) => {
+    const ids = [
+      p.id, p.playerId, p.pid, p.espnId, p.yahooId, p.sleeperId, p.externalId,
+      p.PlayerID, p.player_id, p.PlayerId, p.name,
+      typeof p.id === "object" ? p.id?.id : null,
+    ].filter((v) => v != null);
+    return ids.some((v) => rawStr === String(v) || rawNum === String(Number(v)));
   });
-  return candidate || null;
+
+  return hit || null;
 }
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
-  const [players, setPlayers] = useState([]);        // ← same flow as Players tab
-  const [index, setIndex] = useState(new Map());     // tolerant index
+  const [players, setPlayers] = useState([]);
+  const [index, setIndex] = useState(new Map());
+  const [showDebug, setShowDebug] = useState(false); // quick toggle to see raw ids
   const week = Number(currentWeek || 1);
 
   // Ensure team + subscribe
@@ -101,7 +136,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players exactly like Players tab does
+  // Load players exactly like Players tab
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -139,10 +174,15 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
 
   async function handleBenchToSlot(playerIdOrRaw, slot) {
     try {
-      // playerIdOrRaw may be number/string/object; extract an id to move
       const found = resolvePlayer(playerIdOrRaw, index, players);
       const idToUse =
-        (found?.id != null ? String(found.id) : String(playerIdOrRaw));
+        found?.id != null
+          ? String(found.id)
+          : Array.isArray(playerIdOrRaw)
+          ? String(playerIdOrRaw[0])
+          : typeof playerIdOrRaw === "object" && playerIdOrRaw?.id != null
+          ? String(playerIdOrRaw.id)
+          : String(playerIdOrRaw);
       await moveToStarter({ leagueId, username, playerId: idToUse, slot });
     } catch (e) {
       console.error("moveToStarter:", e);
@@ -159,9 +199,20 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
+  const fmtRaw = (v) => {
+    try {
+      if (v == null) return "null";
+      if (typeof v === "string" || typeof v === "number") return String(v);
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  };
+
   function nameOf(p, fallbackRaw) {
     if (p) return playerDisplay(p);
-    return `(unknown: ${String(fallbackRaw)})`;
+    // Force-show the raw when unknown so we can identify the shape
+    return `(unknown → ${fmtRaw(fallbackRaw)})`;
   }
 
   function posOf(p) {
@@ -183,7 +234,13 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
 
   return (
     <div>
-      <h3>Starters — Week {week}</h3>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <h3>Starters — Week {week}</h3>
+        <button onClick={() => setShowDebug((s) => !s)} style={{ fontSize: 12 }}>
+          {showDebug ? "Hide debug" : "Show debug"}
+        </button>
+      </div>
+
       <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse", marginTop: 8 }}>
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
@@ -231,7 +288,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </thead>
         <tbody>
           {benchRows.map(({ rawId, p }, i) => (
-            <tr key={`${String(rawId)}-${i}`} style={{ borderBottom: "1px solid #f5f5f5" }}>
+            <tr key={`${fmtRaw(rawId)}-${i}`} style={{ borderBottom: "1px solid #f5f5f5" }}>
               <td>{nameOf(p, rawId)}</td>
               <td>{posOf(p)}</td>
               <td>{teamOf(p)}</td>
@@ -262,6 +319,24 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           )}
         </tbody>
       </table>
+
+      {showDebug && (
+        <div style={{ marginTop: 16, padding: 12, background: "#fafafa", border: "1px dashed #ddd" }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Debug — raw roster values</div>
+          <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+{JSON.stringify(
+  {
+    roster,
+    bench,
+    // helpful to confirm some player samples loaded:
+    samplePlayers: players.slice(0, 5).map((p) => ({ id: p.id, name: p.name, pos: p.position })),
+  },
+  null,
+  2
+)}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }
