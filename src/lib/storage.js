@@ -194,7 +194,28 @@ export async function joinLeague({ leagueId, username }) {
 
 export function playerDisplay(p) {
   if (!p) return "(empty)";
-  return p.name || p.fullName || p.playerName || String(p.id) || "(unknown)";
+  // Try lots of common name fields before falling back
+  const firstLast =
+    (p.firstName || p.firstname || p.fname || "") +
+    (p.lastName || p.lastname || p.lname ? " " + (p.lastName || p.lastname || p.lname) : "");
+  return (
+    p.name ||
+    p.displayName ||
+    p.fullName ||
+    p.playerName ||
+    (firstLast.trim() || null) ||
+    (p.nickname || null) ||
+    (p.player || null) ||
+    (p.player_id_name || null) ||
+    (p.PlayerName || null) ||
+    (p.Player || null) ||
+    (p.Name || null) ||
+    (p.n || null) ||
+    (p.title || null) ||
+    (p.label || null) ||
+    (p.text || null) ||
+    (p.id != null ? String(p.id) : "(unknown)")
+  );
 }
 
 /**
