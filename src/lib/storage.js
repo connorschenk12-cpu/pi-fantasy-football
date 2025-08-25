@@ -34,9 +34,7 @@ export function emptyRoster() {
   return r;
 }
 
-/** Canonicalize any id to a string (so Map keys match consistently) */
-// storage.js — replace your asId with this:
-// storage.js — replace your asId with this:
+/** Canonicalize any id to a trimmed string (so Map keys match consistently) */
 export function asId(x) {
   if (x == null) return null;
   if (typeof x === "object" && x.id != null) return String(x.id).trim();
@@ -194,92 +192,121 @@ export async function joinLeague({ leagueId, username }) {
    PLAYERS
    ========================================================= */
 
+/** Very tolerant display name resolver */
 export function playerDisplay(p) {
   if (!p) return "(empty)";
-  // Try lots of common name fields before falling back
-  const firstLast =
-    (p.firstName || p.firstname || p.fname || "") +
-    (p.lastName || p.lastname || p.lname ? " " + (p.lastName || p.lastname || p.lname) : "");
+  const first = p.firstName || p.firstname || p.fname || "";
+  const last = p.lastName || p.lastname || p.lname || "";
+  const firstLast = `${first}${last ? " " + last : ""}`.trim();
+
   return (
     p.name ||
     p.displayName ||
     p.fullName ||
     p.playerName ||
-    (firstLast.trim() || null) ||
-    (p.nickname || null) ||
-    (p.player || null) ||
-    (p.player_id_name || null) ||
-    (p.PlayerName || null) ||
-    (p.Player || null) ||
-    (p.Name || null) ||
-    (p.n || null) ||
-    (p.title || null) ||
-    (p.label || null) ||
-    (p.text || null) ||
+    firstLast ||
+    p.nickname ||
+    p.PlayerName ||
+    p.Name ||
+    p.n ||
+    p.title ||
+    p.label ||
+    p.text ||
     (p.id != null ? String(p.id) : "(unknown)")
   );
 }
 
+/** Normalize a raw player row into the shape we expect everywhere */
+function normalizePlayer(raw) {
+  const id = asId(raw.id);
+  const position = (raw.position || raw.pos || "").toString().toUpperCase() || null;
+  const team = raw.team || raw.nflTeam || raw.proTeam || null;
+
+  // Compute a robust display name
+  const name =
+    raw.name ||
+    raw.displayName ||
+    raw.fullName ||
+    raw.playerName ||
+    (() => {
+      const f = raw.firstName || raw.firstname || raw.fname || "";
+      const l = raw.lastName || raw.lastname || raw.lname || "";
+      const fl = `${f}${l ? " " + l : ""}`.trim();
+      return fl || null;
+    })() ||
+    (typeof raw.id === "string" ? raw.id : null);
+
+  return { ...raw, id, name, position, team };
+}
+
 /**
  * Returns players for a league (league-scoped first, then global),
- * and de-dupes by id and by (name|team|position) signature.
- */export async function listPlayers({ leagueId }) {
-  const raw = [];
+ * and de-dupes:
+ *   1) by canonical id
+ *   2) by display signature (name|team|position)
+ *
+ * This matches how Players/Matchups resolve names, so My Team will see the same names.
+ */
+export async function listPlayers({ leagueId }) {
+  const pool = [];
 
   // league-scoped first
   if (leagueId) {
     const lpRef = collection(db, "leagues", leagueId, "players");
     const lSnap = await getDocs(lpRef);
-    lSnap.forEach((d) => raw.push({ id: d.id, ...d.data() }));
+    lSnap.forEach((d) => pool.push({ id: d.id, ...d.data() }));
   }
 
   // global fallback
-  if (raw.length === 0) {
+  if (pool.length === 0) {
     const gSnap = await getDocs(collection(db, "players"));
-    gSnap.forEach((d) => raw.push({ id: d.id, ...d.data() }));
+    gSnap.forEach((d) => pool.push({ id: d.id, ...d.data() }));
   }
 
   // normalize
-  const normalized = raw.map((p) => {
-    const id = asId(p.id);
-    const position = (p.position || p.pos || "").toString().toUpperCase() || null;
-    const name =
-      p.name ??
-      p.fullName ??
-      p.playerName ??
-      (typeof p.id === "string" ? p.id : null);
-    const team = p.team || p.nflTeam || p.proTeam || null;
-    return { ...p, id, name, position, team };
-  });
+  const normalized = pool.map(normalizePlayer);
 
-  // helper to decide which copy is "better"
-  const better = (a, b) => {
-    // prefer one with a real name
-    if (!!a?.name !== !!b?.name) return a?.name ? a : b;
-    // then prefer one with more fields
-    const aFields = a ? Object.keys(a).length : 0;
-    const bFields = b ? Object.keys(b).length : 0;
-    return aFields >= bFields ? a : b;
-  };
-
-  // de-dupe by id, prefer copy with a usable name
+  // 1) de-dupe by id
   const byId = new Map();
   for (const p of normalized) {
-    if (!p.id) continue;
-    const cur = byId.get(p.id);
-    byId.set(p.id, cur ? better(cur, p) : p);
+    const id = asId(p.id);
+    if (!id) continue;
+    if (!byId.has(id)) byId.set(id, p);
   }
 
-  // de-dupe by display signature, prefer copy with a usable name
+  // 2) de-dupe by display signature
   const byKey = new Map();
   for (const p of byId.values()) {
-    const key =
-      `${(p.name || "").toLowerCase()}|${(p.team || "").toLowerCase()}|${(p.position || "").toLowerCase()}`;
-    const cur = byKey.get(key);
-    byKey.set(key, cur ? better(cur, p) : p);
+    const key = `${(p.name || "").toLowerCase()}|${(p.team || "").toLowerCase()}|${(p.position || "").toLowerCase()}`;
+    if (!byKey.has(key)) byKey.set(key, p);
   }
 
   return Array.from(byKey.values());
+}
+
+/** Build all reasonable keys that might reference this player */
+function indexKeysFor(p) {
+  const base = [
+    p?.id,
+    p?.playerId,
+    p?.player_id,
+    p?.pid,
+    p?.sleeperId,
+    p?.sleeper_id,
+    p?.espnId,
+    p?.yahooId,
+    p?.gsisId,
+    p?.externalId,
+  ]
+    .map(asId)
+    .filter(Boolean);
+
+  const out = new Set(base);
+  for (const k of base) {
+    const n = Number(k);
+    if (Number.isFinite(n)) out.add(String(n));
+  }
+  return Array.from(out);
 }
 
 /** Map of players keyed by many alternate ids so lookups always succeed */
@@ -318,15 +345,16 @@ export async function seedPlayersToGlobal(players = []) {
   players.forEach((raw) => {
     const id = asId(raw.id);
     if (!id) return;
+    const norm = normalizePlayer(raw);
     batch.set(
       doc(db, "players", id),
       {
         id,
-        name: playerDisplay(raw),
-        position: (raw.position || raw.pos || "").toString().toUpperCase(),
-        team: raw.team || raw.nflTeam || raw.proTeam || null,
-        projections: raw.projections || null,
-        matchups: raw.matchups || null,
+        name: playerDisplay(norm),
+        position: norm.position,
+        team: norm.team,
+        projections: norm.projections || null,
+        matchups: norm.matchups || null,
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -344,15 +372,16 @@ export async function seedPlayersToLeague(leagueId, players = []) {
   players.forEach((raw) => {
     const id = asId(raw.id);
     if (!id) return;
+    const norm = normalizePlayer(raw);
     batch.set(
       doc(db, "leagues", leagueId, "players", id),
       {
         id,
-        name: playerDisplay(raw),
-        position: (raw.position || raw.pos || "").toString().toUpperCase(),
-        team: raw.team || raw.nflTeam || raw.proTeam || null,
-        projections: raw.projections || null,
-        matchups: raw.matchups || null,
+        name: playerDisplay(norm),
+        position: norm.position,
+        team: norm.team,
+        projections: norm.projections || null,
+        matchups: norm.matchups || null,
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -599,7 +628,7 @@ export async function setDraftStatus({ leagueId, status }) {
   await updateDoc(doc(db, "leagues", leagueId), { "draft.status": status });
 }
 
-/** Perform a draft pick */
+/** Perform a draft pick (handles bench fallback if slot full) */
 export async function draftPick({ leagueId, username, playerId, playerPosition, slot }) {
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
@@ -613,14 +642,17 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   const onClock = order[ptr] || null;
   if (onClock !== username) throw new Error("Not your turn");
 
+  // Deny duplicate claims
   const claimRef = doc(db, "leagues", leagueId, "claims", asId(playerId));
   const claimSnap = await getDoc(claimRef);
   if (claimSnap.exists()) throw new Error("Player already owned");
 
+  // Ensure team
   const teamRef = await ensureTeam({ leagueId, username });
   const teamSnap = await getDoc(teamRef);
   const team = teamSnap.exists() ? teamSnap.data() : { roster: emptyRoster(), bench: [] };
 
+  // Decide target slot
   const rosterCopy = { ...(team.roster || emptyRoster()) };
   let targetSlot = slot;
   if (!targetSlot) {
@@ -630,14 +662,17 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
     else targetSlot = defaultSlotForPosition(pos, rosterCopy);
   }
 
+  // If chosen slot filled, send to bench
   let sendToBench = false;
   if (targetSlot !== "FLEX" && rosterCopy[targetSlot]) sendToBench = true;
   if (targetSlot === "FLEX" && rosterCopy.FLEX) sendToBench = true;
 
   const batch = writeBatch(db);
 
+  // claim
   batch.set(claimRef, { claimedBy: username, at: serverTimestamp() }, { merge: true });
 
+  // put on team
   const newTeam = {
     roster: { ...(team.roster || emptyRoster()) },
     bench: Array.isArray(team.bench) ? [...team.bench] : [],
@@ -646,6 +681,7 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   else newTeam.roster[targetSlot] = asId(playerId);
   batch.set(teamRef, newTeam, { merge: true });
 
+  // advance pointer (snake) based on global pick index
   const teamsCount = Math.max(1, Array.isArray(order) ? order.length : 1);
   const prevPicks = Number(league?.draft?.picksTaken || 0);
   const picksTaken = prevPicks + 1;
@@ -671,6 +707,7 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   await batch.commit();
 }
 
+// pick best available (by projections) for the team on clock
 export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   const league = await getLeague(leagueId);
   if (!canDraft(league)) return;
@@ -692,6 +729,7 @@ export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   await draftPick({ leagueId, username, playerId: pick.id, playerPosition: pick.position, slot: null });
 }
 
+// auto-draft on clock expiry
 export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
@@ -892,6 +930,7 @@ export async function getScheduleAllWeeks(leagueId) {
   return arr;
 }
 
+/** Ensure schedule exists (or recreate). Writes week-1..N docs. */
 export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate = false }) {
   if (!leagueId) throw new Error("Missing leagueId");
   const members = await listMemberUsernames(leagueId);
@@ -904,7 +943,7 @@ export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate
   const exists = !existing.empty;
 
   if (exists && !recreate) {
-    return { weeksCreated: [] };
+    return { weeksCreated: [] }; // already there
   }
 
   await writeSchedule(leagueId, schedule);
@@ -957,6 +996,7 @@ export function leagueIsFree(league) {
 }
 
 export function memberCanDraft(league, username) {
+  // block if entry required and not paid
   if (league?.entry?.enabled && !hasPaidEntry(league, username)) return false;
   return true;
 }
