@@ -17,7 +17,6 @@ import {
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
-  const [showDebug, setShowDebug] = useState(false);
   const week = Number(currentWeek || 1);
 
   // Ensure team + subscribe
@@ -42,6 +41,9 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
       try {
         const map = await listPlayersMap({ leagueId });
         if (alive) setPlayersMap(map || new Map());
+        // HARD DEBUG LOGS
+        console.log("[MyTeam] playersMap size:", map?.size);
+        console.log("[MyTeam] sample keys:", Array.from(map?.keys?.() || []).slice(0, 20));
       } catch (e) {
         console.error("listPlayersMap:", e);
       }
@@ -90,8 +92,11 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
+  // If lookup fails, show the raw id so we can see the mismatch
   function nameOf(p, fallbackId) {
-    return p ? playerDisplay(p) : fallbackId ? `(unknown: ${fallbackId})` : "(empty)";
+    if (p) return playerDisplay(p);
+    if (fallbackId) return `(unknown: ${fallbackId})`;
+    return "(empty)";
   }
 
   function posOf(p) {
@@ -111,23 +116,26 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return (Number.isFinite(val) ? val : 0).toFixed(1);
   }
 
-  // Simple inline debug panel (no external import)
-  function DebugBlock() {
-    // collect all roster/bench ids we tried
+  // ALWAYS-ON inline debug so you can see what ids are missing
+  const debugMissing = useMemo(() => {
     const tried = [
       ...starters.map((r) => r.id).filter(Boolean),
       ...benchRows.map((r) => r.id).filter(Boolean),
     ];
     const missing = tried.filter((id) => !playersMap.has(id));
     const exampleKeys = Array.from(playersMap.keys()).slice(0, 20);
+    return { missing, exampleKeys };
+  }, [starters, benchRows, playersMap]);
 
-    return (
-      <div style={{ marginTop: 12, padding: 12, border: "1px dashed #bbb", borderRadius: 6 }}>
+  return (
+    <div>
+      {/* DEBUG PANEL (always shown) */}
+      <div style={{ marginBottom: 12, padding: 12, border: "1px dashed #bbb", borderRadius: 6, background: "#fafafa" }}>
         <div style={{ fontWeight: 600, marginBottom: 6 }}>Debug</div>
         <div style={{ fontSize: 12, color: "#333" }}>
           <div>playersMap size: {playersMap.size}</div>
-          <div>example player ids (first 20): {exampleKeys.join(", ") || "(none)"}</div>
-          <div>missing ids encountered: {missing.join(", ") || "(none)"}</div>
+          <div>example ids (first 20): {debugMissing.exampleKeys.join(", ") || "(none)"}</div>
+          <div>missing ids encountered: {debugMissing.missing.join(", ") || "(none)"}</div>
         </div>
         <div style={{ marginTop: 8 }}>
           <table width="100%" cellPadding="4" style={{ borderCollapse: "collapse", fontSize: 12 }}>
@@ -166,18 +174,9 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </table>
         </div>
       </div>
-    );
-  }
 
-  return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h3 style={{ margin: 0 }}>Starters — Week {week}</h3>
-        <button onClick={() => setShowDebug((v) => !v)}>
-          {showDebug ? "Hide Debug" : "Show Debug"}
-        </button>
-      </div>
-
+      {/* Starters */}
+      <h3>Starters — Week {week}</h3>
       <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse", marginTop: 8 }}>
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
@@ -211,6 +210,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </tbody>
       </table>
 
+      {/* Bench */}
       <h3 style={{ marginTop: 18 }}>Bench</h3>
       <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
         <thead>
@@ -256,8 +256,6 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           )}
         </tbody>
       </table>
-
-      {showDebug && <DebugBlock />}
     </div>
   );
 }
