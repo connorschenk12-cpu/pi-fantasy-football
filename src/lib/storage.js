@@ -266,7 +266,13 @@ export function computeTeamPointsProjected({ roster, week, playersMap }) {
   });
   return { lines, total: Math.round(total * 10) / 10 };
 }
-
+// Back-compat convenience: choose actual if a statsMap was provided, else projected.
+export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
+  if (statsMap && typeof statsMap.size === "number" && statsMap.size > 0) {
+    return computeTeamPointsActual({ roster, week, statsMap });
+  }
+  return computeTeamPointsProjected({ roster, week, playersMap });
+}
 /* ============================================================================
    CLAIMS (ownership)
    ============================================================================ */
