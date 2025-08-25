@@ -1,28 +1,24 @@
 /* eslint-disable no-console */
+// src/components/PlayersList.js
 import React, { useEffect, useMemo, useState } from "react";
 import {
   listPlayers,
   playerDisplay,
   projForWeek,
   opponentForWeek,
-  listenLeague,
   addDropPlayer,
+  listenLeagueClaims,
 } from "../lib/storage";
 
-export default function PlayersList({ leagueId, currentWeek, username }) {
-  const [league, setLeague] = useState(null);
+export default function PlayersList({ leagueId, league, username, currentWeek }) {
   const [players, setPlayers] = useState([]);
   const [q, setQ] = useState("");
   const [pos, setPos] = useState("ALL");
   const [teamFilter, setTeamFilter] = useState("ALL");
   const [week, setWeek] = useState(Number(currentWeek || 1));
+  const [claims, setClaims] = useState(new Map());
 
-  useEffect(() => {
-    if (!leagueId) return;
-    const unsub = listenLeague(leagueId, setLeague);
-    return () => unsub && unsub();
-  }, [leagueId]);
-
+  // Load players
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -33,14 +29,27 @@ export default function PlayersList({ leagueId, currentWeek, username }) {
         console.error("listPlayers error:", e);
       }
     })();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, [leagueId]);
 
-  useEffect(() => setWeek(Number(currentWeek || 1)), [currentWeek]);
+  // Claims map
+  useEffect(() => {
+    if (!leagueId) return;
+    const unsub = listenLeagueClaims(leagueId, setClaims);
+    return () => unsub && unsub();
+  }, [leagueId]);
+
+  useEffect(() => {
+    setWeek(Number(currentWeek || 1));
+  }, [currentWeek]);
 
   const teams = useMemo(() => {
     const s = new Set();
-    (players || []).forEach((p) => { if (p.team) s.add(p.team); });
+    (players || []).forEach((p) => {
+      if (p.team) s.add(p.team);
+    });
     return ["ALL", ...Array.from(s).sort()];
   }, [players]);
 
@@ -58,22 +67,22 @@ export default function PlayersList({ leagueId, currentWeek, username }) {
       .sort((a, b) => (projForWeek(b, week) - projForWeek(a, week)));
   }, [players, q, pos, teamFilter, week]);
 
-  const addDropDisabled = Boolean(league?.settings?.lockAddDuringDraft && league?.draft?.status === "live");
+  // Can user add/drop? (disabled during draft if league.settings.lockAddDuringDraft is true)
+  const canManage =
+    !!username &&
+    !!league &&
+    !(league?.settings?.lockAddDuringDraft && league?.draft?.status === "live");
 
-  const onAdd = async (p) => {
+  async function handleAdd(pId) {
+    if (!canManage) return;
     try {
-      if (!leagueId || !username) throw new Error("Login to manage");
-      if (addDropDisabled) {
-        alert("Add/Drop is disabled during the draft.");
-        return;
-      }
-      await addDropPlayer({ leagueId, username, addId: p.id, dropId: null });
-      alert(`Added ${playerDisplay(p)} to your bench`);
+      await addDropPlayer({ leagueId, username, addId: pId, dropId: null });
+      alert("Added to your bench.");
     } catch (e) {
-      console.error(e);
+      console.error("addDropPlayer(add):", e);
       alert(String(e?.message || e));
     }
-  };
+  }
 
   return (
     <div>
@@ -95,12 +104,16 @@ export default function PlayersList({ leagueId, currentWeek, username }) {
         </select>
         <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}>
           {teams.map((t) => (
-            <option key={t} value={t}>{t}</option>
+            <option key={t} value={t}>
+              {t}
+            </option>
           ))}
         </select>
         <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
           {Array.from({ length: 18 }).map((_, i) => (
-            <option key={i + 1} value={i + 1}>Week {i + 1}</option>
+            <option key={i + 1} value={i + 1}>
+              Week {i + 1}
+            </option>
           ))}
         </select>
       </div>
@@ -108,32 +121,44 @@ export default function PlayersList({ leagueId, currentWeek, username }) {
       <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
-            <th>Name</th><th>Pos</th><th>Team</th><th>Opp</th><th>Proj (W{week})</th><th></th>
+            <th>Name</th>
+            <th>Pos</th>
+            <th>Team</th>
+            <th>Opp</th>
+            <th>Proj (W{week})</th>
+            {username && <th>Manage</th>}
           </tr>
         </thead>
         <tbody>
-          {filtered.map((p) => (
-            <tr key={p.id} style={{ borderBottom: "1px solid #f1f1f1" }}>
-              <td>{playerDisplay(p)}</td>
-              <td>{p.position || "-"}</td>
-              <td>{p.team || "-"}</td>
-              <td>{opponentForWeek(p, week) || "-"}</td>
-              <td>{projForWeek(p, week).toFixed(1)}</td>
-              <td>
-                {username ? (
-                  <button disabled={addDropDisabled} onClick={() => onAdd(p)}>
-                    {addDropDisabled ? "Draft in progress" : "Add"}
-                  </button>
-                ) : (
-                  <span style={{ color: "#999" }}>Login to manage</span>
+          {filtered.map((p) => {
+            const claimedBy = claims.get(p.id)?.claimedBy || null;
+            return (
+              <tr key={p.id} style={{ borderBottom: "1px solid #f1f1f1" }}>
+                <td>{playerDisplay(p)}</td>
+                <td>{p.position || "-"}</td>
+                <td>{p.team || "-"}</td>
+                <td>{opponentForWeek(p, week) || "-"}</td>
+                <td>{projForWeek(p, week).toFixed(1)}</td>
+                {username && (
+                  <td>
+                    {claimedBy ? (
+                      <span style={{ color: "#999" }}>Owned by {claimedBy}</span>
+                    ) : canManage ? (
+                      <button onClick={() => handleAdd(p.id)}>Add</button>
+                    ) : (
+                      <span style={{ color: "#999" }}>Locked (draft)</span>
+                    )}
+                  </td>
                 )}
+              </tr>
+            );
+          })}
+          {filtered.length === 0 && (
+            <tr>
+              <td colSpan={username ? 6 : 5} style={{ color: "#999", paddingTop: 12 }}>
+                No players match your filters. Add players to Firestore or clear filters.
               </td>
             </tr>
-          ))}
-          {filtered.length === 0 && (
-            <tr><td colSpan={6} style={{ color: "#999", paddingTop: 12 }}>
-              No players match your filters.
-            </td></tr>
           )}
         </tbody>
       </table>
