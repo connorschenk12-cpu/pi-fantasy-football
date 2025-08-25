@@ -194,6 +194,7 @@ export async function joinLeague({ leagueId, username }) {
 
 export function playerDisplay(p) {
   if (!p) return "(empty)";
+  // Try lots of common name fields before falling back
   const firstLast =
     (p.firstName || p.firstname || p.fname || "") +
     (p.lastName || p.lastname || p.lname ? " " + (p.lastName || p.lastname || p.lname) : "");
@@ -217,20 +218,27 @@ export function playerDisplay(p) {
   );
 }
 
+/**
+ * Returns players for a league (league-scoped first, then global),
+ * and de-dupes by id and by (name|team|position) signature.
+ */
 export async function listPlayers({ leagueId }) {
   const raw = [];
 
+  // league-scoped first
   if (leagueId) {
     const lpRef = collection(db, "leagues", leagueId, "players");
     const lSnap = await getDocs(lpRef);
     lSnap.forEach((d) => raw.push({ id: d.id, ...d.data() }));
   }
 
+  // global fallback
   if (raw.length === 0) {
     const gSnap = await getDocs(collection(db, "players"));
     gSnap.forEach((d) => raw.push({ id: d.id, ...d.data() }));
   }
 
+  // normalize
   const normalized = raw.map((p) => {
     const id = asId(p.id);
     const position = (p.position || p.pos || "").toString().toUpperCase() || null;
@@ -243,12 +251,14 @@ export async function listPlayers({ leagueId }) {
     return { ...p, id, name, position, team };
   });
 
+  // de-dupe by id
   const byId = new Map();
   for (const p of normalized) {
     if (!p.id) continue;
     if (!byId.has(p.id)) byId.set(p.id, p);
   }
 
+  // de-dupe by display signature
   const byKey = new Map();
   for (const p of byId.values()) {
     const key =
@@ -259,23 +269,57 @@ export async function listPlayers({ leagueId }) {
   return Array.from(byKey.values());
 }
 
+/** Build all reasonable keys that might reference this player */
+function indexKeysFor(p) {
+  const base = [
+    p?.id,
+    p?.playerId,
+    p?.player_id,
+    p?.pid,
+    p?.sleeperId,
+    p?.sleeper_id,
+    p?.espnId,
+    p?.yahooId,
+    p?.gsisId,
+    p?.externalId,
+  ].map(asId).filter(Boolean);
+
+  const out = new Set(base);
+  // also store numeric<->string flips
+  for (const k of base) {
+    const n = Number(k);
+    if (Number.isFinite(n)) out.add(String(n));
+  }
+  return Array.from(out);
+}
+
+/** Map of players keyed by many alternate ids so lookups always succeed */
 export async function listPlayersMap({ leagueId }) {
   const arr = await listPlayers({ leagueId });
   const map = new Map();
-
   for (const p of arr) {
-    const primary = asId(p?.id);
-    if (primary != null) {
-      map.set(primary, p);
-      const asNum = Number(primary);
-      if (!Number.isNaN(asNum)) map.set(asNum, p);
-    }
-    if (typeof p?.id === "number") {
-      map.set(String(p.id), p);
+    for (const k of indexKeysFor(p)) {
+      if (!map.has(k)) map.set(k, p);
     }
   }
-
   return map;
+}
+
+/** Direct fetch by canonical doc id (league-scoped first, then global) */
+export async function getPlayerById({ leagueId, id }) {
+  const pid = asId(id);
+  if (!pid) return null;
+
+  if (leagueId) {
+    const lref = doc(db, "leagues", leagueId, "players", pid);
+    const ls = await getDoc(lref);
+    if (ls.exists()) return { id: ls.id, ...ls.data() };
+  }
+  const gref = doc(db, "players", pid);
+  const gs = await getDoc(gref);
+  if (gs.exists()) return { id: gs.id, ...gs.data() };
+
+  return null;
 }
 
 export async function seedPlayersToGlobal(players = []) {
@@ -338,27 +382,10 @@ export async function setPlayerName({ leagueId, id, name }) {
     : doc(db, "players", pid);
   await updateDoc(ref, { name, updatedAt: serverTimestamp() });
 }
-// Fetch a single player by id; prefer league-scoped, then global.
-export async function getPlayerById({ leagueId, id }) {
-  const pid = asId(id);
-  if (!pid) return null;
-  try {
-    if (leagueId) {
-      const s = await getDoc(doc(db, "leagues", leagueId, "players", pid));
-      if (s.exists()) return { id: s.id, ...s.data() };
-    }
-    const g = await getDoc(doc(db, "players", pid));
-    return g.exists() ? { id: g.id, ...g.data() } : null;
-  } catch (e) {
-    console.warn("getPlayerById failed:", e);
-    return null;
-  }
-}
+
 /* =========================================================
    PROJECTED & ACTUAL POINTS
    ========================================================= */
-
-// (rest of file unchanged … same as your last version)
 
 export function projForWeek(p, week) {
   const w = String(week);
@@ -423,10 +450,9 @@ export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
   const lines = [];
   let total = 0;
   (ROSTER_SLOTS || []).forEach((slot) => {
-    const pid = roster?.[slot] || null;
-    // IMPORTANT: coerce; handle {id} objects too
-    const key = asId(pid);
-    const p = key ? playersMap.get(key) : null;
+    const pidRaw = roster?.[slot] || null;
+    const pid = asId(pidRaw);
+    const p = pid ? playersMap.get(pid) : null;
     const actual = p ? actualPointsForPlayer(p, week, statsMap) : 0;
     const projected = p ? projForWeek(p, week) : 0;
     const points = actual || projected || 0;
@@ -584,6 +610,7 @@ export async function setDraftStatus({ leagueId, status }) {
   await updateDoc(doc(db, "leagues", leagueId), { "draft.status": status });
 }
 
+/** Perform a draft pick */
 export async function draftPick({ leagueId, username, playerId, playerPosition, slot }) {
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
@@ -771,6 +798,7 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   await batch.commit();
 }
 
+// Add/Drop (add to bench). Blocked during draft if locked.
 export async function addDropPlayer({ leagueId, username, addId, dropId }) {
   const league = await getLeague(leagueId);
   if (league?.settings?.lockAddDuringDraft && draftActive(league)) {
