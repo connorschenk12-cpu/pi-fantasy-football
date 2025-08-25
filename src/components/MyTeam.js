@@ -16,6 +16,35 @@ import {
   hasPaidEntry,
 } from "../lib/storage";
 
+import { hasPaidEntry } from "../lib/storage"; // already exported
+
+function PaymentsGate({ league, leagueId, username }) {
+  if (!league?.entry?.enabled) return null;
+  const paid = hasPaidEntry(league, username);
+
+  // Your real Pi checkout URL (or in-app route that opens provider UI)
+  const checkoutUrl = `/payments?league=${encodeURIComponent(leagueId)}`;
+
+  return (
+    <div style={{ margin: "12px 0", padding: 10, border: "1px solid #eee", borderRadius: 8 }}>
+      {paid ? (
+        <div style={{ color: "#2a9d8f" }}>✅ Entry paid</div>
+      ) : (
+        <>
+          <div style={{ marginBottom: 8 }}>
+            Entry Fee: <b>{league?.entry?.amountPi || 0} π</b>
+          </div>
+          <a href={checkoutUrl}>
+            <button>Go to Payments</button>
+          </a>
+          <div style={{ color: "#888", marginTop: 6, fontSize: 12 }}>
+            Once payment completes, the provider will call our webhook and your entry will be marked paid.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
