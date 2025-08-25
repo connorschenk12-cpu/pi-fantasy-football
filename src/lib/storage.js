@@ -338,7 +338,22 @@ export async function setPlayerName({ leagueId, id, name }) {
     : doc(db, "players", pid);
   await updateDoc(ref, { name, updatedAt: serverTimestamp() });
 }
-
+// Fetch a single player by id; prefer league-scoped, then global.
+export async function getPlayerById({ leagueId, id }) {
+  const pid = asId(id);
+  if (!pid) return null;
+  try {
+    if (leagueId) {
+      const s = await getDoc(doc(db, "leagues", leagueId, "players", pid));
+      if (s.exists()) return { id: s.id, ...s.data() };
+    }
+    const g = await getDoc(doc(db, "players", pid));
+    return g.exists() ? { id: g.id, ...g.data() } : null;
+  } catch (e) {
+    console.warn("getPlayerById failed:", e);
+    return null;
+  }
+}
 /* =========================================================
    PROJECTED & ACTUAL POINTS
    ========================================================= */
