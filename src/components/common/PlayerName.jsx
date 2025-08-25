@@ -1,124 +1,98 @@
-// src/components/common/PlayerName.jsx
 /* eslint-disable no-console */
-import React, { useEffect, useState } from "react";
-import { doc, getDoc } from "firebase/firestore";
-import { db } from "../../lib/firebase";
+// src/components/common/PlayerName.jsx
+import React, { useEffect, useMemo, useState } from "react";
+import { asId, playerDisplay, listPlayersMap } from "../../lib/storage";
 
 /**
- * Props:
- *   id          (string|number) player id
- *   leagueId    (string) optional; if provided we try league-scoped players first
- *   fallback    (string|ReactNode) optional fallback UI while loading / missing
- *   preferShort (boolean) if true, show short/last name when available
+ * Usage examples:
+ *   <PlayerName player={playerObj} />
+ *   <PlayerName playerId={id} playersMap={playersMap} />
+ *   <PlayerName playerId={id} leagueId={leagueId} />  // will lazy-load a map
  *
- * This component is intentionally tiny and self-contained so you can use it anywhere.
- * It memo-caches lookups per session to avoid repeat reads for the same id.
+ * Props:
+ * - player:     full player object (optional)
+ * - playerId:   id (string/number/object-with-id) if you don't have the object
+ * - playersMap: Map of id -> player (optional; preferred for performance)
+ * - leagueId:   if playersMap isn't provided, we can lazy-load one when this is given
+ * - fallback:   text to show if name can't be resolved (default "(unknown)")
+ * - showId:     if true, include the id after the name (useful for debugging)
  */
+export default function PlayerName({
+  player,
+  playerId,
+  playersMap,
+  leagueId,
+  fallback = "(unknown)",
+  showId = false,
+}) {
+  const pid = useMemo(() => asId(player?.id ?? playerId), [player, playerId]);
 
-// Simple in-memory cache: { "<leagueId>|<id>": { name, team, position } }
-const nameCache = new Map();
-
-function idKey(leagueId, id) {
-  const pid = String(id ?? "").trim();
-  const lid = String(leagueId ?? "").trim();
-  return `${lid}|${pid}`;
-}
-
-async function fetchNameOnce(leagueId, id) {
-  const key = idKey(leagueId, id);
-  if (nameCache.has(key)) return nameCache.get(key);
-
-  const pid = String(id ?? "").trim();
-  if (!pid) {
-    nameCache.set(key, null);
-    return null;
-  }
-
-  // 1) league-scoped player doc
-  if (leagueId) {
-    try {
-      const leagueDoc = await getDoc(doc(db, "leagues", leagueId, "players", pid));
-      if (leagueDoc.exists()) {
-        const d = leagueDoc.data();
-        const rec = normalizePlayerRecord(pid, d);
-        nameCache.set(key, rec);
-        return rec;
-      }
-    } catch (e) {
-      // Non-fatal: just fall through to global
-      console.warn("[PlayerName] league lookup failed:", e);
-    }
-  }
-
-  // 2) global players/{id}
-  try {
-    const globalDoc = await getDoc(doc(db, "players", pid));
-    if (globalDoc.exists()) {
-      const d = globalDoc.data();
-      const rec = normalizePlayerRecord(pid, d);
-      nameCache.set(key, rec);
-      return rec;
-    }
-  } catch (e) {
-    console.warn("[PlayerName] global lookup failed:", e);
-  }
-
-  // 3) give up
-  nameCache.set(key, null);
-  return null;
-}
-
-function normalizePlayerRecord(id, data) {
-  // Try common name fields; fall back to the id
-  const name =
-    data?.name ||
-    data?.fullName ||
-    data?.playerName ||
-    data?.displayName ||
-    String(id);
-
-  // Provide a "short" name if you want to show condensed format elsewhere
-  // e.g., "Mahomes P." / "P. Mahomes" — here we’ll use last name if possible.
-  let short = name;
-  const parts = String(name).split(/\s+/).filter(Boolean);
-  if (parts.length > 1) short = parts[parts.length - 1];
-  // Expose some helpful extras, but only `name` is required by <PlayerName />
-  return {
-    id: String(id),
-    name,
-    shortName: short,
-    team: data?.team ?? data?.nflTeam ?? "",
-    position: data?.position ?? data?.pos ?? "",
-  };
-}
-
-export default function PlayerName({ id, leagueId, fallback = null, preferShort = false }) {
-  const [rec, setRec] = useState(() => nameCache.get(idKey(leagueId, id)) ?? undefined);
-
+  // If a map isn't provided, we can (optionally) fetch one when leagueId is known
+  const [localMap, setLocalMap] = useState(null);
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const key = idKey(leagueId, id);
-      if (nameCache.has(key)) {
-        if (!cancelled) setRec(nameCache.get(key));
-        return;
-      }
-      const r = await fetchNameOnce(leagueId, id);
-      if (!cancelled) setRec(r);
-    })();
+    let alive = true;
+    if (!playersMap && leagueId) {
+      (async () => {
+        try {
+          const map = await listPlayersMap({ leagueId });
+          if (alive) setLocalMap(map || new Map());
+        } catch (e) {
+          console.error("PlayerName listPlayersMap failed:", e);
+          if (alive) setLocalMap(new Map());
+        }
+      })();
+    }
     return () => {
-      cancelled = true;
+      alive = false;
     };
-  }, [leagueId, id]);
+  }, [playersMap, leagueId]);
 
-  if (rec === undefined) {
-    // loading state
-    return fallback ?? <span style={{ color: "#999" }}>…</span>;
-  }
-  if (!rec) {
-    // unknown
-    return <span style={{ color: "#999" }}>{String(id || "(unknown)")}</span>;
-  }
+  const map = playersMap || localMap;
 
-  return <span>{preferShort ? rec.shortName : rec.name}</span>;
+  // Resolve a player object from props or map (try a few common key variants)
+  const resolved = useMemo(() => {
+    if (player && (player.name || player.fullName || player.playerName || player.id != null)) {
+      return player;
+    }
+    if (!map || !pid) return null;
+
+    // Primary lookup by canonical id
+    let p = map.get(pid);
+    if (p) return p;
+
+    // Try simple numeric/string flip (some rosters store numbers; docs keyed by strings)
+    const num = Number(pid);
+    if (Number.isFinite(num)) {
+      p = map.get(String(num)) || map.get(num);
+      if (p) return p;
+    }
+
+    // Last resort: iterate and match by .id equality after canonicalization
+    for (const v of map.values()) {
+      if (asId(v?.id) === pid) return v;
+    }
+    return null;
+  }, [player, pid, map]);
+
+  const name = useMemo(() => {
+    const n = playerDisplay(resolved || (pid ? { id: pid } : null));
+    return n && n.trim() ? n : fallback;
+  }, [resolved, pid, fallback]);
+
+  // Helpful tooltip for quick debugging in UI
+  const title = useMemo(() => {
+    if (!resolved) return pid ? `id: ${pid}` : "";
+    const parts = [];
+    if (resolved.position) parts.push(resolved.position);
+    if (resolved.team) parts.push(resolved.team);
+    if (pid) parts.push(`id:${pid}`);
+    return parts.join(" • ");
+  }, [resolved, pid]);
+
+  return (
+    <span title={title}>
+      {name}
+      {showId && pid ? <span style={{ color: "#999" }}> ({pid})</span> : null}
+    </span>
+  );
 }
