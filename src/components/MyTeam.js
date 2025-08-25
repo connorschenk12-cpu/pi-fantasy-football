@@ -5,18 +5,85 @@ import {
   ROSTER_SLOTS,
   listenTeam,
   ensureTeam,
-  listPlayersMap,
+  listPlayers,       // ← use the same source as Players tab
   playerDisplay,
   projForWeek,
   opponentForWeek,
   moveToStarter,
   moveToBench,
-  asId,
 } from "../lib/storage";
+
+// Build a tolerant index for many possible id shapes
+function buildPlayerIndex(players = []) {
+  const idx = new Map();
+  const put = (k, p) => {
+    if (k == null) return;
+    const key = String(k).trim();
+    if (!key) return;
+    if (!idx.has(key)) idx.set(key, p);
+  };
+
+  for (const p of players) {
+    // canonical and numeric forms
+    put(p.id, p);
+    if (p?.id != null && !Number.isNaN(Number(p.id))) put(String(Number(p.id)), p);
+
+    // common alternates we’ve seen in data
+    put(p.playerId, p);
+    put(p.pid, p);
+    put(p.espnId, p);
+    put(p.yahooId, p);
+    put(p.sleeperId, p);
+    put(p.externalId, p);
+
+    // sometimes roster stores {id: "..."} objects; this lets us match JSONified forms
+    if (typeof p.id === "object" && p.id?.id != null) put(p.id.id, p);
+  }
+  return idx;
+}
+
+// Try to resolve any roster value (string/number/object) to a player using the index.
+// Falls back to a slow scan once (rare).
+function resolvePlayer(raw, idx, players) {
+  if (raw == null) return null;
+
+  // (a) direct try
+  const direct = idx.get(String(raw));
+  if (direct) return direct;
+
+  // (b) number/string coercion
+  const coerce = idx.get(String(Number(raw)));
+  if (coerce) return coerce;
+
+  // (c) object like {id: "..."}
+  if (typeof raw === "object" && raw.id != null) {
+    const objHit =
+      idx.get(String(raw.id)) || idx.get(String(Number(raw.id)));
+    if (objHit) return objHit;
+  }
+
+  // (d) last-resort scan by any known id field
+  const candidate = players.find((p) => {
+    const keys = [
+      p.id,
+      p.playerId,
+      p.pid,
+      p.espnId,
+      p.yahooId,
+      p.sleeperId,
+      p.externalId,
+    ].filter((k) => k != null);
+    const rawStr = String(raw);
+    const rawNum = String(Number(raw));
+    return keys.some((k) => rawStr === String(k) || rawNum === String(Number(k)));
+  });
+  return candidate || null;
+}
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
-  const [playersMap, setPlayersMap] = useState(new Map());
+  const [players, setPlayers] = useState([]);        // ← same flow as Players tab
+  const [index, setIndex] = useState(new Map());     // tolerant index
   const week = Number(currentWeek || 1);
 
   // Ensure team + subscribe
@@ -34,18 +101,17 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players (for id → name lookups)
+  // Load players exactly like Players tab does
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const map = await listPlayersMap({ leagueId });
-        if (alive) setPlayersMap(map || new Map());
-        // HARD DEBUG LOGS
-        console.log("[MyTeam] playersMap size:", map?.size);
-        console.log("[MyTeam] sample keys:", Array.from(map?.keys?.() || []).slice(0, 20));
+        const arr = await listPlayers({ leagueId });
+        if (!alive) return;
+        setPlayers(arr || []);
+        setIndex(buildPlayerIndex(arr || []));
       } catch (e) {
-        console.error("listPlayersMap:", e);
+        console.error("listPlayers (MyTeam):", e);
       }
     })();
     return () => {
@@ -56,27 +122,28 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
-  // Coerce ids before Map lookup
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
       const raw = roster[slot] ?? null;
-      const id = asId(raw);
-      const p = id ? playersMap.get(id) : null;
-      return { slot, rawId: raw, id, p };
+      const p = resolvePlayer(raw, index, players);
+      return { slot, rawId: raw, p };
     });
-  }, [roster, playersMap]);
+  }, [roster, index, players]);
 
   const benchRows = useMemo(() => {
     return bench.map((raw) => {
-      const id = asId(raw);
-      const p = id ? playersMap.get(id) : null;
-      return { rawId: raw, id, p };
+      const p = resolvePlayer(raw, index, players);
+      return { rawId: raw, p };
     });
-  }, [bench, playersMap]);
+  }, [bench, index, players]);
 
-  async function handleBenchToSlot(playerId, slot) {
+  async function handleBenchToSlot(playerIdOrRaw, slot) {
     try {
-      await moveToStarter({ leagueId, username, playerId, slot });
+      // playerIdOrRaw may be number/string/object; extract an id to move
+      const found = resolvePlayer(playerIdOrRaw, index, players);
+      const idToUse =
+        (found?.id != null ? String(found.id) : String(playerIdOrRaw));
+      await moveToStarter({ leagueId, username, playerId: idToUse, slot });
     } catch (e) {
       console.error("moveToStarter:", e);
       alert(String(e?.message || e));
@@ -92,11 +159,9 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
-  // If lookup fails, show the raw id so we can see the mismatch
-  function nameOf(p, fallbackId) {
+  function nameOf(p, fallbackRaw) {
     if (p) return playerDisplay(p);
-    if (fallbackId) return `(unknown: ${fallbackId})`;
-    return "(empty)";
+    return `(unknown: ${String(fallbackRaw)})`;
   }
 
   function posOf(p) {
@@ -116,66 +181,8 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return (Number.isFinite(val) ? val : 0).toFixed(1);
   }
 
-  // ALWAYS-ON inline debug so you can see what ids are missing
-  const debugMissing = useMemo(() => {
-    const tried = [
-      ...starters.map((r) => r.id).filter(Boolean),
-      ...benchRows.map((r) => r.id).filter(Boolean),
-    ];
-    const missing = tried.filter((id) => !playersMap.has(id));
-    const exampleKeys = Array.from(playersMap.keys()).slice(0, 20);
-    return { missing, exampleKeys };
-  }, [starters, benchRows, playersMap]);
-
   return (
     <div>
-      {/* DEBUG PANEL (always shown) */}
-      <div style={{ marginBottom: 12, padding: 12, border: "1px dashed #bbb", borderRadius: 6, background: "#fafafa" }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>Debug</div>
-        <div style={{ fontSize: 12, color: "#333" }}>
-          <div>playersMap size: {playersMap.size}</div>
-          <div>example ids (first 20): {debugMissing.exampleKeys.join(", ") || "(none)"}</div>
-          <div>missing ids encountered: {debugMissing.missing.join(", ") || "(none)"}</div>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <table width="100%" cellPadding="4" style={{ borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #eee" }}>
-                <th>Area</th>
-                <th>Slot/Idx</th>
-                <th>rawId</th>
-                <th>asId</th>
-                <th>found?</th>
-                <th>name (if found)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {starters.map((r) => (
-                <tr key={`s-${r.slot}`} style={{ borderBottom: "1px solid #f8f8f8" }}>
-                  <td>starter</td>
-                  <td>{r.slot}</td>
-                  <td>{JSON.stringify(r.rawId)}</td>
-                  <td>{String(r.id || "")}</td>
-                  <td>{r.p ? "yes" : "no"}</td>
-                  <td>{r.p ? playerDisplay(r.p) : ""}</td>
-                </tr>
-              ))}
-              {benchRows.map((r, i) => (
-                <tr key={`b-${i}`} style={{ borderBottom: "1px solid #f8f8f8" }}>
-                  <td>bench</td>
-                  <td>{i}</td>
-                  <td>{JSON.stringify(r.rawId)}</td>
-                  <td>{String(r.id || "")}</td>
-                  <td>{r.p ? "yes" : "no"}</td>
-                  <td>{r.p ? playerDisplay(r.p) : ""}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Starters */}
       <h3>Starters — Week {week}</h3>
       <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse", marginTop: 8 }}>
         <thead>
@@ -190,16 +197,16 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {starters.map(({ slot, id, p }) => (
+          {starters.map(({ slot, rawId, p }) => (
             <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
               <td><b>{slot}</b></td>
-              <td>{nameOf(p, id)}</td>
+              <td>{nameOf(p, rawId)}</td>
               <td>{posOf(p)}</td>
               <td>{teamOf(p)}</td>
               <td>{oppOf(p)}</td>
               <td>{projOf(p)}</td>
               <td>
-                {id ? (
+                {p || rawId ? (
                   <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
                 ) : (
                   <span style={{ color: "#999" }}>(empty)</span>
@@ -210,7 +217,6 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </tbody>
       </table>
 
-      {/* Bench */}
       <h3 style={{ marginTop: 18 }}>Bench</h3>
       <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
         <thead>
@@ -224,9 +230,9 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {benchRows.map(({ id, p }, i) => (
-            <tr key={`${id || "empty"}-${i}`} style={{ borderBottom: "1px solid #f5f5f5" }}>
-              <td>{nameOf(p, id)}</td>
+          {benchRows.map(({ rawId, p }, i) => (
+            <tr key={`${String(rawId)}-${i}`} style={{ borderBottom: "1px solid #f5f5f5" }}>
+              <td>{nameOf(p, rawId)}</td>
               <td>{posOf(p)}</td>
               <td>{teamOf(p)}</td>
               <td>{oppOf(p)}</td>
@@ -236,7 +242,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
                   defaultValue=""
                   onChange={(e) => {
                     const slot = e.target.value;
-                    if (slot) handleBenchToSlot(id, slot);
+                    if (slot) handleBenchToSlot(rawId, slot);
                   }}
                 >
                   <option value="">Choose slot</option>
