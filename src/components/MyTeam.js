@@ -1,82 +1,109 @@
 /* eslint-disable no-console */
+// src/components/MyTeam.js
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  listenLeague,
+  ROSTER_SLOTS,
   listenTeam,
   ensureTeam,
+  listPlayersMap,
+  playerDisplay,
+  projForWeek,
+  opponentForWeek,
   moveToStarter,
   moveToBench,
-  ROSTER_SLOTS,
-  listPlayersMap,
-  fetchWeekStats,
-  computeTeamPoints,
 } from "../lib/storage";
-import PlayerName from "./common/PlayerName.jsx";
 
-export default function MyTeam({ leagueId, username }) {
-  const [league, setLeague] = useState(null);
+export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
-  const [statsMap, setStatsMap] = useState(new Map());
+  const week = Number(currentWeek || 1);
 
-  const currentWeek = Number(league?.settings?.currentWeek || 1);
-
+  // Ensure team + subscribe
   useEffect(() => {
-    if (!leagueId) return;
-    const off = listenLeague(leagueId, setLeague);
-    return () => off && off();
-  }, [leagueId]);
-
-  useEffect(() => {
+    if (!leagueId || !username) return;
     let unsub = null;
     (async () => {
-      if (!leagueId || !username) return;
-      await ensureTeam({ leagueId, username });
-      unsub = listenTeam({ leagueId, username, onChange: setTeam });
+      try {
+        await ensureTeam({ leagueId, username });
+        unsub = listenTeam({ leagueId, username, onChange: setTeam });
+      } catch (e) {
+        console.error("ensureTeam/listenTeam:", e);
+      }
     })();
     return () => unsub && unsub();
   }, [leagueId, username]);
 
+  // Load players (for id → name lookups)
   useEffect(() => {
+    let alive = true;
     (async () => {
       try {
         const map = await listPlayersMap({ leagueId });
-        setPlayersMap(map);
-        const sMap = await fetchWeekStats({ leagueId, week: currentWeek });
-        setStatsMap(sMap);
+        if (alive) setPlayersMap(map || new Map());
       } catch (e) {
-        console.error(e);
+        console.error("listPlayersMap:", e);
       }
     })();
-  }, [leagueId, currentWeek]);
+    return () => {
+      alive = false;
+    };
+  }, [leagueId]);
 
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
-  const totals = useMemo(() => {
-    return computeTeamPoints({ roster, week: currentWeek, playersMap, statsMap });
-  }, [roster, currentWeek, playersMap, statsMap]);
+  const starters = useMemo(() => {
+    return ROSTER_SLOTS.map((slot) => {
+      const id = roster[slot] || null;
+      const p = id ? playersMap.get(id) : null;
+      return { slot, id, p };
+    });
+  }, [roster, playersMap]);
 
   async function handleBenchToSlot(playerId, slot) {
     try {
       await moveToStarter({ leagueId, username, playerId, slot });
     } catch (e) {
+      console.error("moveToStarter:", e);
       alert(String(e?.message || e));
     }
   }
+
   async function handleSlotToBench(slot) {
     try {
       await moveToBench({ leagueId, username, slot });
     } catch (e) {
+      console.error("moveToBench:", e);
       alert(String(e?.message || e));
     }
   }
 
+  function nameOf(p) {
+    // If we found the object, use playerDisplay; otherwise fall back to raw id
+    return p ? playerDisplay(p) : "(empty)";
+  }
+
+  function posOf(p) {
+    return p?.position || "-";
+  }
+
+  function teamOf(p) {
+    return p?.team || "-";
+  }
+
+  function oppOf(p) {
+    return p ? (opponentForWeek(p, week) || "-") : "-";
+  }
+
+  function projOf(p) {
+    const val = p ? projForWeek(p, week) : 0;
+    return (Number.isFinite(val) ? val : 0).toFixed(1);
+    // (Actual live points will replace this when your stats feed goes live)
+  }
+
   return (
     <div>
-      <h3>My Team</h3>
-
-      <h4>Starters</h4>
+      <h3>Starters — Week {week}</h3>
       <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
@@ -84,62 +111,80 @@ export default function MyTeam({ leagueId, username }) {
             <th>Name</th>
             <th>Pos</th>
             <th>Team</th>
-            <th>Pts (W{currentWeek})</th>
+            <th>Opp</th>
+            <th>Proj</th>
+            <th>Action</th>
           </tr>
         </thead>
         <tbody>
-          {ROSTER_SLOTS.map((slot) => {
-            const pid = roster?.[slot];
-            const p = pid ? playersMap.get(String(pid)) : null;
-            const line = totals.lines.find((l) => l.slot === slot) || { points: 0 };
+          {starters.map(({ slot, id, p }) => (
+            <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
+              <td><b>{slot}</b></td>
+              <td>{nameOf(p)}</td>
+              <td>{posOf(p)}</td>
+              <td>{teamOf(p)}</td>
+              <td>{oppOf(p)}</td>
+              <td>{projOf(p)}</td>
+              <td>
+                {id ? (
+                  <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
+                ) : (
+                  <span style={{ color: "#999" }}>(empty)</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <h3 style={{ marginTop: 18 }}>Bench</h3>
+      <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+            <th>Name</th>
+            <th>Pos</th>
+            <th>Team</th>
+            <th>Opp</th>
+            <th>Proj</th>
+            <th>Move to slot…</th>
+          </tr>
+        </thead>
+        <tbody>
+          {bench.map((pid) => {
+            const p = playersMap.get(pid);
             return (
-              <tr key={slot} style={{ borderBottom: "1px solid #f4f4f4" }}>
-                <td><b>{slot}</b></td>
-                <td><PlayerName leagueId={leagueId} playerId={pid} fallback="(empty)" /></td>
-                <td>{p?.position || "-"}</td>
-                <td>{p?.team || "-"}</td>
-                <td>{Number(line.points || 0).toFixed(1)}</td>
+              <tr key={pid} style={{ borderBottom: "1px solid #f5f5f5" }}>
+                <td>{nameOf(p)}</td>
+                <td>{posOf(p)}</td>
+                <td>{teamOf(p)}</td>
+                <td>{oppOf(p)}</td>
+                <td>{projOf(p)}</td>
                 <td>
-                  {pid && (
-                    <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
-                  )}
+                  <select
+                    defaultValue=""
+                    onChange={(e) => {
+                      const slot = e.target.value;
+                      if (slot) handleBenchToSlot(pid, slot);
+                    }}
+                  >
+                    <option value="">Choose slot</option>
+                    {ROSTER_SLOTS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
                 </td>
               </tr>
             );
           })}
+          {bench.length === 0 && (
+            <tr>
+              <td colSpan={6} style={{ color: "#999" }}>(no bench players)</td>
+            </tr>
+          )}
         </tbody>
-        <tfoot>
-          <tr>
-            <td colSpan={4} style={{ textAlign: "right" }}><b>Total</b></td>
-            <td><b>{totals.total.toFixed(1)}</b></td>
-          </tr>
-        </tfoot>
       </table>
-
-      <h4 style={{ marginTop: 16 }}>Bench</h4>
-      <ul style={{ listStyle: "none", padding: 0 }}>
-        {bench.map((pid) => {
-          const p = playersMap.get(String(pid));
-          return (
-            <li key={pid} style={{ marginBottom: 6 }}>
-              <PlayerName leagueId={leagueId} playerId={pid} fallback="(empty)" />{" "}
-              <small>({p?.position || "-"} – {p?.team || "-"})</small>
-              {"  "}
-              <select
-                defaultValue=""
-                onChange={(e) => e.target.value && handleBenchToSlot(pid, e.target.value)}
-                style={{ marginLeft: 8 }}
-              >
-                <option value="">Move to slot…</option>
-                {ROSTER_SLOTS.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </li>
-          );
-        })}
-        {bench.length === 0 && <li>(no bench players)</li>}
-      </ul>
     </div>
   );
 }
