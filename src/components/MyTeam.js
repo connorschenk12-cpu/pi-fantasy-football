@@ -3,57 +3,73 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ROSTER_SLOTS,
+  // league + team
   listenLeague,
   listenTeam,
   ensureTeam,
+  // players
   listPlayersMap,
   playerDisplay,
   projForWeek,
   opponentForWeek,
+  // moves
   moveToStarter,
   moveToBench,
-  allowedSlotsForPlayer,
+  // entry/payments
   hasPaidEntry,
 } from "../lib/storage";
 
-import { hasPaidEntry } from "../lib/storage"; // already exported
-
+/** Small banner that renders entry-fee state & a Payments button */
 function PaymentsGate({ league, leagueId, username }) {
-  if (!league?.entry?.enabled) return null;
-  const paid = hasPaidEntry(league, username);
+  if (!league?.entry?.enabled) return null; // free league or disabled
 
-  // Your real Pi checkout URL (or in-app route that opens provider UI)
+  const paid = hasPaidEntry(league, username);
+  const amount = Number(league?.entry?.amountPi || 0);
   const checkoutUrl = `/payments?league=${encodeURIComponent(leagueId)}`;
 
   return (
-    <div style={{ margin: "12px 0", padding: 10, border: "1px solid #eee", borderRadius: 8 }}>
+    <div style={{ margin: "12px 0 16px", padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
       {paid ? (
         <div style={{ color: "#2a9d8f" }}>✅ Entry paid</div>
       ) : (
         <>
           <div style={{ marginBottom: 8 }}>
-            Entry Fee: <b>{league?.entry?.amountPi || 0} π</b>
+            Entry Fee: <b>{amount} π</b>
           </div>
           <a href={checkoutUrl}>
             <button>Go to Payments</button>
           </a>
           <div style={{ color: "#888", marginTop: 6, fontSize: 12 }}>
-            Once payment completes, the provider will call our webhook and your entry will be marked paid.
+            After payment completes, the provider will call our webhook to mark you as paid.
           </div>
         </>
       )}
     </div>
   );
 }
+
+/** Allowed lineup slots per position */
+function validSlotsFor(p) {
+  const pos = String(p?.position || "").toUpperCase();
+  if (!pos) return [];
+  if (pos === "QB") return ["QB"];
+  if (pos === "RB") return ["RB1", "RB2", "FLEX"];
+  if (pos === "WR") return ["WR1", "WR2", "FLEX"];
+  if (pos === "TE") return ["TE", "FLEX"];
+  if (pos === "K") return ["K"];
+  if (pos === "DEF") return ["DEF"];
+  return [];
+}
+
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
   const week = Number(currentWeek || 1);
 
-  // League sub (used for entry payments + draft state)
+  // Live league doc (for entry status, etc.)
   useEffect(() => {
-    if (!leagueId) return;
+    if (!leagueId) return () => {};
     const unsub = listenLeague(leagueId, setLeague);
     return () => unsub && unsub();
   }, [leagueId]);
@@ -73,7 +89,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players (for id → name lookups)
+  // Load players (for id → object lookups)
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -84,16 +100,18 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         console.error("listPlayersMap:", e);
       }
     })();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, [leagueId]);
 
   const roster = team?.roster || {};
-  const bench = Array.isArray(team?.bench) ? team.bench.map(String) : [];
+  const bench = Array.isArray(team?.bench) ? team.bench : [];
 
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
-      const id = roster[slot] != null ? String(roster[slot]) : null;
-      const p = id ? playersMap.get(id) : null;
+      const id = roster[slot] || null;
+      const p = id ? playersMap.get(String(id)) : null;
       return { slot, id, p };
     });
   }, [roster, playersMap]);
@@ -117,43 +135,32 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   }
 
   function nameOf(p) {
+    // If we found the object, use playerDisplay; otherwise show (empty)
     return p ? playerDisplay(p) : "(empty)";
   }
+
   function posOf(p) {
     return p?.position || "-";
   }
+
   function teamOf(p) {
     return p?.team || "-";
   }
+
   function oppOf(p) {
     return p ? (opponentForWeek(p, week) || "-") : "-";
   }
+
   function projOf(p) {
     const val = p ? projForWeek(p, week) : 0;
     return (Number.isFinite(val) ? val : 0).toFixed(1);
+    // (Actual live points will replace this once your stats feed is wired)
   }
-
-  const showPayment =
-    !!league &&
-    !!league.entry &&
-    league.entry.enabled === true &&
-    !hasPaidEntry(league, username);
 
   return (
     <div>
-      {/* ENTRY FEE NOTICE (My Team only) */}
-      {showPayment && (
-        <div style={{ marginBottom: 14, padding: 12, border: "1px solid #f3d07b", background: "#fff8e5", borderRadius: 8 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>Entry Fee Required</div>
-          <div style={{ marginBottom: 10 }}>
-            Please complete your entry payment to participate in the draft and season.
-          </div>
-          {/* Replace the href with your real payments flow URL */}
-          <a href="/payments" style={{ textDecoration: "none" }}>
-            <button>Go to Payments</button>
-          </a>
-        </div>
-      )}
+      {/* Payments prompt (before/after draft, hidden if already paid or entry disabled) */}
+      <PaymentsGate league={league} leagueId={leagueId} username={username} />
 
       <h3>Starters — Week {week}</h3>
       <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
@@ -203,8 +210,8 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </thead>
         <tbody>
           {bench.map((pid) => {
-            const p = playersMap.get(pid);
-            const allowed = allowedSlotsForPlayer(p);
+            const p = playersMap.get(String(pid));
+            const options = validSlotsFor(p);
             return (
               <tr key={pid} style={{ borderBottom: "1px solid #f5f5f5" }}>
                 <td>{nameOf(p)}</td>
@@ -213,7 +220,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
                 <td>{oppOf(p)}</td>
                 <td>{projOf(p)}</td>
                 <td>
-                  {allowed.length ? (
+                  {options.length ? (
                     <select
                       defaultValue=""
                       onChange={(e) => {
@@ -222,14 +229,14 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
                       }}
                     >
                       <option value="">Choose slot</option>
-                      {allowed.map((s) => (
+                      {options.map((s) => (
                         <option key={s} value={s}>
                           {s}
                         </option>
                       ))}
                     </select>
                   ) : (
-                    <span style={{ color: "#999" }}>(no valid slots)</span>
+                    <span style={{ color: "#999" }}>No eligible slots</span>
                   )}
                 </td>
               </tr>
