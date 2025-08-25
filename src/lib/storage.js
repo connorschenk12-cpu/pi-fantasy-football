@@ -194,7 +194,6 @@ export async function joinLeague({ leagueId, username }) {
 
 export function playerDisplay(p) {
   if (!p) return "(empty)";
-  // Try lots of common name fields before falling back
   const firstLast =
     (p.firstName || p.firstname || p.fname || "") +
     (p.lastName || p.lastname || p.lname ? " " + (p.lastName || p.lastname || p.lname) : "");
@@ -218,29 +217,20 @@ export function playerDisplay(p) {
   );
 }
 
-/**
- * Returns players for a league (league-scoped first, then global),
- * and de-dupes:
- *   1) by canonical id
- *   2) by display-key (name|team|position) to catch duplicates with different ids
- */
 export async function listPlayers({ leagueId }) {
   const raw = [];
 
-  // 1) league-scoped first
   if (leagueId) {
     const lpRef = collection(db, "leagues", leagueId, "players");
     const lSnap = await getDocs(lpRef);
     lSnap.forEach((d) => raw.push({ id: d.id, ...d.data() }));
   }
 
-  // 2) global fallback
   if (raw.length === 0) {
     const gSnap = await getDocs(collection(db, "players"));
     gSnap.forEach((d) => raw.push({ id: d.id, ...d.data() }));
   }
 
-  // 3) normalize
   const normalized = raw.map((p) => {
     const id = asId(p.id);
     const position = (p.position || p.pos || "").toString().toUpperCase() || null;
@@ -253,14 +243,12 @@ export async function listPlayers({ leagueId }) {
     return { ...p, id, name, position, team };
   });
 
-  // 4) de-dupe by id
   const byId = new Map();
   for (const p of normalized) {
     if (!p.id) continue;
     if (!byId.has(p.id)) byId.set(p.id, p);
   }
 
-  // 5) de-dupe again by display key to catch “same human, diff id”
   const byKey = new Map();
   for (const p of byId.values()) {
     const key =
@@ -274,7 +262,19 @@ export async function listPlayers({ leagueId }) {
 export async function listPlayersMap({ leagueId }) {
   const arr = await listPlayers({ leagueId });
   const map = new Map();
-  arr.forEach((p) => map.set(asId(p.id), p));
+
+  for (const p of arr) {
+    const primary = asId(p?.id);
+    if (primary != null) {
+      map.set(primary, p);
+      const asNum = Number(primary);
+      if (!Number.isNaN(asNum)) map.set(asNum, p);
+    }
+    if (typeof p?.id === "number") {
+      map.set(String(p.id), p);
+    }
+  }
+
   return map;
 }
 
@@ -342,6 +342,8 @@ export async function setPlayerName({ leagueId, id, name }) {
 /* =========================================================
    PROJECTED & ACTUAL POINTS
    ========================================================= */
+
+// (rest of file unchanged … same as your last version)
 
 export function projForWeek(p, week) {
   const w = String(week);
