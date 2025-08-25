@@ -1,109 +1,161 @@
 /* eslint-disable no-console */
+// src/components/MatchupsTab.js
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  listenScheduleWeek,
-  listPlayersMap,
-  listenTeamById,
-  computeTeamPoints,
   ROSTER_SLOTS,
+  listenScheduleWeek,
+  listenTeamById,
+  listPlayersMap,
+  playerDisplay,
+  pointsForPlayer,
 } from "../lib/storage";
 
-/**
- * Props:
- * - leagueId
- * - currentWeek
- */
-export default function MatchupsTab({ leagueId, currentWeek }) {
-  const [week, setWeek] = useState(Number(currentWeek || 1));
-  const [schedule, setSchedule] = useState({ week: Number(currentWeek || 1), matchups: [] });
+export default function MatchupsTab({ leagueId, currentWeek = 1 }) {
+  const week = Number(currentWeek || 1);
+  const [schedule, setSchedule] = useState({ week, matchups: [] });
   const [playersMap, setPlayersMap] = useState(new Map());
-  const [teamCache, setTeamCache] = useState({}); // { username: teamDoc }
+  const [teamsState, setTeamsState] = useState({}); // { username: teamDoc }
 
-  useEffect(() => {
-    setWeek(Number(currentWeek || 1));
-  }, [currentWeek]);
-
-  // schedule listener
+  // Schedule for the week
   useEffect(() => {
     if (!leagueId || !week) return;
-    const unsub = listenScheduleWeek(leagueId, week, (s) => setSchedule(s || { week, matchups: [] }));
+    const unsub = listenScheduleWeek(leagueId, week, setSchedule);
     return () => unsub && unsub();
   }, [leagueId, week]);
 
-  // players map (once per leagueId)
+  // Load player map once
   useEffect(() => {
-    let mounted = true;
+    let alive = true;
     (async () => {
       try {
         const map = await listPlayersMap({ leagueId });
-        if (mounted) setPlayersMap(map);
+        if (alive) setPlayersMap(map || new Map());
       } catch (e) {
-        console.error("listPlayersMap error:", e);
+        console.error("listPlayersMap:", e);
       }
     })();
-    return () => { mounted = false; };
+    return () => {
+      alive = false;
+    };
   }, [leagueId]);
 
-  // subscribe to any teams appearing in the week’s matchups
+  // Subscribe to teams that appear in this week's matchups
   useEffect(() => {
     if (!leagueId) return;
-    const unsubs = [];
     const usernames = new Set();
     (schedule?.matchups || []).forEach((m) => {
-      if (m.home) usernames.add(m.home);
-      if (m.away) usernames.add(m.away);
+      if (m?.home) usernames.add(m.home);
+      if (m?.away) usernames.add(m.away);
     });
-    usernames.forEach((u) => {
-      const unsub = listenTeamById(leagueId, u, (t) => {
-        setTeamCache((prev) => ({ ...prev, [u]: t || null }));
+
+    const unsubs = [];
+    usernames.forEach((uname) => {
+      const unsub = listenTeamById(leagueId, uname, (t) => {
+        setTeamsState((prev) => ({ ...prev, [uname]: t || null }));
       });
       unsubs.push(unsub);
     });
-    return () => { unsubs.forEach((fn) => fn && fn()); };
-  }, [leagueId, schedule?.matchups]);
 
-  const rows = useMemo(() => {
-    const out = [];
-    (schedule?.matchups || []).forEach((m, idx) => {
-      const home = teamCache[m.home] || null;
-      const away = teamCache[m.away] || null;
-      const homePts = home ? computeTeamPoints({ roster: home.roster || {}, week, playersMap }).total : 0;
-      const awayPts = away ? computeTeamPoints({ roster: away.roster || {}, week, playersMap }).total : 0;
-      out.push({ id: `${m.home}_vs_${m.away}_${idx}`, home: m.home, away: m.away, homePts, awayPts });
+    return () => unsubs.forEach((fn) => fn && fn());
+  }, [leagueId, schedule]);
+
+  function teamStarters(username) {
+    const t = teamsState[username];
+    const roster = t?.roster || {};
+    return ROSTER_SLOTS.map((slot) => {
+      const pid = roster[slot] || null;
+      const p = pid ? playersMap.get(pid) : null;
+      const pts = p ? pointsForPlayer(p, week) : 0;
+      return { slot, pid, p, pts };
     });
-    return out;
-  }, [schedule?.matchups, teamCache, week, playersMap]);
+  }
+
+  function teamTotal(username) {
+    return teamStarters(username).reduce((sum, row) => sum + Number(row.pts || 0), 0);
+  }
+
+  const matchups = useMemo(() => schedule?.matchups || [], [schedule]);
+
+  if (!matchups.length) {
+    return <div>No matchups scheduled for week {week}.</div>;
+  }
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-        <b>Week:</b>
-        <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
-          {Array.from({ length: 18 }).map((_, i) => (
-            <option key={i + 1} value={i + 1}>Week {i + 1}</option>
-          ))}
-        </select>
-      </div>
+      <h3>Week {week} Matchups</h3>
+      {matchups.map((m, idx) => {
+        const homeRows = teamStarters(m.home);
+        const awayRows = teamStarters(m.away);
+        const homeTotal = teamTotal(m.home).toFixed(1);
+        const awayTotal = teamTotal(m.away).toFixed(1);
 
-      {rows.length === 0 && (
-        <div style={{ color: "#999" }}>
-          No matchups scheduled for week {week}. Use the Admin tab → Ensure / Recreate Schedule.
-        </div>
-      )}
+        return (
+          <div
+            key={idx}
+            style={{
+              border: "1px solid #eee",
+              borderRadius: 8,
+              padding: 12,
+              marginBottom: 16,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+              <h4 style={{ margin: 0 }}>{m.home} vs {m.away}</h4>
+              <div>
+                <b>{homeTotal}</b> — <b>{awayTotal}</b>
+              </div>
+            </div>
 
-      {rows.map((r) => (
-        <div key={r.id} style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, marginBottom: 8 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-            <b>{r.home}</b>
-            <span>vs</span>
-            <b>{r.away}</b>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              {/* Home starters */}
+              <div>
+                <h5 style={{ margin: "6px 0" }}>{m.home}</h5>
+                <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+                      <th style={{ width: 50 }}>Slot</th>
+                      <th>Name</th>
+                      <th style={{ width: 60, textAlign: "right" }}>Pts</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {homeRows.map((row) => (
+                      <tr key={`${m.home}-${row.slot}`} style={{ borderBottom: "1px solid #f5f5f5" }}>
+                        <td><b>{row.slot}</b></td>
+                        <td>{row.p ? playerDisplay(row.p) : "(empty)"}</td>
+                        <td style={{ textAlign: "right" }}>{Number(row.pts || 0).toFixed(1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Away starters */}
+              <div>
+                <h5 style={{ margin: "6px 0" }}>{m.away}</h5>
+                <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+                      <th style={{ width: 50 }}>Slot</th>
+                      <th>Name</th>
+                      <th style={{ width: 60, textAlign: "right" }}>Pts</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {awayRows.map((row) => (
+                      <tr key={`${m.away}-${row.slot}`} style={{ borderBottom: "1px solid #f5f5f5" }}>
+                        <td><b>{row.slot}</b></td>
+                        <td>{row.p ? playerDisplay(row.p) : "(empty)"}</td>
+                        <td style={{ textAlign: "right" }}>{Number(row.pts || 0).toFixed(1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 18 }}>
-            <span>{r.homePts.toFixed(1)}</span>
-            <span>{r.awayPts.toFixed(1)}</span>
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
