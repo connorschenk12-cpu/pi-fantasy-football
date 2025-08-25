@@ -953,6 +953,31 @@ export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate
   const exists = !existing.empty;
 
   if (exists && !recreate) {
+    return { weeksCreated: [] };
+  }
+
+  await writeSchedule(leagueId, schedule);
+  return { weeksCreated: schedule.map((w) => w.week) };
+}
+
+/** Back-compat wrapper that some components import */
+export async function ensureOrRecreateSchedule(leagueId, totalWeeks = 14) {
+  return ensureSeasonSchedule({ leagueId, totalWeeks, recreate: true });
+}
+
+/** Ensure schedule exists (or recreate). Writes week-1..N docs. */
+export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate = false }) {
+  if (!leagueId) throw new Error("Missing leagueId");
+  const members = await listMemberUsernames(leagueId);
+  if (members.length < 2) throw new Error("Need at least 2 team members to schedule.");
+
+  const schedule = generateScheduleRoundRobin(members, totalWeeks);
+
+  const colRef = collection(db, "leagues", leagueId, "schedule");
+  const existing = await getDocs(colRef);
+  const exists = !existing.empty;
+
+  if (exists && !recreate) {
     return { weeksCreated: [] }; // already there
   }
 
