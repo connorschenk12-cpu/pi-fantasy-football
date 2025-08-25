@@ -223,8 +223,7 @@ export function playerDisplay(p) {
 /**
  * Returns players for a league (league-scoped first, then global),
  * and de-dupes by id and by (name|team|position) signature.
- */
-export async function listPlayers({ leagueId }) {
+ */export async function listPlayers({ leagueId }) {
   const raw = [];
 
   // league-scoped first
@@ -253,46 +252,34 @@ export async function listPlayers({ leagueId }) {
     return { ...p, id, name, position, team };
   });
 
-  // de-dupe by id
+  // helper to decide which copy is "better"
+  const better = (a, b) => {
+    // prefer one with a real name
+    if (!!a?.name !== !!b?.name) return a?.name ? a : b;
+    // then prefer one with more fields
+    const aFields = a ? Object.keys(a).length : 0;
+    const bFields = b ? Object.keys(b).length : 0;
+    return aFields >= bFields ? a : b;
+  };
+
+  // de-dupe by id, prefer copy with a usable name
   const byId = new Map();
   for (const p of normalized) {
     if (!p.id) continue;
-    if (!byId.has(p.id)) byId.set(p.id, p);
+    const cur = byId.get(p.id);
+    byId.set(p.id, cur ? better(cur, p) : p);
   }
 
-  // de-dupe by display signature
+  // de-dupe by display signature, prefer copy with a usable name
   const byKey = new Map();
   for (const p of byId.values()) {
     const key =
       `${(p.name || "").toLowerCase()}|${(p.team || "").toLowerCase()}|${(p.position || "").toLowerCase()}`;
-    if (!byKey.has(key)) byKey.set(key, p);
+    const cur = byKey.get(key);
+    byKey.set(key, cur ? better(cur, p) : p);
   }
 
   return Array.from(byKey.values());
-}
-
-/** Build all reasonable keys that might reference this player */
-function indexKeysFor(p) {
-  const base = [
-    p?.id,
-    p?.playerId,
-    p?.player_id,
-    p?.pid,
-    p?.sleeperId,
-    p?.sleeper_id,
-    p?.espnId,
-    p?.yahooId,
-    p?.gsisId,
-    p?.externalId,
-  ].map(asId).filter(Boolean);
-
-  const out = new Set(base);
-  // also store numeric<->string flips
-  for (const k of base) {
-    const n = Number(k);
-    if (Number.isFinite(n)) out.add(String(n));
-  }
-  return Array.from(out);
 }
 
 /** Map of players keyed by many alternate ids so lookups always succeed */
