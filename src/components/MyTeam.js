@@ -11,9 +11,8 @@ import {
   opponentForWeek,
   moveToStarter,
   moveToBench,
-  asId,                // <-- IMPORTANT: coerce ids before Map lookup
+  asId,
 } from "../lib/storage";
-import DebugPanel from "./DebugPanel"; // <-- toggleable debug view
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
@@ -55,7 +54,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
-  // IMPORTANT: coerce roster ids with asId before Map.get(...)
+  // Coerce ids before Map lookup
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
       const raw = roster[slot] ?? null;
@@ -92,7 +91,6 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   }
 
   function nameOf(p, fallbackId) {
-    // If we found the object, use playerDisplay; otherwise show “(unknown)” + id for clarity
     return p ? playerDisplay(p) : fallbackId ? `(unknown: ${fallbackId})` : "(empty)";
   }
 
@@ -111,6 +109,64 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   function projOf(p) {
     const val = p ? projForWeek(p, week) : 0;
     return (Number.isFinite(val) ? val : 0).toFixed(1);
+  }
+
+  // Simple inline debug panel (no external import)
+  function DebugBlock() {
+    // collect all roster/bench ids we tried
+    const tried = [
+      ...starters.map((r) => r.id).filter(Boolean),
+      ...benchRows.map((r) => r.id).filter(Boolean),
+    ];
+    const missing = tried.filter((id) => !playersMap.has(id));
+    const exampleKeys = Array.from(playersMap.keys()).slice(0, 20);
+
+    return (
+      <div style={{ marginTop: 12, padding: 12, border: "1px dashed #bbb", borderRadius: 6 }}>
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>Debug</div>
+        <div style={{ fontSize: 12, color: "#333" }}>
+          <div>playersMap size: {playersMap.size}</div>
+          <div>example player ids (first 20): {exampleKeys.join(", ") || "(none)"}</div>
+          <div>missing ids encountered: {missing.join(", ") || "(none)"}</div>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <table width="100%" cellPadding="4" style={{ borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ textAlign: "left", borderBottom: "1px solid #eee" }}>
+                <th>Area</th>
+                <th>Slot/Idx</th>
+                <th>rawId</th>
+                <th>asId</th>
+                <th>found?</th>
+                <th>name (if found)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {starters.map((r) => (
+                <tr key={`s-${r.slot}`} style={{ borderBottom: "1px solid #f8f8f8" }}>
+                  <td>starter</td>
+                  <td>{r.slot}</td>
+                  <td>{JSON.stringify(r.rawId)}</td>
+                  <td>{String(r.id || "")}</td>
+                  <td>{r.p ? "yes" : "no"}</td>
+                  <td>{r.p ? playerDisplay(r.p) : ""}</td>
+                </tr>
+              ))}
+              {benchRows.map((r, i) => (
+                <tr key={`b-${i}`} style={{ borderBottom: "1px solid #f8f8f8" }}>
+                  <td>bench</td>
+                  <td>{i}</td>
+                  <td>{JSON.stringify(r.rawId)}</td>
+                  <td>{String(r.id || "")}</td>
+                  <td>{r.p ? "yes" : "no"}</td>
+                  <td>{r.p ? playerDisplay(r.p) : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -135,7 +191,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {starters.map(({ slot, rawId, id, p }) => (
+          {starters.map(({ slot, id, p }) => (
             <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
               <td><b>{slot}</b></td>
               <td>{nameOf(p, id)}</td>
@@ -168,8 +224,8 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {benchRows.map(({ rawId, id, p }) => (
-            <tr key={JSON.stringify(rawId)} style={{ borderBottom: "1px solid #f5f5f5" }}>
+          {benchRows.map(({ id, p }, i) => (
+            <tr key={`${id || "empty"}-${i}`} style={{ borderBottom: "1px solid #f5f5f5" }}>
               <td>{nameOf(p, id)}</td>
               <td>{posOf(p)}</td>
               <td>{teamOf(p)}</td>
@@ -201,11 +257,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </tbody>
       </table>
 
-      {showDebug && (
-        <div style={{ marginTop: 16 }}>
-          <DebugPanel leagueId={leagueId} username={username} />
-        </div>
-      )}
+      {showDebug && <DebugBlock />}
     </div>
   );
 }
