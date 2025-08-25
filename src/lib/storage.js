@@ -183,75 +183,55 @@ export function playerDisplay(p) {
 
 // Merge league-scoped players (preferred) with global players, de-duplicate by id
 // Returns the preferred list of players. League-scoped list overrides global. De-duped by id and (name+team+pos).
+// Returns the preferred list of players. League-scoped list overrides global. De-duped by id.
 export async function listPlayers({ leagueId }) {
-  let arr = [];
+  const out = [];
 
-  // Prefer league-local players if present
+  // 1) Try league-scoped list first
   if (leagueId) {
     const lpRef = collection(db, "leagues", leagueId, "players");
     const lSnap = await getDocs(lpRef);
-    if (!lSnap.empty) {
-      lSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-    }
+    lSnap.forEach((d) => {
+      const raw = { id: d.id, ...d.data() };
+      out.push(raw);
+    });
   }
 
-  // If league had none, fall back to global
-  if (arr.length === 0) {
+  // 2) If none found, fall back to global
+  if (out.length === 0) {
     const gSnap = await getDocs(collection(db, "players"));
-    gSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+    gSnap.forEach((d) => {
+      const raw = { id: d.id, ...d.data() };
+      out.push(raw);
+    });
   }
 
-  // Normalize + first-pass dedupe by id
-  const seenIds = new Set();
-  const normalized = [];
-  for (const p of arr) {
-    const id = p?.id != null ? String(p.id) : null;
-    if (!id) continue;
-    if (seenIds.has(id)) continue;
-    seenIds.add(id);
-    normalized.push({
+  // 3) Normalize + de-dup by canonical id
+  const seen = new Set();
+  const dedup = [];
+  for (const p of out) {
+    const id = asId(p.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    // normalize fields
+    const position = (p.position || p.pos || "").toString().toUpperCase() || null;
+    const name =
+      p.name ??
+      p.fullName ??
+      p.playerName ??
+      (typeof p.id === "string" ? p.id : null); // last-resort fallback
+
+    dedup.push({
       ...p,
       id,
-      position: (p.position || p.pos || "").toString().toUpperCase(),
-      name: p.name || p.fullName || p.playerName || null,
+      name,
+      position,
       team: p.team || p.nflTeam || p.proTeam || null,
     });
   }
 
-  // Second-pass dedupe by (name+team+position) to crush near-duplicates with different ids
-  const seenCombo = new Set();
-  const deduped = [];
-  for (const p of normalized) {
-    const combo = `${(p.name || "").trim().toLowerCase()}|${(p.team || "").trim().toUpperCase()}|${(p.position || "").trim().toUpperCase()}`;
-    if (!combo.trim() || combo === "||") {
-      // If we have no metadata, keep the row (can't dedupe intelligently)
-      deduped.push(p);
-      continue;
-    }
-    if (seenCombo.has(combo)) continue;
-    seenCombo.add(combo);
-    deduped.push(p);
-  }
-
-  return deduped;
-}
-  // then global
-  const gSnap = await getDocs(collection(db, "players"));
-  gSnap.forEach((d) => {
-    const raw = d.data();
-    const id = asId(raw?.id ?? d.id);
-    if (!id || seen.has(id)) return;
-    seen.add(id);
-    result.push({
-      ...raw,
-      id,
-      position: (raw.position || raw.pos || "").toString().toUpperCase(),
-      team: raw.team || raw.nflTeam || raw.proTeam || null,
-      name: raw.name || playerDisplay(raw),
-    });
-  });
-
-  return result;
+  return dedup;
 }
 
 export async function listPlayersMap({ leagueId }) {
