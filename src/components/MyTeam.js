@@ -53,11 +53,17 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
+  // robust getter: accepts "12", 12, or {id:"12"}
+  function getPlayer(anyId) {
+    const key = asId(anyId);
+    return key ? playersMap.get(key) : null;
+  }
+
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
-      const id = roster[slot] || null;
-      const p = id ? playersMap.get(asId(id)) : null; // IMPORTANT: coerce id
-      return { slot, id, p };
+      const rawId = roster[slot] || null;
+      const p = getPlayer(rawId);
+      return { slot, id: rawId, p };
     });
   }, [roster, playersMap]);
 
@@ -150,9 +156,10 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </thead>
         <tbody>
           {bench.map((pid) => {
-            const p = playersMap.get(asId(pid)); // IMPORTANT: coerce id
+            const p = getPlayer(pid);
+            const key = asId(pid);
             return (
-              <tr key={asId(pid)} style={{ borderBottom: "1px solid #f5f5f5" }}>
+              <tr key={key || String(pid)} style={{ borderBottom: "1px solid #f5f5f5" }}>
                 <td>{nameOf(p)}</td>
                 <td>{posOf(p)}</td>
                 <td>{teamOf(p)}</td>
