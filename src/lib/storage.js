@@ -640,6 +640,20 @@ export async function startDraft({ leagueId }) {
   await updateDoc(ref, { "draft.status": "live", "draft.deadline": Date.now() + PICK_CLOCK_MS });
 }
 
+// Returns leagues whose draft is scheduled and overdue
+export async function findDueDrafts(nowMs = Date.now()) {
+  const leaguesCol = collection(db, "leagues");
+  const all = await getDocs(leaguesCol);
+  const due = [];
+  all.forEach((d) => {
+    const L = d.data();
+    const scheduledAt = Number(L?.draft?.scheduledAt || 0);
+    if (L?.draft?.status === "scheduled" && scheduledAt && nowMs >= scheduledAt) {
+      due.push({ id: d.id, ...L });
+    }
+  });
+  return due;
+}
 export async function endDraft({ leagueId }) {
   await updateDoc(doc(db, "leagues", leagueId), {
     "draft.status": "done",
