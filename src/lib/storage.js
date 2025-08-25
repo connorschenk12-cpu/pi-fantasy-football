@@ -34,9 +34,10 @@ export function emptyRoster() {
   return r;
 }
 
-// Canonicalize any id to a string (so Map lookups don’t fail)
+/** Canonicalize any id to a string (so Map keys match consistently) */
 export function asId(x) {
   if (x == null) return null;
+  if (typeof x === "object" && x.id != null) return String(x.id);
   return typeof x === "string" ? x : String(x);
 }
 
@@ -196,48 +197,57 @@ export function playerDisplay(p) {
   return p.name || p.fullName || p.playerName || String(p.id) || "(unknown)";
 }
 
-// Returns the preferred list of players. League-scoped list overrides global. De-duped by id.
+/**
+ * Returns players for a league (league-scoped first, then global),
+ * and de-dupes:
+ *   1) by canonical id
+ *   2) by display-key (name|team|position) to catch duplicates with different ids
+ */
 export async function listPlayers({ leagueId }) {
-  const out = [];
+  const raw = [];
 
-  // 1) Try league-scoped list first
+  // 1) league-scoped first
   if (leagueId) {
     const lpRef = collection(db, "leagues", leagueId, "players");
     const lSnap = await getDocs(lpRef);
-    lSnap.forEach((d) => out.push({ id: d.id, ...d.data() }));
+    lSnap.forEach((d) => raw.push({ id: d.id, ...d.data() }));
   }
 
-  // 2) Fallback to global if none
-  if (out.length === 0) {
+  // 2) global fallback
+  if (raw.length === 0) {
     const gSnap = await getDocs(collection(db, "players"));
-    gSnap.forEach((d) => out.push({ id: d.id, ...d.data() }));
+    gSnap.forEach((d) => raw.push({ id: d.id, ...d.data() }));
   }
 
-  // 3) Normalize + de-dup by canonical id
-  const seen = new Set();
-  const dedup = [];
-  for (const p of out) {
+  // 3) normalize
+  const normalized = raw.map((p) => {
     const id = asId(p.id);
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-
     const position = (p.position || p.pos || "").toString().toUpperCase() || null;
     const name =
       p.name ??
       p.fullName ??
       p.playerName ??
       (typeof p.id === "string" ? p.id : null);
+    const team = p.team || p.nflTeam || p.proTeam || null;
+    return { ...p, id, name, position, team };
+  });
 
-    dedup.push({
-      ...p,
-      id,
-      name,
-      position,
-      team: p.team || p.nflTeam || p.proTeam || null,
-    });
+  // 4) de-dupe by id
+  const byId = new Map();
+  for (const p of normalized) {
+    if (!p.id) continue;
+    if (!byId.has(p.id)) byId.set(p.id, p);
   }
 
-  return dedup;
+  // 5) de-dupe again by display key to catch “same human, diff id”
+  const byKey = new Map();
+  for (const p of byId.values()) {
+    const key =
+      `${(p.name || "").toLowerCase()}|${(p.team || "").toLowerCase()}|${(p.position || "").toLowerCase()}`;
+    if (!byKey.has(key)) byKey.set(key, p);
+  }
+
+  return Array.from(byKey.values());
 }
 
 export async function listPlayersMap({ leagueId }) {
@@ -254,15 +264,19 @@ export async function seedPlayersToGlobal(players = []) {
   players.forEach((raw) => {
     const id = asId(raw.id);
     if (!id) return;
-    batch.set(doc(db, "players", id), {
-      id,
-      name: playerDisplay(raw),
-      position: (raw.position || raw.pos || "").toString().toUpperCase(),
-      team: raw.team || raw.nflTeam || raw.proTeam || null,
-      projections: raw.projections || null,
-      matchups: raw.matchups || null,
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
+    batch.set(
+      doc(db, "players", id),
+      {
+        id,
+        name: playerDisplay(raw),
+        position: (raw.position || raw.pos || "").toString().toUpperCase(),
+        team: raw.team || raw.nflTeam || raw.proTeam || null,
+        projections: raw.projections || null,
+        matchups: raw.matchups || null,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
     written += 1;
   });
   await batch.commit();
@@ -276,15 +290,19 @@ export async function seedPlayersToLeague(leagueId, players = []) {
   players.forEach((raw) => {
     const id = asId(raw.id);
     if (!id) return;
-    batch.set(doc(db, "leagues", leagueId, "players", id), {
-      id,
-      name: playerDisplay(raw),
-      position: (raw.position || raw.pos || "").toString().toUpperCase(),
-      team: raw.team || raw.nflTeam || raw.proTeam || null,
-      projections: raw.projections || null,
-      matchups: raw.matchups || null,
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
+    batch.set(
+      doc(db, "leagues", leagueId, "players", id),
+      {
+        id,
+        name: playerDisplay(raw),
+        position: (raw.position || raw.pos || "").toString().toUpperCase(),
+        team: raw.team || raw.nflTeam || raw.proTeam || null,
+        projections: raw.projections || null,
+        matchups: raw.matchups || null,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
     written += 1;
   });
   await batch.commit();
@@ -315,7 +333,6 @@ export function projForWeek(p, week) {
   return 0;
 }
 
-// opponent string (UI)
 export function opponentForWeek(p, week) {
   if (!p || week == null) return "";
   const w = String(week);
@@ -358,20 +375,20 @@ export function actualPointsForPlayer(p, week, statsMap) {
   return 0;
 }
 
-// Prefer actual if available else projection
 export function pointsForPlayer(p, week, statsMap = null) {
   const actual = statsMap ? actualPointsForPlayer(p, week, statsMap) : 0;
   const proj = projForWeek(p, week);
   return actual || proj || 0;
 }
 
-// Team points (actual first, fallback to projection)
 export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
   const lines = [];
   let total = 0;
   (ROSTER_SLOTS || []).forEach((slot) => {
     const pid = roster?.[slot] || null;
-    const p = pid ? playersMap.get(asId(pid)) : null;
+    // IMPORTANT: coerce; handle {id} objects too
+    const key = asId(pid);
+    const p = key ? playersMap.get(key) : null;
     const actual = p ? actualPointsForPlayer(p, week, statsMap) : 0;
     const projected = p ? projForWeek(p, week) : 0;
     const points = actual || projected || 0;
@@ -423,7 +440,7 @@ export async function setEntrySettings({ leagueId, enabled, amountPi }) {
 }
 
 export function hasPaidEntry(league, username) {
-  if (!league?.entry?.enabled) return true; // free or disabled
+  if (!league?.entry?.enabled) return true;
   return !!(league?.entry?.paid && league.entry.paid[username]);
 }
 
@@ -433,7 +450,7 @@ export async function payEntry({ leagueId, username, txId = null }) {
   const snap = await getDoc(ref);
   if (!snap.exists()) throw new Error("League not found");
   const league = snap.data();
-  if (!league?.entry?.enabled) return true; // no-op if disabled
+  if (!league?.entry?.enabled) return true;
 
   const paid = { ...(league.entry?.paid || {}) };
   paid[username] = { paidAt: serverTimestamp(), txId: txId || "manual-ok" };
