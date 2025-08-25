@@ -35,10 +35,12 @@ export function emptyRoster() {
 }
 
 /** Canonicalize any id to a string (so Map keys match consistently) */
+// storage.js — replace your asId with this:
+// storage.js — replace your asId with this:
 export function asId(x) {
   if (x == null) return null;
-  if (typeof x === "object" && x.id != null) return String(x.id);
-  return typeof x === "string" ? x : String(x);
+  if (typeof x === "object" && x.id != null) return String(x.id).trim();
+  return String(x).trim();
 }
 
 function pickFirstOpen(slots, roster) {
