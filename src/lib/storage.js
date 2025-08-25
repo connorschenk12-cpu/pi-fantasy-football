@@ -363,6 +363,14 @@ export function actualPointsForPlayer(p, week, statsMap) {
   return 0;
 }
 
+// Wrapper to keep older imports working.
+// Prefer actual points (if a statsMap is provided), otherwise fall back to projections.
+export function pointsForPlayer(p, week, statsMap = null) {
+  const actual = statsMap ? actualPointsForPlayer(p, week, statsMap) : 0;
+  const proj = projForWeek(p, week);
+  return actual || proj || 0;
+}
+
 // Team points (actual first, fallback to projection)
 export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
   const lines = [];
