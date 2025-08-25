@@ -6,9 +6,13 @@ import {
   listenTeam,
   ensureTeam,
   listPlayersMap,
+  getPlayer,
+  asId,
   playerDisplay,
   projForWeek,
   opponentForWeek,
+  pointsForPlayer,
+  fetchWeekStats,
   moveToStarter,
   moveToBench,
 } from "../lib/storage";
@@ -16,9 +20,10 @@ import {
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
+  const [statsMap, setStatsMap] = useState(new Map()); // live stats if available
   const week = Number(currentWeek || 1);
 
-  // Ensure team + subscribe
+  // Ensure team + subscribe to team doc
   useEffect(() => {
     if (!leagueId || !username) return;
     let unsub = null;
@@ -33,7 +38,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players (for id → name lookups)
+  // Load players (for id → player object lookups)
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -49,14 +54,31 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     };
   }, [leagueId]);
 
+  // Try to fetch actual stats for the week (optional; safe fallback to projections)
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const m = await fetchWeekStats({ leagueId, week });
+        if (alive) setStatsMap(m || new Map());
+      } catch (e) {
+        // non-fatal; projections will be used
+        console.warn("fetchWeekStats:", e);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [leagueId, week]);
+
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
       const id = roster[slot] || null;
-      const p = id ? playersMap.get(id) : null;
-      return { slot, id, p };
+      const p = id ? getPlayer(playersMap, id) : null; // normalized lookup
+      return { slot, id: asId(id), p };
     });
   }, [roster, playersMap]);
 
@@ -78,28 +100,18 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
-  function nameOf(p) {
-    // If we found the object, use playerDisplay; otherwise fall back to raw id
-    return p ? playerDisplay(p) : "(empty)";
-  }
-
-  function posOf(p) {
-    return p?.position || "-";
-  }
-
-  function teamOf(p) {
-    return p?.team || "-";
-  }
-
-  function oppOf(p) {
-    return p ? (opponentForWeek(p, week) || "-") : "-";
-  }
-
-  function projOf(p) {
+  const nameOf = (p) => (p ? playerDisplay(p) : "(empty)");
+  const posOf = (p) => (p?.position || "-");
+  const teamOf = (p) => (p?.team || "-");
+  const oppOf = (p) => (p ? (opponentForWeek(p, week) || "-") : "-");
+  const projOf = (p) => {
     const val = p ? projForWeek(p, week) : 0;
     return (Number.isFinite(val) ? val : 0).toFixed(1);
-    // (Actual live points will replace this when your stats feed goes live)
-  }
+  };
+  const ptsOf = (p) => {
+    const val = p ? pointsForPlayer(p, week, statsMap) : 0; // actual if present, else proj
+    return (Number.isFinite(val) ? val : 0).toFixed(1);
+  };
 
   return (
     <div>
@@ -112,6 +124,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
             <th>Pos</th>
             <th>Team</th>
             <th>Opp</th>
+            <th>Pts</th>
             <th>Proj</th>
             <th>Action</th>
           </tr>
@@ -124,6 +137,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
               <td>{posOf(p)}</td>
               <td>{teamOf(p)}</td>
               <td>{oppOf(p)}</td>
+              <td>{ptsOf(p)}</td>
               <td>{projOf(p)}</td>
               <td>
                 {id ? (
@@ -145,26 +159,29 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
             <th>Pos</th>
             <th>Team</th>
             <th>Opp</th>
+            <th>Pts</th>
             <th>Proj</th>
             <th>Move to slot…</th>
           </tr>
         </thead>
         <tbody>
           {bench.map((pid) => {
-            const p = playersMap.get(pid);
+            const p = getPlayer(playersMap, pid); // normalized lookup
+            const id = asId(pid);
             return (
-              <tr key={pid} style={{ borderBottom: "1px solid #f5f5f5" }}>
+              <tr key={id} style={{ borderBottom: "1px solid #f5f5f5" }}>
                 <td>{nameOf(p)}</td>
                 <td>{posOf(p)}</td>
                 <td>{teamOf(p)}</td>
                 <td>{oppOf(p)}</td>
+                <td>{ptsOf(p)}</td>
                 <td>{projOf(p)}</td>
                 <td>
                   <select
                     defaultValue=""
                     onChange={(e) => {
                       const slot = e.target.value;
-                      if (slot) handleBenchToSlot(pid, slot);
+                      if (slot) handleBenchToSlot(id, slot);
                     }}
                   >
                     <option value="">Choose slot</option>
@@ -180,7 +197,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           })}
           {bench.length === 0 && (
             <tr>
-              <td colSpan={6} style={{ color: "#999" }}>(no bench players)</td>
+              <td colSpan={7} style={{ color: "#999" }}>(no bench players)</td>
             </tr>
           )}
         </tbody>
