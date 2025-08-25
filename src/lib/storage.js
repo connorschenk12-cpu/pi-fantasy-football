@@ -56,7 +56,35 @@ export function defaultSlotForPosition(pos, roster = {}) {
   if (p === "DEF") return "DEF";
   return "FLEX";
 }
+// Allowed positions per slot
+export const SLOT_RULES = {
+  QB:   ["QB"],
+  WR1:  ["WR"],
+  WR2:  ["WR"],
+  RB1:  ["RB"],
+  RB2:  ["RB"],
+  TE:   ["TE"],
+  FLEX: ["RB", "WR", "TE"],
+  K:    ["K"],
+  DEF:  ["DEF"],
+};
 
+export function isSlotAllowedForPosition(slot, pos) {
+  const s = String(slot || "").toUpperCase();
+  const p = String(pos || "").toUpperCase();
+  const allowed = SLOT_RULES[s] || [];
+  return allowed.includes(p);
+}
+
+export function allowedSlotsForPosition(pos) {
+  const p = String(pos || "").toUpperCase();
+  return Object.keys(SLOT_RULES).filter((slot) => SLOT_RULES[slot].includes(p));
+}
+
+export function allowedSlotsForPlayer(player) {
+  const pos = (player?.position || player?.pos || "").toString().toUpperCase();
+  return allowedSlotsForPosition(pos);
+}
 /* =========================================================
    LEAGUE / TEAM READ & LISTEN
    ========================================================= */
