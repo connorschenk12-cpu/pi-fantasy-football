@@ -235,15 +235,7 @@ export async function listPlayersMap({ leagueId }) {
 
 export function playerDisplay(p) {
   if (!p) return "(empty)";
-  const name =
-    p.name ||
-    p.fullName ||
-    p.playerName ||
-    p.displayName ||
-    p.shortName ||
-    p.nickname;
-  if (name && String(name).trim()) return String(name);
-  return p.id ? String(p.id) : "(unknown)";
+  return p.name || p.fullName || p.playerName || String(p.id) || "(unknown)";
 }
 
 export async function seedPlayersToGlobal(players = []) {
