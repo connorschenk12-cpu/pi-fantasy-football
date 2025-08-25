@@ -6,21 +6,22 @@ import {
   listenTeam,
   ensureTeam,
   listPlayersMap,
-  getPlayerById,
-  asId,
   playerDisplay,
   projForWeek,
   opponentForWeek,
   moveToStarter,
   moveToBench,
+  asId,                // <-- IMPORTANT: coerce ids before Map lookup
 } from "../lib/storage";
+import DebugPanel from "./DebugPanel"; // <-- toggleable debug view
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
+  const [showDebug, setShowDebug] = useState(false);
   const week = Number(currentWeek || 1);
 
-  // 1) Ensure team + live subscribe
+  // Ensure team + subscribe
   useEffect(() => {
     if (!leagueId || !username) return;
     let unsub = null;
@@ -35,7 +36,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // 2) Load initial player map
+  // Load players (for id → name lookups)
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -51,111 +52,27 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     };
   }, [leagueId]);
 
-  // 3) Build a reverse index of alternate IDs → player
-  const reverseIndex = useMemo(() => {
-    const idx = new Map();
-    playersMap.forEach((p) => {
-      const cand = new Set([
-        asId(p?.id),
-        asId(p?.playerId),
-        asId(p?.player_id),
-        asId(p?.pid),
-        asId(p?.sleeperId),
-        asId(p?.sleeper_id),
-        asId(p?.gsisId),
-        asId(p?.espnId),
-        asId(p?.yahooId),
-        asId(p?.externalId),
-      ].filter(Boolean));
-      cand.forEach((k) => {
-        if (!idx.has(k)) idx.set(k, p);
-        // also index numeric<->string flips
-        const n = Number(k);
-        if (Number.isFinite(n)) {
-          const kNum = String(n);
-          if (!idx.has(kNum)) idx.set(kNum, p);
-        }
-      });
-    });
-    return idx;
-  }, [playersMap]);
-
-  // 4) Canonicalize roster + bench ids we need
   const roster = team?.roster || {};
-  const benchIds = Array.isArray(team?.bench) ? team.bench : [];
-  const allNeededIds = useMemo(() => {
-    const ids = new Set();
-    ROSTER_SLOTS.forEach((slot) => {
-      const pid = roster?.[slot];
-      if (pid != null) ids.add(asId(pid));
-    });
-    benchIds.forEach((pid) => ids.add(asId(pid)));
-    return Array.from(ids).filter(Boolean);
-  }, [roster, benchIds]);
+  const bench = Array.isArray(team?.bench) ? team.bench : [];
 
-  // 5) Resolve helper: try map → reverseIndex → lazy fetch
-  function resolveFromCaches(rawId) {
-    const key = asId(rawId);
-    if (!key) return null;
-    // direct map hit
-    const direct = playersMap.get(key);
-    if (direct) return direct;
-    // reverse index hit
-    const alt = reverseIndex.get(key);
-    if (alt) return alt;
-    // try numeric/string flip in reverse index
-    const n = Number(key);
-    if (Number.isFinite(n)) {
-      const alt2 = reverseIndex.get(String(n));
-      if (alt2) return alt2;
-    }
-    return null;
-  }
-
-  useEffect(() => {
-    if (!leagueId || allNeededIds.length === 0) return;
-    let cancelled = false;
-
-    (async () => {
-      const missing = allNeededIds.filter((pid) => {
-        const p = resolveFromCaches(pid);
-        return !p;
-      });
-      if (missing.length === 0) return;
-
-      try {
-        const updates = [];
-        for (const m of missing) {
-          const p = await getPlayerById({ leagueId, id: m });
-          if (p) updates.push([asId(m), p]);
-        }
-        if (!cancelled && updates.length) {
-          setPlayersMap((prev) => {
-            const next = new Map(prev);
-            for (const [pid, p] of updates) next.set(pid, p);
-            return next;
-          });
-        }
-      } catch (e) {
-        console.error("lazy load players by id:", e);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [leagueId, allNeededIds]); // deliberately not depending on playersMap/reverseIndex to avoid loops
-
-  // 6) Starters view
+  // IMPORTANT: coerce roster ids with asId before Map.get(...)
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
       const raw = roster[slot] ?? null;
-      const p = resolveFromCaches(raw);
-      return { slot, id: asId(raw), p };
+      const id = asId(raw);
+      const p = id ? playersMap.get(id) : null;
+      return { slot, rawId: raw, id, p };
     });
-  }, [roster, reverseIndex, playersMap]); // reverseIndex/playersMap updates will re-resolve
+  }, [roster, playersMap]);
 
-  // actions
+  const benchRows = useMemo(() => {
+    return bench.map((raw) => {
+      const id = asId(raw);
+      const p = id ? playersMap.get(id) : null;
+      return { rawId: raw, id, p };
+    });
+  }, [bench, playersMap]);
+
   async function handleBenchToSlot(playerId, slot) {
     try {
       await moveToStarter({ leagueId, username, playerId, slot });
@@ -164,6 +81,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
       alert(String(e?.message || e));
     }
   }
+
   async function handleSlotToBench(slot) {
     try {
       await moveToBench({ leagueId, username, slot });
@@ -173,20 +91,38 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
-  // field helpers
-  const nameOf = (p) => (p ? playerDisplay(p) : "(empty)");
-  const posOf = (p) => p?.position || "-";
-  const teamOf = (p) => p?.team || "-";
-  const oppOf = (p) => (p ? (opponentForWeek(p, week) || "-") : "-");
-  const projOf = (p) => {
+  function nameOf(p, fallbackId) {
+    // If we found the object, use playerDisplay; otherwise show “(unknown)” + id for clarity
+    return p ? playerDisplay(p) : fallbackId ? `(unknown: ${fallbackId})` : "(empty)";
+  }
+
+  function posOf(p) {
+    return p?.position || "-";
+  }
+
+  function teamOf(p) {
+    return p?.team || "-";
+  }
+
+  function oppOf(p) {
+    return p ? (opponentForWeek(p, week) || "-") : "-";
+  }
+
+  function projOf(p) {
     const val = p ? projForWeek(p, week) : 0;
     return (Number.isFinite(val) ? val : 0).toFixed(1);
-  };
+  }
 
   return (
     <div>
-      <h3>Starters — Week {week}</h3>
-      <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h3 style={{ margin: 0 }}>Starters — Week {week}</h3>
+        <button onClick={() => setShowDebug((v) => !v)}>
+          {showDebug ? "Hide Debug" : "Show Debug"}
+        </button>
+      </div>
+
+      <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse", marginTop: 8 }}>
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
             <th style={{ width: 60 }}>Slot</th>
@@ -199,10 +135,10 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {starters.map(({ slot, id, p }) => (
+          {starters.map(({ slot, rawId, id, p }) => (
             <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
               <td><b>{slot}</b></td>
-              <td>{nameOf(p)}</td>
+              <td>{nameOf(p, id)}</td>
               <td>{posOf(p)}</td>
               <td>{teamOf(p)}</td>
               <td>{oppOf(p)}</td>
@@ -232,42 +168,44 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {benchIds.map((rawId) => {
-            const pid = asId(rawId);
-            const p = resolveFromCaches(pid);
-            return (
-              <tr key={pid || String(rawId)} style={{ borderBottom: "1px solid #f5f5f5" }}>
-                <td>{nameOf(p)}</td>
-                <td>{posOf(p)}</td>
-                <td>{teamOf(p)}</td>
-                <td>{oppOf(p)}</td>
-                <td>{projOf(p)}</td>
-                <td>
-                  <select
-                    defaultValue=""
-                    onChange={(e) => {
-                      const slot = e.target.value;
-                      if (slot) handleBenchToSlot(pid, slot);
-                    }}
-                  >
-                    <option value="">Choose slot</option>
-                    {ROSTER_SLOTS.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-              </tr>
-            );
-          })}
-          {benchIds.length === 0 && (
+          {benchRows.map(({ rawId, id, p }) => (
+            <tr key={JSON.stringify(rawId)} style={{ borderBottom: "1px solid #f5f5f5" }}>
+              <td>{nameOf(p, id)}</td>
+              <td>{posOf(p)}</td>
+              <td>{teamOf(p)}</td>
+              <td>{oppOf(p)}</td>
+              <td>{projOf(p)}</td>
+              <td>
+                <select
+                  defaultValue=""
+                  onChange={(e) => {
+                    const slot = e.target.value;
+                    if (slot) handleBenchToSlot(id, slot);
+                  }}
+                >
+                  <option value="">Choose slot</option>
+                  {ROSTER_SLOTS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </td>
+            </tr>
+          ))}
+          {benchRows.length === 0 && (
             <tr>
               <td colSpan={6} style={{ color: "#999" }}>(no bench players)</td>
             </tr>
           )}
         </tbody>
       </table>
+
+      {showDebug && (
+        <div style={{ marginTop: 16 }}>
+          <DebugPanel leagueId={leagueId} username={username} />
+        </div>
+      )}
     </div>
   );
 }
