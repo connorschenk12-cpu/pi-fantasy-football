@@ -20,7 +20,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   const [playersMap, setPlayersMap] = useState(new Map());
   const week = Number(currentWeek || 1);
 
-  // Ensure team + subscribe
+  // 1) Ensure team + live subscribe
   useEffect(() => {
     if (!leagueId || !username) return;
     let unsub = null;
@@ -35,7 +35,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load initial players map
+  // 2) Load initial player map
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -51,7 +51,36 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     };
   }, [leagueId]);
 
-  // Canonical roster + bench ids
+  // 3) Build a reverse index of alternate IDs → player
+  const reverseIndex = useMemo(() => {
+    const idx = new Map();
+    playersMap.forEach((p) => {
+      const cand = new Set([
+        asId(p?.id),
+        asId(p?.playerId),
+        asId(p?.player_id),
+        asId(p?.pid),
+        asId(p?.sleeperId),
+        asId(p?.sleeper_id),
+        asId(p?.gsisId),
+        asId(p?.espnId),
+        asId(p?.yahooId),
+        asId(p?.externalId),
+      ].filter(Boolean));
+      cand.forEach((k) => {
+        if (!idx.has(k)) idx.set(k, p);
+        // also index numeric<->string flips
+        const n = Number(k);
+        if (Number.isFinite(n)) {
+          const kNum = String(n);
+          if (!idx.has(kNum)) idx.set(kNum, p);
+        }
+      });
+    });
+    return idx;
+  }, [playersMap]);
+
+  // 4) Canonicalize roster + bench ids we need
   const roster = team?.roster || {};
   const benchIds = Array.isArray(team?.bench) ? team.bench : [];
   const allNeededIds = useMemo(() => {
@@ -64,20 +93,41 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return Array.from(ids).filter(Boolean);
   }, [roster, benchIds]);
 
-  // If some roster/bench ids are missing from playersMap, lazy-fetch them and cache
+  // 5) Resolve helper: try map → reverseIndex → lazy fetch
+  function resolveFromCaches(rawId) {
+    const key = asId(rawId);
+    if (!key) return null;
+    // direct map hit
+    const direct = playersMap.get(key);
+    if (direct) return direct;
+    // reverse index hit
+    const alt = reverseIndex.get(key);
+    if (alt) return alt;
+    // try numeric/string flip in reverse index
+    const n = Number(key);
+    if (Number.isFinite(n)) {
+      const alt2 = reverseIndex.get(String(n));
+      if (alt2) return alt2;
+    }
+    return null;
+  }
+
   useEffect(() => {
     if (!leagueId || allNeededIds.length === 0) return;
     let cancelled = false;
 
     (async () => {
-      const missing = allNeededIds.filter((pid) => pid && !playersMap.has(pid));
+      const missing = allNeededIds.filter((pid) => {
+        const p = resolveFromCaches(pid);
+        return !p;
+      });
       if (missing.length === 0) return;
 
       try {
         const updates = [];
-        for (const pid of missing) {
-          const p = await getPlayerById({ leagueId, id: pid });
-          if (p) updates.push([pid, p]);
+        for (const m of missing) {
+          const p = await getPlayerById({ leagueId, id: m });
+          if (p) updates.push([asId(m), p]);
         }
         if (!cancelled && updates.length) {
           setPlayersMap((prev) => {
@@ -94,18 +144,18 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return () => {
       cancelled = true;
     };
-  }, [leagueId, allNeededIds, playersMap]);
+  }, [leagueId, allNeededIds]); // deliberately not depending on playersMap/reverseIndex to avoid loops
 
-  // Build starters view
+  // 6) Starters view
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
       const raw = roster[slot] ?? null;
-      const key = asId(raw);
-      const p = key ? playersMap.get(key) : null;
-      return { slot, id: key, p };
+      const p = resolveFromCaches(raw);
+      return { slot, id: asId(raw), p };
     });
-  }, [roster, playersMap]);
+  }, [roster, reverseIndex, playersMap]); // reverseIndex/playersMap updates will re-resolve
 
+  // actions
   async function handleBenchToSlot(playerId, slot) {
     try {
       await moveToStarter({ leagueId, username, playerId, slot });
@@ -114,7 +164,6 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
       alert(String(e?.message || e));
     }
   }
-
   async function handleSlotToBench(slot) {
     try {
       await moveToBench({ leagueId, username, slot });
@@ -124,23 +173,15 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
-  // Safe field helpers
-  function nameOf(p) {
-    return p ? playerDisplay(p) : "(empty)";
-  }
-  function posOf(p) {
-    return p?.position || "-";
-  }
-  function teamOf(p) {
-    return p?.team || "-";
-  }
-  function oppOf(p) {
-    return p ? (opponentForWeek(p, week) || "-") : "-";
-  }
-  function projOf(p) {
+  // field helpers
+  const nameOf = (p) => (p ? playerDisplay(p) : "(empty)");
+  const posOf = (p) => p?.position || "-";
+  const teamOf = (p) => p?.team || "-";
+  const oppOf = (p) => (p ? (opponentForWeek(p, week) || "-") : "-");
+  const projOf = (p) => {
     const val = p ? projForWeek(p, week) : 0;
     return (Number.isFinite(val) ? val : 0).toFixed(1);
-  }
+  };
 
   return (
     <div>
@@ -193,7 +234,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         <tbody>
           {benchIds.map((rawId) => {
             const pid = asId(rawId);
-            const p = pid ? playersMap.get(pid) : null;
+            const p = resolveFromCaches(pid);
             return (
               <tr key={pid || String(rawId)} style={{ borderBottom: "1px solid #f5f5f5" }}>
                 <td>{nameOf(p)}</td>
