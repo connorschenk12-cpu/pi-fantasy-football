@@ -11,33 +11,8 @@ import {
   opponentForWeek,
   moveToStarter,
   moveToBench,
+  asId,
 } from "../lib/storage";
-
-// normalize to string id for map lookups
-function asId(x) {
-  if (x == null) return null;
-  return typeof x === "string" ? x : String(x);
-}
-
-// robust getter: tries string/number + falls back to scanning objects by .id
-function getPlayerById(playersMap, rawId) {
-  if (!playersMap) return null;
-  const s = asId(rawId);
-  if (s && playersMap.has(s)) return playersMap.get(s);
-
-  // try number form
-  const n = Number.isFinite(rawId) ? String(rawId) : Number(rawId);
-  if (!Number.isNaN(n)) {
-    const ns = String(n);
-    if (playersMap.has(ns)) return playersMap.get(ns);
-  }
-
-  // final fallback: scan for matching object.id coerced to string
-  for (const [, p] of playersMap.entries()) {
-    if (asId(p?.id) === s) return p;
-  }
-  return null;
-}
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
@@ -80,9 +55,9 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
 
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
-      const pid = roster[slot] ?? null;
-      const p = pid ? getPlayerById(playersMap, pid) : null;
-      return { slot, pid, p };
+      const id = roster[slot] || null;
+      const p = id ? playersMap.get(asId(id)) : null; // IMPORTANT: coerce id
+      return { slot, id, p };
     });
   }, [roster, playersMap]);
 
@@ -107,15 +82,19 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   function nameOf(p) {
     return p ? playerDisplay(p) : "(empty)";
   }
+
   function posOf(p) {
     return p?.position || "-";
   }
+
   function teamOf(p) {
     return p?.team || "-";
   }
+
   function oppOf(p) {
     return p ? (opponentForWeek(p, week) || "-") : "-";
   }
+
   function projOf(p) {
     const val = p ? projForWeek(p, week) : 0;
     return (Number.isFinite(val) ? val : 0).toFixed(1);
@@ -137,7 +116,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {starters.map(({ slot, pid, p }) => (
+          {starters.map(({ slot, id, p }) => (
             <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
               <td><b>{slot}</b></td>
               <td>{nameOf(p)}</td>
@@ -146,7 +125,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
               <td>{oppOf(p)}</td>
               <td>{projOf(p)}</td>
               <td>
-                {pid ? (
+                {id ? (
                   <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
                 ) : (
                   <span style={{ color: "#999" }}>(empty)</span>
@@ -170,11 +149,10 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {bench.map((rawPid) => {
-            const p = getPlayerById(playersMap, rawPid);
-            const pid = asId(rawPid);
+          {bench.map((pid) => {
+            const p = playersMap.get(asId(pid)); // IMPORTANT: coerce id
             return (
-              <tr key={pid} style={{ borderBottom: "1px solid #f5f5f5" }}>
+              <tr key={asId(pid)} style={{ borderBottom: "1px solid #f5f5f5" }}>
                 <td>{nameOf(p)}</td>
                 <td>{posOf(p)}</td>
                 <td>{teamOf(p)}</td>
