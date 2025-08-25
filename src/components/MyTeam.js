@@ -1,19 +1,18 @@
 /* eslint-disable no-console */
 // src/components/MyTeam.js
-
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ROSTER_SLOTS,
   listenTeam,
   ensureTeam,
   listPlayersMap,
+  playerDisplay,
   projForWeek,
   opponentForWeek,
   moveToStarter,
   moveToBench,
-  asId,
+  asId, // ✅ IMPORTANT: normalize ids to string
 } from "../lib/storage";
-import PlayerName from "./common/PlayerName"; // ← use the shared resolver
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
@@ -35,7 +34,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players (for id → details like pos/team/proj)
+  // Load players (for id → name lookups)
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -54,17 +53,11 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
-  // Robust getter: accepts "12", 12, or {id:"12"}
-  function getPlayer(anyId) {
-    const key = asId(anyId);
-    return key ? playersMap.get(key) : null;
-  }
-
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
-      const rawId = roster[slot] || null;
-      const p = getPlayer(rawId);
-      return { slot, id: rawId, p };
+      const id = roster[slot] || null;
+      const p = id ? playersMap.get(asId(id)) : null; // ✅ normalize here
+      return { slot, id, p };
     });
   }, [roster, playersMap]);
 
@@ -86,22 +79,16 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
-  function posOf(p) {
-    return p?.position || "-";
+  function nameOf(p) {
+    return p ? playerDisplay(p) : "(empty)";
   }
-
-  function teamOf(p) {
-    return p?.team || "-";
-  }
-
-  function oppOf(p) {
-    return p ? (opponentForWeek(p, week) || "-") : "-";
-  }
-
-  function projOf(p) {
+  const posOf = (p) => p?.position || "-";
+  const teamOf = (p) => p?.team || "-";
+  const oppOf = (p) => (p ? opponentForWeek(p, week) || "-" : "-");
+  const projOf = (p) => {
     const val = p ? projForWeek(p, week) : 0;
     return (Number.isFinite(val) ? val : 0).toFixed(1);
-  }
+  };
 
   return (
     <div>
@@ -119,32 +106,23 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {starters.map(({ slot, id, p }) => {
-            const key = asId(id);
-            return (
-              <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
-                <td><b>{slot}</b></td>
-                <td>
-                  {key ? (
-                    <PlayerName id={key} leagueId={leagueId} fallback="(unknown)" />
-                  ) : (
-                    <span style={{ color: "#999" }}>(empty)</span>
-                  )}
-                </td>
-                <td>{posOf(p)}</td>
-                <td>{teamOf(p)}</td>
-                <td>{oppOf(p)}</td>
-                <td>{projOf(p)}</td>
-                <td>
-                  {id ? (
-                    <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
-                  ) : (
-                    <span style={{ color: "#999" }}>(empty)</span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
+          {starters.map(({ slot, id, p }) => (
+            <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
+              <td><b>{slot}</b></td>
+              <td>{nameOf(p)}</td>
+              <td>{posOf(p)}</td>
+              <td>{teamOf(p)}</td>
+              <td>{oppOf(p)}</td>
+              <td>{projOf(p)}</td>
+              <td>
+                {id ? (
+                  <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
+                ) : (
+                  <span style={{ color: "#999" }}>(empty)</span>
+                )}
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
 
@@ -162,17 +140,10 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </thead>
         <tbody>
           {bench.map((pid) => {
-            const key = asId(pid);
-            const p = getPlayer(pid);
+            const p = playersMap.get(asId(pid)); // ✅ normalize here
             return (
-              <tr key={key || String(pid)} style={{ borderBottom: "1px solid #f5f5f5" }}>
-                <td>
-                  {key ? (
-                    <PlayerName id={key} leagueId={leagueId} fallback="(unknown)" />
-                  ) : (
-                    <span style={{ color: "#999" }}>(empty)</span>
-                  )}
-                </td>
+              <tr key={asId(pid)} style={{ borderBottom: "1px solid #f5f5f5" }}>
+                <td>{nameOf(p)}</td>
                 <td>{posOf(p)}</td>
                 <td>{teamOf(p)}</td>
                 <td>{oppOf(p)}</td>
