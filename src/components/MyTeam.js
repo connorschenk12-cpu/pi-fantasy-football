@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ROSTER_SLOTS,
+  listenLeague,
   listenTeam,
   ensureTeam,
   listPlayersMap,
@@ -11,15 +12,22 @@ import {
   opponentForWeek,
   moveToStarter,
   moveToBench,
-  asId,
-  getPlayerById, // fallback fetch if a mapped player lacks name
+  allowedSlotsForPlayer,
+  hasPaidEntry,
 } from "../lib/storage";
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
+  const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
-  const [resolved, setResolved] = useState(new Map()); // id -> richer player
   const week = Number(currentWeek || 1);
+
+  // League sub (used for entry payments + draft state)
+  useEffect(() => {
+    if (!leagueId) return;
+    const unsub = listenLeague(leagueId, setLeague);
+    return () => unsub && unsub();
+  }, [leagueId]);
 
   // Ensure team + subscribe
   useEffect(() => {
@@ -47,67 +55,19 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         console.error("listPlayersMap:", e);
       }
     })();
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [leagueId]);
 
   const roster = team?.roster || {};
-  const bench = Array.isArray(team?.bench) ? team.bench : [];
+  const bench = Array.isArray(team?.bench) ? team.bench.map(String) : [];
 
-  // Build starter rows (matchups uses this same style)
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
-      const raw = roster[slot] ?? null;
-      const pid = asId(raw);
-      // prefer resolved → playersMap
-      const p = pid
-        ? (resolved.get(pid) || playersMap.get(pid) || null)
-        : null;
-      return { slot, pid, p };
+      const id = roster[slot] != null ? String(roster[slot]) : null;
+      const p = id ? playersMap.get(id) : null;
+      return { slot, id, p };
     });
-  }, [roster, playersMap, resolved]);
-
-  // Opportunistically resolve any players that still show up as (unknown)
-  useEffect(() => {
-    if (!leagueId) return;
-    const want = new Set();
-
-    // collect ids from starters + bench
-    ROSTER_SLOTS.forEach((slot) => {
-      const pid = asId(roster[slot]);
-      if (pid) want.add(pid);
-    });
-    (bench || []).forEach((b) => {
-      const pid = asId(b);
-      if (pid) want.add(pid);
-    });
-
-    // for any id that maps to a player without a usable display name, fetch by doc id
-    (async () => {
-      const updates = new Map(resolved);
-      for (const pid of want) {
-        const p0 = playersMap.get(pid);
-        const hasGoodName =
-          !!(p0 && playerDisplay(p0) && playerDisplay(p0) !== "(unknown)" && playerDisplay(p0) !== "(empty)");
-
-        if (!hasGoodName) {
-          try {
-            const fetched = await getPlayerById({ leagueId, id: pid });
-            if (fetched && playerDisplay(fetched) && playerDisplay(fetched) !== "(unknown)") {
-              updates.set(pid, fetched);
-            }
-          } catch (e) {
-            // ignore
-          }
-        }
-      }
-      if (updates.size !== resolved.size) {
-        setResolved(updates);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leagueId, roster, bench, playersMap]);
+  }, [roster, playersMap]);
 
   async function handleBenchToSlot(playerId, slot) {
     try {
@@ -127,17 +87,45 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
-  const nameOf = (p) => (p ? playerDisplay(p) : "(empty)");
-  const posOf = (p) => p?.position || "-";
-  const teamOf = (p) => p?.team || "-";
-  const oppOf = (p) => (p ? (opponentForWeek(p, week) || "-") : "-");
-  const projOf = (p) => {
+  function nameOf(p) {
+    return p ? playerDisplay(p) : "(empty)";
+  }
+  function posOf(p) {
+    return p?.position || "-";
+  }
+  function teamOf(p) {
+    return p?.team || "-";
+  }
+  function oppOf(p) {
+    return p ? (opponentForWeek(p, week) || "-") : "-";
+  }
+  function projOf(p) {
     const val = p ? projForWeek(p, week) : 0;
     return (Number.isFinite(val) ? val : 0).toFixed(1);
-  };
+  }
+
+  const showPayment =
+    !!league &&
+    !!league.entry &&
+    league.entry.enabled === true &&
+    !hasPaidEntry(league, username);
 
   return (
     <div>
+      {/* ENTRY FEE NOTICE (My Team only) */}
+      {showPayment && (
+        <div style={{ marginBottom: 14, padding: 12, border: "1px solid #f3d07b", background: "#fff8e5", borderRadius: 8 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Entry Fee Required</div>
+          <div style={{ marginBottom: 10 }}>
+            Please complete your entry payment to participate in the draft and season.
+          </div>
+          {/* Replace the href with your real payments flow URL */}
+          <a href="/payments" style={{ textDecoration: "none" }}>
+            <button>Go to Payments</button>
+          </a>
+        </div>
+      )}
+
       <h3>Starters — Week {week}</h3>
       <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
         <thead>
@@ -152,7 +140,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {starters.map(({ slot, pid, p }) => (
+          {starters.map(({ slot, id, p }) => (
             <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
               <td><b>{slot}</b></td>
               <td>{nameOf(p)}</td>
@@ -161,7 +149,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
               <td>{oppOf(p)}</td>
               <td>{projOf(p)}</td>
               <td>
-                {pid ? (
+                {id ? (
                   <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
                 ) : (
                   <span style={{ color: "#999" }}>(empty)</span>
@@ -185,31 +173,35 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {bench.map((pidRaw) => {
-            const pid = asId(pidRaw);
-            const p = pid ? (resolved.get(pid) || playersMap.get(pid) || null) : null;
+          {bench.map((pid) => {
+            const p = playersMap.get(pid);
+            const allowed = allowedSlotsForPlayer(p);
             return (
-              <tr key={pid || String(pidRaw)} style={{ borderBottom: "1px solid #f5f5f5" }}>
+              <tr key={pid} style={{ borderBottom: "1px solid #f5f5f5" }}>
                 <td>{nameOf(p)}</td>
                 <td>{posOf(p)}</td>
                 <td>{teamOf(p)}</td>
                 <td>{oppOf(p)}</td>
                 <td>{projOf(p)}</td>
                 <td>
-                  <select
-                    defaultValue=""
-                    onChange={(e) => {
-                      const slot = e.target.value;
-                      if (slot) handleBenchToSlot(pid, slot);
-                    }}
-                  >
-                    <option value="">Choose slot</option>
-                    {ROSTER_SLOTS.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
+                  {allowed.length ? (
+                    <select
+                      defaultValue=""
+                      onChange={(e) => {
+                        const slot = e.target.value;
+                        if (slot) handleBenchToSlot(pid, slot);
+                      }}
+                    >
+                      <option value="">Choose slot</option>
+                      {allowed.map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span style={{ color: "#999" }}>(no valid slots)</span>
+                  )}
                 </td>
               </tr>
             );
