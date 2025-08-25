@@ -114,12 +114,27 @@ export async function listTeams(leagueId) {
   snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
   return arr;
 }
-export async function listMemberUsernames(leagueId) {
-  const col = collection(db, "leagues", leagueId, "members");
-  const snap = await getDocs(col);
-  const out = [];
-  snap.forEach((d) => out.push(d.id));
-  return out;
+export async function listPlayers({ leagueId }) {
+  // Prefer league-local players if present
+  let arr = [];
+  if (leagueId) {
+    const lpRef = collection(db, "leagues", leagueId, "players");
+    const lSnap = await getDocs(lpRef);
+    if (!lSnap.empty) {
+      lSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+    }
+  }
+
+  // If none found under the league, fall back to global list
+  if (arr.length === 0) {
+    const snap = await getDocs(collection(db, "players"));
+    snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+  }
+
+  // --- De-duplicate by id in case anything double-seeded ---
+  const dedup = new Map();
+  for (const p of arr) dedup.set(p.id, p);
+  return Array.from(dedup.values());
 }
 
 /* ============================================================================
