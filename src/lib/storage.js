@@ -182,28 +182,59 @@ export function playerDisplay(p) {
 }
 
 // Merge league-scoped players (preferred) with global players, de-duplicate by id
+// Returns the preferred list of players. League-scoped list overrides global. De-duped by id and (name+team+pos).
 export async function listPlayers({ leagueId }) {
-  const result = [];
-  const seen = new Set();
+  let arr = [];
 
-  // league first
+  // Prefer league-local players if present
   if (leagueId) {
-    const lSnap = await getDocs(collection(db, "leagues", leagueId, "players"));
-    lSnap.forEach((d) => {
-      const raw = d.data();
-      const id = asId(raw?.id ?? d.id);
-      if (!id || seen.has(id)) return;
-      seen.add(id);
-      result.push({
-        ...raw,
-        id,
-        position: (raw.position || raw.pos || "").toString().toUpperCase(),
-        team: raw.team || raw.nflTeam || raw.proTeam || null,
-        name: raw.name || playerDisplay(raw),
-      });
+    const lpRef = collection(db, "leagues", leagueId, "players");
+    const lSnap = await getDocs(lpRef);
+    if (!lSnap.empty) {
+      lSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+    }
+  }
+
+  // If league had none, fall back to global
+  if (arr.length === 0) {
+    const gSnap = await getDocs(collection(db, "players"));
+    gSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+  }
+
+  // Normalize + first-pass dedupe by id
+  const seenIds = new Set();
+  const normalized = [];
+  for (const p of arr) {
+    const id = p?.id != null ? String(p.id) : null;
+    if (!id) continue;
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    normalized.push({
+      ...p,
+      id,
+      position: (p.position || p.pos || "").toString().toUpperCase(),
+      name: p.name || p.fullName || p.playerName || null,
+      team: p.team || p.nflTeam || p.proTeam || null,
     });
   }
 
+  // Second-pass dedupe by (name+team+position) to crush near-duplicates with different ids
+  const seenCombo = new Set();
+  const deduped = [];
+  for (const p of normalized) {
+    const combo = `${(p.name || "").trim().toLowerCase()}|${(p.team || "").trim().toUpperCase()}|${(p.position || "").trim().toUpperCase()}`;
+    if (!combo.trim() || combo === "||") {
+      // If we have no metadata, keep the row (can't dedupe intelligently)
+      deduped.push(p);
+      continue;
+    }
+    if (seenCombo.has(combo)) continue;
+    seenCombo.add(combo);
+    deduped.push(p);
+  }
+
+  return deduped;
+}
   // then global
   const gSnap = await getDocs(collection(db, "players"));
   gSnap.forEach((d) => {
