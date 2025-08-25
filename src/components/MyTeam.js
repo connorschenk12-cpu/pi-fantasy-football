@@ -1,18 +1,19 @@
 /* eslint-disable no-console */
 // src/components/MyTeam.js
+
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ROSTER_SLOTS,
   listenTeam,
   ensureTeam,
   listPlayersMap,
-  playerDisplay,
   projForWeek,
   opponentForWeek,
   moveToStarter,
   moveToBench,
   asId,
 } from "../lib/storage";
+import PlayerName from "./common/PlayerName"; // ← use the shared resolver
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState(null);
@@ -34,7 +35,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     return () => unsub && unsub();
   }, [leagueId, username]);
 
-  // Load players (for id → name lookups)
+  // Load players (for id → details like pos/team/proj)
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -53,7 +54,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
-  // robust getter: accepts "12", 12, or {id:"12"}
+  // Robust getter: accepts "12", 12, or {id:"12"}
   function getPlayer(anyId) {
     const key = asId(anyId);
     return key ? playersMap.get(key) : null;
@@ -83,10 +84,6 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
       console.error("moveToBench:", e);
       alert(String(e?.message || e));
     }
-  }
-
-  function nameOf(p) {
-    return p ? playerDisplay(p) : "(empty)";
   }
 
   function posOf(p) {
@@ -122,23 +119,32 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {starters.map(({ slot, id, p }) => (
-            <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
-              <td><b>{slot}</b></td>
-              <td>{nameOf(p)}</td>
-              <td>{posOf(p)}</td>
-              <td>{teamOf(p)}</td>
-              <td>{oppOf(p)}</td>
-              <td>{projOf(p)}</td>
-              <td>
-                {id ? (
-                  <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
-                ) : (
-                  <span style={{ color: "#999" }}>(empty)</span>
-                )}
-              </td>
-            </tr>
-          ))}
+          {starters.map(({ slot, id, p }) => {
+            const key = asId(id);
+            return (
+              <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
+                <td><b>{slot}</b></td>
+                <td>
+                  {key ? (
+                    <PlayerName id={key} leagueId={leagueId} fallback="(unknown)" />
+                  ) : (
+                    <span style={{ color: "#999" }}>(empty)</span>
+                  )}
+                </td>
+                <td>{posOf(p)}</td>
+                <td>{teamOf(p)}</td>
+                <td>{oppOf(p)}</td>
+                <td>{projOf(p)}</td>
+                <td>
+                  {id ? (
+                    <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
+                  ) : (
+                    <span style={{ color: "#999" }}>(empty)</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
 
@@ -156,11 +162,17 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </thead>
         <tbody>
           {bench.map((pid) => {
-            const p = getPlayer(pid);
             const key = asId(pid);
+            const p = getPlayer(pid);
             return (
               <tr key={key || String(pid)} style={{ borderBottom: "1px solid #f5f5f5" }}>
-                <td>{nameOf(p)}</td>
+                <td>
+                  {key ? (
+                    <PlayerName id={key} leagueId={leagueId} fallback="(unknown)" />
+                  ) : (
+                    <span style={{ color: "#999" }}>(empty)</span>
+                  )}
+                </td>
                 <td>{posOf(p)}</td>
                 <td>{teamOf(p)}</td>
                 <td>{oppOf(p)}</td>
