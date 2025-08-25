@@ -11,7 +11,7 @@ import {
   opponentForWeek,
   moveToStarter,
   moveToBench,
-  asId, // ✅ IMPORTANT: normalize ids to string
+  asId,
 } from "../lib/storage";
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
@@ -53,10 +53,23 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   const roster = team?.roster || {};
   const bench = Array.isArray(team?.bench) ? team.bench : [];
 
+  // defensive resolver: try direct key, then a linear search fallback
+  function resolvePlayerById(idLike) {
+    const key = asId(idLike);
+    if (!key) return null;
+    const direct = playersMap.get(key);
+    if (direct) return direct;
+    // fallback: some historical docs might have odd id fields; search values
+    for (const p of playersMap.values()) {
+      if (asId(p?.id) === key) return p;
+    }
+    return null;
+  }
+
   const starters = useMemo(() => {
     return ROSTER_SLOTS.map((slot) => {
-      const id = roster[slot] || null;
-      const p = id ? playersMap.get(asId(id)) : null; // ✅ normalize here
+      const id = roster[slot] ?? null;
+      const p = id ? resolvePlayerById(id) : null;
       return { slot, id, p };
     });
   }, [roster, playersMap]);
@@ -79,9 +92,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
-  function nameOf(p) {
-    return p ? playerDisplay(p) : "(empty)";
-  }
+  const nameOf = (p, id) => (p ? playerDisplay(p) : asId(id) || "(empty)");
   const posOf = (p) => p?.position || "-";
   const teamOf = (p) => p?.team || "-";
   const oppOf = (p) => (p ? opponentForWeek(p, week) || "-" : "-");
@@ -109,7 +120,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           {starters.map(({ slot, id, p }) => (
             <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
               <td><b>{slot}</b></td>
-              <td>{nameOf(p)}</td>
+              <td>{nameOf(p, id)}</td>
               <td>{posOf(p)}</td>
               <td>{teamOf(p)}</td>
               <td>{oppOf(p)}</td>
@@ -140,10 +151,10 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </thead>
         <tbody>
           {bench.map((pid) => {
-            const p = playersMap.get(asId(pid)); // ✅ normalize here
+            const p = resolvePlayerById(pid);
             return (
               <tr key={asId(pid)} style={{ borderBottom: "1px solid #f5f5f5" }}>
-                <td>{nameOf(p)}</td>
+                <td>{nameOf(p, pid)}</td>
                 <td>{posOf(p)}</td>
                 <td>{teamOf(p)}</td>
                 <td>{oppOf(p)}</td>
