@@ -35,7 +35,8 @@ export function emptyRoster() {
 }
 
 export function asId(x) {
-  if (x == null) return null;
+  // always normalize to string for map lookups & Firestore ids
+  if (x == null) return "";
   return typeof x === "string" ? x : String(x);
 }
 
@@ -190,11 +191,11 @@ export async function joinLeague({ leagueId, username }) {
    PLAYERS
    ========================================================= */
 
-// Returns the preferred list of players. League-scoped list overrides global. De-duped by id.
+// Prefer league-scoped players; fallback to global. De-dupe by id. Normalize fields.
 export async function listPlayers({ leagueId }) {
   let arr = [];
 
-  // Prefer league-local players if present
+  // League-local players first
   if (leagueId) {
     const lpRef = collection(db, "leagues", leagueId, "players");
     const lSnap = await getDocs(lpRef);
@@ -203,23 +204,24 @@ export async function listPlayers({ leagueId }) {
     }
   }
 
+  // Global fallback
   if (arr.length === 0) {
     const gSnap = await getDocs(collection(db, "players"));
     gSnap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
   }
 
-  // De-dup by id (string)
+  // De-dup & normalize
   const seen = new Set();
   const dedup = [];
   for (const p of arr) {
     const id = asId(p.id);
     if (id && !seen.has(id)) {
       seen.add(id);
-      // normalize some fields
       dedup.push({
         ...p,
         id,
         position: (p.position || p.pos || "").toString().toUpperCase(),
+        team: p.team || p.nflTeam || p.proTeam || null,
       });
     }
   }
@@ -229,13 +231,27 @@ export async function listPlayers({ leagueId }) {
 export async function listPlayersMap({ leagueId }) {
   const arr = await listPlayers({ leagueId });
   const map = new Map();
-  arr.forEach((p) => map.set(asId(p.id), p));
+  (arr || []).forEach((p) => map.set(asId(p.id), p));
   return map;
+}
+
+export function getPlayer(playersMap, id) {
+  if (!playersMap) return null;
+  return playersMap.get(asId(id)) || null;
 }
 
 export function playerDisplay(p) {
   if (!p) return "(empty)";
-  return p.name || p.fullName || p.playerName || String(p.id) || "(unknown)";
+  const name =
+    p.name ||
+    p.fullName ||
+    p.full_name ||
+    p.displayName ||
+    p.playerName ||
+    (p.firstName && p.lastName ? `${p.firstName} ${p.lastName}` : null) ||
+    (p.first_name && p.last_name ? `${p.first_name} ${p.last_name}` : null);
+
+  return name || String(p.id) || "(unknown)";
 }
 
 export async function seedPlayersToGlobal(players = []) {
@@ -350,13 +366,11 @@ export function actualPointsForPlayer(p, week, statsMap) {
   if (!id) return 0;
   const row = statsMap?.get ? statsMap.get(id) : null;
   if (!row) return 0;
-  // prefer 'points' if provided, else compute simple sum fallback if present
   if (row.points != null) return Number(row.points) || 0;
   return 0;
 }
 
-// Wrapper to keep older imports working.
-// Prefer actual points (if a statsMap is provided), otherwise fall back to projections.
+// Prefer actual (if provided) else projection
 export function pointsForPlayer(p, week, statsMap = null) {
   const actual = statsMap ? actualPointsForPlayer(p, week, statsMap) : 0;
   const proj = projForWeek(p, week);
@@ -368,8 +382,8 @@ export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
   const lines = [];
   let total = 0;
   (ROSTER_SLOTS || []).forEach((slot) => {
-    const pid = roster?.[slot] || null;
-    const p = pid ? playersMap.get(asId(pid)) : null;
+    const pid = roster?.[slot] ?? null;
+    const p = getPlayer(playersMap, pid);
     const actual = p ? actualPointsForPlayer(p, week, statsMap) : 0;
     const proj = p ? projForWeek(p, week) : 0;
     const points = actual || proj || 0;
