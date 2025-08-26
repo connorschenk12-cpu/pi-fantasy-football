@@ -10,7 +10,7 @@ import {
   endDraft,
   setEntrySettings,
   setDraftSchedule,
-  ensureOrRecreateSchedule, // make sure this is exported from storage.js
+  ensureSeasonSchedule, // <— use the modern API
   leagueIsFree,
 } from "../lib/storage.js";
 
@@ -148,7 +148,7 @@ export default function LeagueAdmin({ leagueId, username }) {
     setSaving(true);
     try {
       // Always (re)create a round-robin schedule
-      await ensureOrRecreateSchedule(leagueId, 14);
+      await ensureSeasonSchedule({ leagueId, totalWeeks: 14, recreate: true });
       alert("Season schedule created.");
     } catch (e) {
       console.error(e);
@@ -161,7 +161,6 @@ export default function LeagueAdmin({ leagueId, username }) {
   const schedStr = (() => {
     const s = Number(league?.draft?.scheduledAt || 0);
     return s ? new Date(s).toLocaleString() : "—";
-    // Renders local timezone
   })();
 
   return (
@@ -240,7 +239,7 @@ export default function LeagueAdmin({ leagueId, username }) {
         </div>
         {!leagueIsFree(league) && (
           <div style={{ color: "#777", marginTop: 8 }}>
-            Payments are collected in the **My Team** tab via your provider flow.
+            Payments are collected in the <b>My Team</b> tab via your provider flow.
           </div>
         )}
       </div>
