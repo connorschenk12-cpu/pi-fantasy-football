@@ -14,14 +14,17 @@ import {
   ROSTER_SLOTS,
   hasPaidEntry,
   leagueIsFree,
-  fetchWeekStats, // <-- wire actual stats
+  fetchWeekStats,
+  projForWeek,
+  actualPointsForPlayer,
+  opponentForWeek,
 } from "../lib/storage.js";
 
 export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
-  const [statsMap, setStatsMap] = useState(null); // actual stats by player for the week
+  const [statsMap, setStatsMap] = useState(null); // Map<playerId, { points, ... }>
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
 
@@ -72,14 +75,14 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     };
   }, [leagueId, week]);
 
-  // compute totals & per-slot actual/proj
-  const points = useMemo(() => {
+  // compute totals & per-slot actual/proj for starters
+  const starterPoints = useMemo(() => {
     if (!team) return { lines: [], total: 0 };
     return computeTeamPoints({
       roster: team?.roster || {},
       week,
       playersMap,
-      statsMap, // <- now passing actuals
+      statsMap,
     });
   }, [team, playersMap, statsMap, week]);
 
@@ -130,19 +133,30 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     return <div>Loading your team…</div>;
   }
 
-  const benchIds = Array.isArray(team?.bench) ? team.bench : [];
   const roster = team?.roster || {};
+  const benchIds = Array.isArray(team?.bench) ? team.bench : [];
 
   // Payment CTA (in My Team)
   const showPaymentCTA = entryRequired && !alreadyPaid;
   const amountPi = Number(league?.entry?.amountPi || 0);
+
+  // helper: compute stats for *any* player (used for bench too)
+  function lineForPlayer(pid) {
+    const p = pid ? playersMap.get(String(pid)) : null;
+    if (!p) return { p: null, proj: 0, actual: 0, scored: 0, opp: "" };
+    const proj = projForWeek(p, week) || 0;
+    const actual = actualPointsForPlayer(p, week, statsMap) || 0;
+    const scored = actual || proj || 0;
+    const opp = opponentForWeek(p, week) || "";
+    return { p, proj, actual, scored, opp };
+  }
 
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <h3 style={{ margin: 0 }}>{team?.name || username}</h3>
         <div style={{ color: "#666" }}>
-          Week {week} Total: <b>{points.total.toFixed(1)}</b>
+          Week {week} Total: <b>{starterPoints.total.toFixed(1)}</b>
         </div>
       </div>
 
@@ -160,13 +174,12 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
         >
           <b>Entry Fee:</b> {amountPi.toFixed(2)} Pi
           <div style={{ marginTop: 8 }}>
-            {/* Link this to your real payments screen/flow */}
             <a href="/payments" style={{ textDecoration: "none" }}>
               <button>Go to Payments</button>
             </a>
           </div>
           <div style={{ color: "#666", marginTop: 6 }}>
-            After you pay, your provider webhook should record the receipt; this banner will disappear automatically.
+            Once your provider webhook records the payment, this banner disappears automatically.
           </div>
         </div>
       )}
@@ -187,6 +200,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
             <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
               <th style={{ width: 70 }}>Slot</th>
               <th>Player</th>
+              <th style={{ width: 80 }}>Opp</th>
               <th style={{ width: 90, textAlign: "right" }}>Proj</th>
               <th style={{ width: 90, textAlign: "right" }}>Actual</th>
               <th style={{ width: 90, textAlign: "right" }}>Scored</th>
@@ -196,16 +210,12 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
           <tbody>
             {ROSTER_SLOTS.map((slot) => {
               const pid = roster[slot] || null;
-              const p = pid ? playersMap.get(String(pid)) : null;
-              const line = points.lines.find((l) => l.slot === slot);
-              const proj = line ? Number(line.projected || 0) : 0;
-              const actual = line ? Number(line.actual || 0) : 0;
-              const scored = line ? Number(line.points || 0) : 0;
-
+              const { p, proj, actual, scored, opp } = lineForPlayer(pid);
               return (
                 <tr key={slot} style={{ borderBottom: "1px solid #f6f6f6" }}>
                   <td><b>{slot}</b></td>
                   <td>{p ? playerDisplay(p) : <span style={{ color: "#999" }}>(empty)</span>}</td>
+                  <td>{p ? (opp || "—") : "—"}</td>
                   <td style={{ textAlign: "right" }}>{proj.toFixed(1)}</td>
                   <td style={{ textAlign: "right" }}>{actual.toFixed(1)}</td>
                   <td style={{ textAlign: "right" }}>{scored.toFixed(1)}</td>
@@ -240,17 +250,20 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
             <thead>
               <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
                 <th>Player</th>
+                <th style={{ width: 80 }}>Opp</th>
+                <th style={{ width: 90, textAlign: "right" }}>Proj</th>
+                <th style={{ width: 90, textAlign: "right" }}>Actual</th>
                 <th>Allowed Slots</th>
-                <th style={{ width: 300 }}>Actions</th>
+                <th style={{ width: 320 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {benchIds.map((pid) => {
-                const p = playersMap.get(String(pid));
+                const { p, proj, actual, opp } = lineForPlayer(pid);
                 if (!p) {
                   return (
                     <tr key={pid}>
-                      <td colSpan={3} style={{ color: "crimson" }}>
+                      <td colSpan={6} style={{ color: "crimson" }}>
                         Unknown player id on bench: {String(pid)}
                       </td>
                     </tr>
@@ -260,9 +273,10 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                 return (
                   <tr key={pid} style={{ borderBottom: "1px solid #f6f6f6" }}>
                     <td>{playerDisplay(p)}</td>
-                    <td>
-                      {allowed.length ? allowed.join(", ") : <span style={{ color: "#999" }}>—</span>}
-                    </td>
+                    <td>{opp || "—"}</td>
+                    <td style={{ textAlign: "right" }}>{proj.toFixed(1)}</td>
+                    <td style={{ textAlign: "right" }}>{actual.toFixed(1)}</td>
+                    <td>{allowed.length ? allowed.join(", ") : <span style={{ color: "#999" }}>—</span>}</td>
                     <td>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                         {allowed.map((slot) => (
