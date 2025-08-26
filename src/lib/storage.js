@@ -92,9 +92,11 @@ export function allowedSlotsForPlayer(player) {
 export function listenLeague(leagueId, onChange) {
   if (!leagueId) return () => {};
   const ref = doc(db, "leagues", leagueId);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
-  });
+  return onSnapshot(
+    ref,
+    (snap) => onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null),
+    (err) => console.warn("listenLeague error:", err)
+  );
 }
 
 export async function getLeague(leagueId) {
@@ -125,17 +127,21 @@ export async function ensureTeam({ leagueId, username }) {
 export function listenTeam({ leagueId, username, onChange }) {
   if (!leagueId || !username) return () => {};
   const ref = doc(db, "leagues", leagueId, "teams", username);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
-  });
+  return onSnapshot(
+    ref,
+    (snap) => onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null),
+    (err) => console.warn("listenTeam error:", err)
+  );
 }
 
 export function listenTeamById(leagueId, teamId, onChange) {
   if (!leagueId || !teamId) return () => {};
   const ref = doc(db, "leagues", leagueId, "teams", teamId);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
-  });
+  return onSnapshot(
+    ref,
+    (snap) => onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null),
+    (err) => console.warn("listenTeamById error:", err)
+  );
 }
 
 export async function listTeams(leagueId) {
@@ -163,7 +169,7 @@ export async function listMyLeagues({ username }) {
   const out = [];
   sOwned.forEach((d) => out.push({ id: d.id, ...d.data() }));
 
-  // As member
+  // Member
   const all = await getDocs(leaguesCol);
   for (const d of all.docs) {
     const memSnap = await getDoc(doc(db, "leagues", d.id, "members", username));
@@ -429,19 +435,47 @@ export function opponentForWeek(p, week) {
   return "";
 }
 
-// Serverless stats for a week → Map<playerId, { points, ... }>
+/** Convert a Sleeper-like stat line into fantasy points (simple PPR-ish). */
+function fantasyPointsFromSleeper(s = {}) {
+  const passYds = Number(s.passYds ?? s.pass_yd ?? 0);
+  const passTD  = Number(s.passTD  ?? s.pass_td  ?? 0);
+  const passInt = Number(s.passInt ?? s.pass_int ?? 0);
+  const rushYds = Number(s.rushYds ?? s.rush_yd ?? 0);
+  const rushTD  = Number(s.rushTD  ?? s.rush_td  ?? 0);
+  const recYds  = Number(s.recYds  ?? s.rec_yd   ?? 0);
+  const recTD   = Number(s.recTD   ?? s.rec_td   ?? 0);
+  const rec     = Number(s.rec     ?? s.rec      ?? 0);
+  const fumLost = Number(s.fumbles ?? s.fum_lost ?? 0);
+
+  const pts =
+    0.04 * passYds +
+    4    * passTD  +
+   -2    * passInt +
+    0.1  * rushYds +
+    6    * rushTD  +
+    0.1  * recYds  +
+    6    * recTD   +
+    0.5  * rec     +
+   -2    * fumLost;
+
+  return Math.round(pts * 10) / 10;
+}
+
+// Serverless stats for a week → Map<playerId, { points, raw }>
 export async function fetchWeekStats({ leagueId, week }) {
   try {
     const url = `/api/stats/week?week=${encodeURIComponent(week)}${leagueId ? `&league=${encodeURIComponent(leagueId)}` : ""}`;
     const res = await fetch(url);
     if (!res.ok) return new Map();
-    const data = await res.json();
+    const data = await res.json(); // { ok, week, season, stats: { [id]: {...raw} } }
     const map = new Map();
-    if (Array.isArray(data)) {
-      data.forEach((row) => {
-        const id = asId(row.id);
-        if (id) map.set(id, row);
-      });
+    if (data && data.stats && typeof data.stats === "object") {
+      for (const [pid, statline] of Object.entries(data.stats)) {
+        const id = asId(pid);
+        if (!id) continue;
+        const points = fantasyPointsFromSleeper(statline || {});
+        map.set(id, { points, raw: statline || {} });
+      }
     }
     return map;
   } catch (e) {
@@ -488,11 +522,15 @@ export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
 export function listenLeagueClaims(leagueId, onChange) {
   if (!leagueId) return () => {};
   const ref = collection(db, "leagues", leagueId, "claims");
-  return onSnapshot(ref, (snap) => {
-    const m = new Map();
-    snap.forEach((d) => m.set(asId(d.id), d.data()));
-    onChange(m);
-  });
+  return onSnapshot(
+    ref,
+    (snap) => {
+      const m = new Map();
+      snap.forEach((d) => m.set(asId(d.id), d.data()));
+      onChange(m);
+    },
+    (err) => console.warn("listenLeagueClaims error:", err)
+  );
 }
 
 export async function getClaimsSet(leagueId) {
@@ -505,7 +543,7 @@ export async function getClaimsSet(leagueId) {
 }
 
 /* =========================================================
-   ENTRY / PAYMENTS (flag only)
+   ENTRY / PAYMENTS (flag only for now)
    ========================================================= */
 
 export async function setEntrySettings({ leagueId, enabled, amountPi }) {
@@ -527,6 +565,7 @@ export function hasPaidEntry(league, username) {
   return !!(league?.entry?.paid && league.entry.paid[username]);
 }
 
+/** Dev helper: mark a user as paid. In production, call this server-side from a webhook. */
 export async function payEntry({ leagueId, username, txId = null }) {
   if (!leagueId || !username) throw new Error("Missing leagueId/username");
   const ref = doc(db, "leagues", leagueId);
@@ -551,7 +590,7 @@ export async function allMembersPaidOrFree(leagueId) {
 }
 
 /* =========================================================
-   DRAFT HELPERS & ACTIONS (scheduled-capable)
+   DRAFT HELPERS & ACTIONS
    ========================================================= */
 
 export function canDraft(league) {
@@ -737,7 +776,7 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   const doneAll = picksTaken >= roundsTotal * teamsCount;
   const nextDeadline = doneAll ? null : Date.now() + (Number(league?.draft?.clockMs) || PICK_CLOCK_MS);
 
-  batch.update(leagueRef, {
+  await updateDoc(leagueRef, {
     "draft.pointer": Math.max(0, Math.min(teamsCount - 1, pointer)),
     "draft.direction": direction,
     "draft.round": Math.max(1, Math.min(roundsTotal, round)),
@@ -745,8 +784,6 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
     "draft.deadline": nextDeadline,
     "draft.status": doneAll ? "done" : "live",
   });
-
-  await batch.commit();
 }
 
 // pick best available (by projections) for the team on clock
@@ -864,12 +901,19 @@ export async function releasePlayerAndClearSlot({ leagueId, username, playerId }
   const roster = { ...(team.roster || emptyRoster()) };
   const bench = Array.isArray(team.bench) ? [...team.bench] : [];
 
-  for (const s of Object.keys(roster)) if (asId(roster[s]) === asId(playerId)) roster[s] = null;
+  // Clear from starters
+  for (const s of Object.keys(roster)) {
+    if (asId(roster[s]) === asId(playerId)) {
+      roster[s] = null;
+    }
+  }
+  // Remove from bench
   const idx = bench.indexOf(asId(playerId));
   if (idx >= 0) bench.splice(idx, 1);
 
   const batch = writeBatch(db);
   batch.set(tRef, { roster, bench }, { merge: true });
+  // Remove the league claim so others can add the player
   batch.delete(doc(db, "leagues", leagueId, "claims", asId(playerId)));
   await batch.commit();
 }
@@ -958,9 +1002,11 @@ export async function writeSchedule(leagueId, schedule) {
 export function listenScheduleWeek(leagueId, week, onChange) {
   if (!leagueId || !week) return () => {};
   const ref = doc(db, "leagues", leagueId, "schedule", `week-${week}`);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? snap.data() : { week, matchups: [] });
-  });
+  return onSnapshot(
+    ref,
+    (snap) => onChange(snap.exists() ? snap.data() : { week, matchups: [] }),
+    (err) => console.warn("listenScheduleWeek error:", err)
+  );
 }
 
 export async function getScheduleWeek(leagueId, week) {
@@ -1016,11 +1062,15 @@ export async function listMatchups(leagueId, week) {
 export function listenMatchups(leagueId, week, onChange) {
   const colRef = collection(db, "leagues", leagueId, "matchups");
   const qq = Number.isFinite(week) ? query(colRef, where("week", "==", Number(week))) : colRef;
-  return onSnapshot(qq, (snap) => {
-    const arr = [];
-    snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-    onChange(arr);
-  });
+  return onSnapshot(
+    qq,
+    (snap) => {
+      const arr = [];
+      snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+      onChange(arr);
+    },
+    (err) => console.warn("listenMatchups error:", err)
+  );
 }
 
 export async function setMatchupResult({ leagueId, week, home, away, homePts, awayPts }) {
