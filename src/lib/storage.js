@@ -960,20 +960,20 @@ export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate
   return { weeksCreated: schedule.map((w) => w.week) };
 }
 
-/** Back-compat wrapper (supports both call styles) */
-export async function ensureOrRecreateSchedule(arg1, maybeTotalWeeks = 14) {
-  // Style A: ensureOrRecreateSchedule({ leagueId, totalWeeks })
+/**
+ * Back-compat wrapper (supports both call styles):
+ *   ensureOrRecreateSchedule({ leagueId, totalWeeks })
+ *   ensureOrRecreateSchedule(leagueId, totalWeeks)
+ */
+export function ensureOrRecreateSchedule(arg1, maybeTotalWeeks = 14) {
   if (typeof arg1 === "object" && arg1 !== null) {
-    const leagueId = arg1.leagueId;
-    const totalWeeks = arg1.totalWeeks ?? 14;
+    const { leagueId, totalWeeks = 14 } = arg1;
     return ensureSeasonSchedule({ leagueId, totalWeeks, recreate: true });
   }
-  // Style B: ensureOrRecreateSchedule(leagueId, totalWeeks)
   const leagueId = arg1;
   const totalWeeks = maybeTotalWeeks ?? 14;
   return ensureSeasonSchedule({ leagueId, totalWeeks, recreate: true });
 }
-
 export async function listMatchups(leagueId, week) {
   const colRef = collection(db, "leagues", leagueId, "matchups");
   const qq = Number.isFinite(week) ? query(colRef, where("week", "==", Number(week))) : colRef;
