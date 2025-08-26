@@ -10,7 +10,7 @@ import {
   endDraft,
   setEntrySettings,
   setDraftSchedule,
-  ensureSeasonSchedule, // <— use the modern API
+  ensureOrRecreateSchedule, // back-compat wrapper exported from storage.js
   leagueIsFree,
 } from "../lib/storage.js";
 
@@ -19,11 +19,11 @@ export default function LeagueAdmin({ leagueId, username }) {
   const [members, setMembers] = useState([]);
   const [saving, setSaving] = useState(false);
 
-  // Entry settings local form
+  // Entry settings form state
   const [entryEnabled, setEntryEnabled] = useState(false);
   const [entryAmountPi, setEntryAmountPi] = useState(0);
 
-  // Draft scheduling local form
+  // Draft scheduling form state (HTML datetime-local expects "YYYY-MM-DDTHH:mm")
   const [draftDateTime, setDraftDateTime] = useState("");
 
   const isOwner = useMemo(
@@ -31,13 +31,13 @@ export default function LeagueAdmin({ leagueId, username }) {
     [league, username]
   );
 
-  // Subscribe league
+  // Subscribe to league
   useEffect(() => {
     if (!leagueId) return;
     return listenLeague(leagueId, (L) => setLeague(L));
   }, [leagueId]);
 
-  // Load members (& seed defaults for forms)
+  // Load members list
   useEffect(() => {
     if (!leagueId) return;
     (async () => {
@@ -49,15 +49,23 @@ export default function LeagueAdmin({ leagueId, username }) {
     })();
   }, [leagueId]);
 
+  // Seed form defaults when league loads/updates
   useEffect(() => {
     if (!league) return;
     setEntryEnabled(!!league?.entry?.enabled);
     setEntryAmountPi(Number(league?.entry?.amountPi || 0));
-    // show any existing scheduledAt in the datetime field
+
     const sched = Number(league?.draft?.scheduledAt || 0);
     if (sched) {
-      const isoLocal = new Date(sched).toISOString().slice(0, 16);
-      setDraftDateTime(isoLocal);
+      // Convert ms to local "YYYY-MM-DDTHH:mm"
+      const dt = new Date(sched);
+      const pad = (n) => String(n).padStart(2, "0");
+      const local = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(
+        dt.getHours()
+      )}:${pad(dt.getMinutes())}`;
+      setDraftDateTime(local);
+    } else {
+      setDraftDateTime("");
     }
   }, [league]);
 
@@ -132,7 +140,6 @@ export default function LeagueAdmin({ leagueId, username }) {
     }
     setSaving(true);
     try {
-      // Convert local datetime-local value to ms
       const ms = new Date(draftDateTime).getTime();
       await setDraftSchedule({ leagueId, startsAtMs: ms });
       alert("Draft scheduled!");
@@ -147,8 +154,8 @@ export default function LeagueAdmin({ leagueId, username }) {
   async function handleWriteSchedule() {
     setSaving(true);
     try {
-      // Always (re)create a round-robin schedule
-      await ensureSeasonSchedule({ leagueId, totalWeeks: 14, recreate: true });
+      // Always (re)create a round-robin schedule (14 weeks default here)
+      await ensureOrRecreateSchedule(leagueId, 14);
       alert("Season schedule created.");
     } catch (e) {
       console.error(e);
@@ -170,13 +177,12 @@ export default function LeagueAdmin({ leagueId, username }) {
       <div style={{ marginBottom: 20 }}>
         <div><b>League:</b> {league?.name}</div>
         <div><b>Owner:</b> {league?.owner}</div>
-        <div>
-          <b>Members:</b> {members.join(", ")}
-        </div>
+        <div><b>Members:</b> {members.join(", ")}</div>
       </div>
 
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginBottom: 16 }}>
         <h4 style={{ marginTop: 0 }}>Draft Controls</h4>
+
         <div style={{ marginBottom: 8 }}>
           <div><b>Status:</b> {league?.draft?.status || "scheduled"}</div>
           <div><b>Scheduled for:</b> {schedStr}</div>
@@ -237,6 +243,7 @@ export default function LeagueAdmin({ leagueId, username }) {
           </label>
           <button disabled={saving} onClick={handleSaveEntry}>Save</button>
         </div>
+
         {!leagueIsFree(league) && (
           <div style={{ color: "#777", marginTop: 8 }}>
             Payments are collected in the <b>My Team</b> tab via your provider flow.
