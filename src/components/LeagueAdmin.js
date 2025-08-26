@@ -4,154 +4,245 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   listenLeague,
   listMemberUsernames,
+  configureDraft,
   initDraftOrder,
   startDraft,
   endDraft,
+  setEntrySettings,
   setDraftSchedule,
-  ensureOrRecreateSchedule,
-  allMembersPaidOrFree,
-  memberCanDraft,
-  teamRecordLine,
-} from "../lib/storage";
+  ensureOrRecreateSchedule, // make sure this is exported from storage.js
+  leagueIsFree,
+} from "../lib/storage.js";
 
 export default function LeagueAdmin({ leagueId, username }) {
   const [league, setLeague] = useState(null);
   const [members, setMembers] = useState([]);
-  const [whenLocal, setWhenLocal] = useState(""); // datetime-local value
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    if (!leagueId) return;
-    const unsub = listenLeague(leagueId, setLeague);
-    return () => unsub && unsub();
-  }, [leagueId]);
+  // Entry settings local form
+  const [entryEnabled, setEntryEnabled] = useState(false);
+  const [entryAmountPi, setEntryAmountPi] = useState(0);
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const arr = await listMemberUsernames(leagueId);
-        if (alive) setMembers(arr);
-      } catch (e) {
-        console.error("listMemberUsernames:", e);
-      }
-    })();
-    return () => { alive = false; };
-  }, [leagueId]);
+  // Draft scheduling local form
+  const [draftDateTime, setDraftDateTime] = useState("");
 
   const isOwner = useMemo(
     () => !!league && league.owner === username,
     [league, username]
   );
 
-  async function handleSeedOrder() {
-    try {
-      const seeded = await initDraftOrder({ leagueId });
-      alert(`Draft order seeded: ${seeded.join(" → ")}`);
-    } catch (e) {
-      alert(String(e?.message || e));
+  // Subscribe league
+  useEffect(() => {
+    if (!leagueId) return;
+    return listenLeague(leagueId, (L) => setLeague(L));
+  }, [leagueId]);
+
+  // Load members (& seed defaults for forms)
+  useEffect(() => {
+    if (!leagueId) return;
+    (async () => {
+      try {
+        setMembers(await listMemberUsernames(leagueId));
+      } catch (e) {
+        console.error("listMemberUsernames:", e);
+      }
+    })();
+  }, [leagueId]);
+
+  useEffect(() => {
+    if (!league) return;
+    setEntryEnabled(!!league?.entry?.enabled);
+    setEntryAmountPi(Number(league?.entry?.amountPi || 0));
+    // show any existing scheduledAt in the datetime field
+    const sched = Number(league?.draft?.scheduledAt || 0);
+    if (sched) {
+      const isoLocal = new Date(sched).toISOString().slice(0, 16);
+      setDraftDateTime(isoLocal);
     }
+  }, [league]);
+
+  if (!league) {
+    return <div>Loading league settings…</div>;
   }
 
-  async function handleSchedule() {
-    if (!whenLocal) {
-      alert("Pick a date & time first.");
-      return;
-    }
+  if (!isOwner) {
+    return <div style={{ color: "#666" }}>Only the league owner can view admin tools.</div>;
+  }
+
+  async function handleInitDraftOrder() {
+    setSaving(true);
     try {
-      setSaving(true);
-      const startsAtMs = Date.parse(whenLocal);
-      await setDraftSchedule({ leagueId, startsAtMs });
-      alert("Draft scheduled.");
+      const order = await initDraftOrder({ leagueId });
+      alert("Draft order set: " + order.join(" → "));
     } catch (e) {
-      alert(String(e?.message || e));
+      console.error(e);
+      alert(e?.message || String(e));
     } finally {
       setSaving(false);
     }
   }
 
-  async function handleGoLiveNow() {
+  async function handleStartDraftNow() {
+    setSaving(true);
     try {
       await startDraft({ leagueId });
+      alert("Draft started!");
     } catch (e) {
-      alert(String(e?.message || e));
+      console.error(e);
+      alert(e?.message || String(e));
+    } finally {
+      setSaving(false);
     }
   }
 
   async function handleEndDraft() {
+    setSaving(true);
     try {
       await endDraft({ leagueId });
-      alert("Draft marked as done.");
+      alert("Draft ended.");
     } catch (e) {
-      alert(String(e?.message || e));
+      console.error(e);
+      alert(e?.message || String(e));
+    } finally {
+      setSaving(false);
     }
   }
 
-  async function handleRecreateSchedule() {
+  async function handleSaveEntry() {
+    setSaving(true);
     try {
-      const out = await ensureOrRecreateSchedule(leagueId, 14);
-      alert(`Weeks (re)created: ${out.weeksCreated.join(", ") || "(already existed)"}`);
+      await setEntrySettings({
+        leagueId,
+        enabled: !!entryEnabled,
+        amountPi: Number(entryAmountPi || 0),
+      });
+      alert("Entry settings saved.");
     } catch (e) {
-      alert(String(e?.message || e));
+      console.error(e);
+      alert(e?.message || String(e));
+    } finally {
+      setSaving(false);
     }
   }
 
-  if (!league) return <div>Loading league…</div>;
-  if (!isOwner) return <div>(Admin tools are only visible to the league owner.)</div>;
+  async function handleScheduleDraft() {
+    if (!draftDateTime) {
+      alert("Pick a date & time first.");
+      return;
+    }
+    setSaving(true);
+    try {
+      // Convert local datetime-local value to ms
+      const ms = new Date(draftDateTime).getTime();
+      await setDraftSchedule({ leagueId, startsAtMs: ms });
+      alert("Draft scheduled!");
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
 
-  const status = league?.draft?.status || "scheduled";
-  const scheduledAt = league?.draft?.scheduledAt ? new Date(league.draft.scheduledAt) : null;
+  async function handleWriteSchedule() {
+    setSaving(true);
+    try {
+      // Always (re)create a round-robin schedule
+      await ensureOrRecreateSchedule(leagueId, 14);
+      alert("Season schedule created.");
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const schedStr = (() => {
+    const s = Number(league?.draft?.scheduledAt || 0);
+    return s ? new Date(s).toLocaleString() : "—";
+    // Renders local timezone
+  })();
 
   return (
     <div>
       <h3>League Admin</h3>
 
-      <div style={{ marginBottom: 12, padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
-        <div><b>Draft Status:</b> {status}
-          {scheduledAt && status === "scheduled" && (
-            <> — scheduled for <b>{scheduledAt.toLocaleString()}</b></>
-          )}
+      <div style={{ marginBottom: 20 }}>
+        <div><b>League:</b> {league?.name}</div>
+        <div><b>Owner:</b> {league?.owner}</div>
+        <div>
+          <b>Members:</b> {members.join(", ")}
         </div>
-        <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
-          <button onClick={handleSeedOrder}>Seed Draft Order from Members</button>
+      </div>
 
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <input
-              type="datetime-local"
-              value={whenLocal}
-              onChange={(e) => setWhenLocal(e.target.value)}
-            />
-            <button disabled={saving} onClick={handleSchedule}>
-              {saving ? "Saving…" : "Schedule Draft"}
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginBottom: 16 }}>
+        <h4 style={{ marginTop: 0 }}>Draft Controls</h4>
+        <div style={{ marginBottom: 8 }}>
+          <div><b>Status:</b> {league?.draft?.status || "scheduled"}</div>
+          <div><b>Scheduled for:</b> {schedStr}</div>
+          <div><b>Clock (ms):</b> {league?.draft?.clockMs || 5000}</div>
+          <div><b>Rounds:</b> {league?.draft?.roundsTotal || 12}</div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <button disabled={saving} onClick={handleInitDraftOrder}>Initialize Draft Order</button>
+          <button disabled={saving} onClick={handleWriteSchedule}>Recreate Season Schedule</button>
+          <button disabled={saving} onClick={handleStartDraftNow}>Start Draft Now</button>
+          <button disabled={saving} onClick={handleEndDraft}>End Draft</button>
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <label style={{ display: "block", marginBottom: 4 }}>
+            <b>Schedule draft (local time)</b>
+          </label>
+          <input
+            type="datetime-local"
+            value={draftDateTime}
+            onChange={(e) => setDraftDateTime(e.target.value)}
+          />
+          <div style={{ marginTop: 8 }}>
+            <button disabled={saving} onClick={handleScheduleDraft}>
+              Save Draft Schedule
             </button>
-            <button onClick={handleGoLiveNow}>Go Live Now</button>
-            <button onClick={handleEndDraft}>Mark Draft Done</button>
+          </div>
+          <div style={{ color: "#777", marginTop: 8 }}>
+            When the timestamp is reached, your cron/edge job should call
+            <code> findDueDrafts()</code> and then <code>startDraft()</code> for each due league.
           </div>
         </div>
       </div>
 
-      <div style={{ marginBottom: 12, padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
-        <b>Regular Season Schedule</b>
-        <div style={{ marginTop: 8 }}>
-          <button onClick={handleRecreateSchedule}>
-            (Re)create Round-Robin (14 weeks)
-          </button>
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
+        <h4 style={{ marginTop: 0 }}>Entry Settings</h4>
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <label>
+            <input
+              type="checkbox"
+              checked={entryEnabled}
+              onChange={(e) => setEntryEnabled(e.target.checked)}
+            />{" "}
+            Require entry fee
+          </label>
+          <label>
+            Amount (Pi):{" "}
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={entryAmountPi}
+              onChange={(e) => setEntryAmountPi(e.target.value)}
+              style={{ width: 100 }}
+              disabled={!entryEnabled}
+            />
+          </label>
+          <button disabled={saving} onClick={handleSaveEntry}>Save</button>
         </div>
-      </div>
-
-      <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
-        <b>Members</b>
-        <ul>
-          {members.map((m) => {
-            const can = memberCanDraft(league, m);
-            const rec = teamRecordLine(league, m);
-            return (
-              <li key={m}>
-                {m} — {can ? "eligible" : "blocked"} — record: {rec}
-              </li>
-            );
-          })}
-        </ul>
+        {!leagueIsFree(league) && (
+          <div style={{ color: "#777", marginTop: 8 }}>
+            Payments are collected in the **My Team** tab via your provider flow.
+          </div>
+        )}
       </div>
     </div>
   );
