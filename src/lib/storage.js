@@ -974,6 +974,10 @@ export async function listMatchups(leagueId, week) {
   return arr;
 }
 
+export async function ensureOrRecreateSchedule(leagueId, totalWeeks = 14) {
+  return ensureSeasonSchedule({ leagueId, totalWeeks, recreate: true });
+}
+
 export function listenMatchups(leagueId, week, onChange) {
   const colRef = collection(db, "leagues", leagueId, "matchups");
   const qq = Number.isFinite(week) ? query(colRef, where("week", "==", Number(week))) : colRef;
