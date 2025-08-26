@@ -14,7 +14,6 @@ import {
   ROSTER_SLOTS,
   hasPaidEntry,
   leagueIsFree,
-  ensureOrRecreateSchedule,
 } from "../lib/storage.js";
 
 export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
