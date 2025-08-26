@@ -940,7 +940,7 @@ export async function getScheduleAllWeeks(leagueId) {
   return arr;
 }
 
-/** Ensure schedule exists (or recreate). Writes week-1..N docs. */
+// ---- SCHEDULE ENSURE (single source of truth) ----
 export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate = false }) {
   if (!leagueId) throw new Error("Missing leagueId");
   const members = await listMemberUsernames(leagueId);
@@ -952,9 +952,7 @@ export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate
   const existing = await getDocs(colRef);
   const exists = !existing.empty;
 
-  if (exists && !recreate) {
-    return { weeksCreated: [] };
-  }
+  if (exists && !recreate) return { weeksCreated: [] };
 
   await writeSchedule(leagueId, schedule);
   return { weeksCreated: schedule.map((w) => w.week) };
@@ -1017,3 +1015,5 @@ export function memberCanDraft(league, username) {
   if (league?.entry?.enabled && !hasPaidEntry(league, username)) return false;
   return true;
 }
+/* ===== Final explicit re-exports (back-compat) ===== */
+export { ensureSeasonSchedule, ensureOrRecreateSchedule };
