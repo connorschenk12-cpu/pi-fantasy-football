@@ -939,39 +939,6 @@ export async function getScheduleAllWeeks(leagueId) {
   arr.sort((a, b) => Number(a.week) - Number(b.week));
   return arr;
 }
-
-// ---- SCHEDULE ENSURE (single source of truth) ----
-export async function ensureSeasonSchedule({ leagueId, totalWeeks = 14, recreate = false }) {
-  if (!leagueId) throw new Error("Missing leagueId");
-  const members = await listMemberUsernames(leagueId);
-  if (members.length < 2) throw new Error("Need at least 2 team members to schedule.");
-
-  const schedule = generateScheduleRoundRobin(members, totalWeeks);
-
-  const colRef = collection(db, "leagues", leagueId, "schedule");
-  const existing = await getDocs(colRef);
-  const exists = !existing.empty;
-
-  if (exists && !recreate) return { weeksCreated: [] };
-
-  await writeSchedule(leagueId, schedule);
-  return { weeksCreated: schedule.map((w) => w.week) };
-}
-
-/**
- * Back-compat wrapper (supports both call styles):
- *   ensureOrRecreateSchedule({ leagueId, totalWeeks })
- *   ensureOrRecreateSchedule(leagueId, totalWeeks)
- */
-export function ensureOrRecreateSchedule(arg1, maybeTotalWeeks = 14) {
-  if (typeof arg1 === "object" && arg1 !== null) {
-    const { leagueId, totalWeeks = 14 } = arg1;
-    return ensureSeasonSchedule({ leagueId, totalWeeks, recreate: true });
-  }
-  const leagueId = arg1;
-  const totalWeeks = maybeTotalWeeks ?? 14;
-  return ensureSeasonSchedule({ leagueId, totalWeeks, recreate: true });
-}
 export async function listMatchups(leagueId, week) {
   const colRef = collection(db, "leagues", leagueId, "matchups");
   const qq = Number.isFinite(week) ? query(colRef, where("week", "==", Number(week))) : colRef;
