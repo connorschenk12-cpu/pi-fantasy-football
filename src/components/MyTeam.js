@@ -2,253 +2,287 @@
 // src/components/MyTeam.js
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  ROSTER_SLOTS,
-  // league + team
   listenLeague,
   listenTeam,
-  ensureTeam,
-  // players
   listPlayersMap,
   playerDisplay,
-  projForWeek,
-  opponentForWeek,
-  // moves
+  computeTeamPoints,
   moveToStarter,
   moveToBench,
-  // entry/payments
+  releasePlayerAndClearSlot,
+  allowedSlotsForPlayer,
+  ROSTER_SLOTS,
   hasPaidEntry,
-} from "../lib/storage";
+  leagueIsFree,
+} from "../lib/storage.js";
 
-/** Small banner that renders entry-fee state & a Payments button */
-function PaymentsGate({ league, leagueId, username }) {
-  if (!league?.entry?.enabled) return null; // free league or disabled
-
-  const paid = hasPaidEntry(league, username);
-  const amount = Number(league?.entry?.amountPi || 0);
-  const checkoutUrl = `/payments?league=${encodeURIComponent(leagueId)}`;
-
-  return (
-    <div style={{ margin: "12px 0 16px", padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
-      {paid ? (
-        <div style={{ color: "#2a9d8f" }}>✅ Entry paid</div>
-      ) : (
-        <>
-          <div style={{ marginBottom: 8 }}>
-            Entry Fee: <b>{amount} π</b>
-          </div>
-          <a href={checkoutUrl}>
-            <button>Go to Payments</button>
-          </a>
-          <div style={{ color: "#888", marginTop: 6, fontSize: 12 }}>
-            After payment completes, the provider will call our webhook to mark you as paid.
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-/** Allowed lineup slots per position */
-function validSlotsFor(p) {
-  const pos = String(p?.position || "").toUpperCase();
-  if (!pos) return [];
-  if (pos === "QB") return ["QB"];
-  if (pos === "RB") return ["RB1", "RB2", "FLEX"];
-  if (pos === "WR") return ["WR1", "WR2", "FLEX"];
-  if (pos === "TE") return ["TE", "FLEX"];
-  if (pos === "K") return ["K"];
-  if (pos === "DEF") return ["DEF"];
-  return [];
-}
-
-export default function MyTeam({ leagueId, username, currentWeek }) {
+export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
-  const week = Number(currentWeek || 1);
+  const [loading, setLoading] = useState(true);
+  const [acting, setActing] = useState(false);
 
-  // Live league doc (for entry status, etc.)
+  // subscribe league + my team
   useEffect(() => {
-    if (!leagueId) return () => {};
-    const unsub = listenLeague(leagueId, setLeague);
-    return () => unsub && unsub();
-  }, [leagueId]);
-
-  // Ensure team + subscribe
-  useEffect(() => {
-    if (!leagueId || !username) return;
-    let unsub = null;
-    (async () => {
-      try {
-        await ensureTeam({ leagueId, username });
-        unsub = listenTeam({ leagueId, username, onChange: setTeam });
-      } catch (e) {
-        console.error("ensureTeam/listenTeam:", e);
-      }
-    })();
-    return () => unsub && unsub();
+    if (!leagueId) return;
+    const unsubLeague = listenLeague(leagueId, (L) => setLeague(L));
+    const unsubTeam = listenTeam({ leagueId, username, onChange: setTeam });
+    return () => {
+      unsubLeague && unsubLeague();
+      unsubTeam && unsubTeam();
+    };
   }, [leagueId, username]);
 
-  // Load players (for id → object lookups)
+  // load players map
   useEffect(() => {
-    let alive = true;
+    let live = true;
     (async () => {
       try {
         const map = await listPlayersMap({ leagueId });
-        if (alive) setPlayersMap(map || new Map());
+        if (live) setPlayersMap(map || new Map());
       } catch (e) {
         console.error("listPlayersMap:", e);
+      } finally {
+        if (live) setLoading(false);
       }
     })();
     return () => {
-      alive = false;
+      live = false;
     };
   }, [leagueId]);
 
-  const roster = team?.roster || {};
-  const bench = Array.isArray(team?.bench) ? team.bench : [];
+  const week = Number(currentWeek || 1);
 
-  const starters = useMemo(() => {
-    return ROSTER_SLOTS.map((slot) => {
-      const id = roster[slot] || null;
-      const p = id ? playersMap.get(String(id)) : null;
-      return { slot, id, p };
+  const points = useMemo(() => {
+    if (!team) return { lines: [], total: 0 };
+    return computeTeamPoints({
+      roster: team?.roster || {},
+      week,
+      playersMap,
+      statsMap: null, // wire real stats when ready
     });
-  }, [roster, playersMap]);
+  }, [team, playersMap, week]);
 
-  async function handleBenchToSlot(playerId, slot) {
+  const entryRequired = useMemo(() => !leagueIsFree(league), [league]);
+  const alreadyPaid = useMemo(() => hasPaidEntry(league, username), [league, username]);
+
+  const draftStatus = league?.draft?.status || "scheduled";
+  const draftDone = draftStatus === "done";
+  const draftLive = draftStatus === "live";
+
+  async function handleMoveToStarter(pid, slot) {
+    setActing(true);
     try {
-      await moveToStarter({ leagueId, username, playerId, slot });
+      await moveToStarter({ leagueId, username, playerId: pid, slot });
     } catch (e) {
-      console.error("moveToStarter:", e);
-      alert(String(e?.message || e));
+      console.error(e);
+      alert(e?.message || String(e));
+    } finally {
+      setActing(false);
     }
   }
 
-  async function handleSlotToBench(slot) {
+  async function handleMoveToBench(slot) {
+    setActing(true);
     try {
       await moveToBench({ leagueId, username, slot });
     } catch (e) {
-      console.error("moveToBench:", e);
-      alert(String(e?.message || e));
+      console.error(e);
+      alert(e?.message || String(e));
+    } finally {
+      setActing(false);
     }
   }
 
-  function nameOf(p) {
-    // If we found the object, use playerDisplay; otherwise show (empty)
-    return p ? playerDisplay(p) : "(empty)";
+  async function handleRelease(pid) {
+    if (!window.confirm("Release this player from your team?")) return;
+    setActing(true);
+    try {
+      await releasePlayerAndClearSlot({ leagueId, username, playerId: pid });
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || String(e));
+    } finally {
+      setActing(false);
+    }
   }
 
-  function posOf(p) {
-    return p?.position || "-";
+  if (loading || !league || !team) {
+    return <div>Loading your team…</div>;
   }
 
-  function teamOf(p) {
-    return p?.team || "-";
-  }
+  const benchIds = Array.isArray(team?.bench) ? team.bench : [];
+  const roster = team?.roster || {};
 
-  function oppOf(p) {
-    return p ? (opponentForWeek(p, week) || "-") : "-";
-  }
-
-  function projOf(p) {
-    const val = p ? projForWeek(p, week) : 0;
-    return (Number.isFinite(val) ? val : 0).toFixed(1);
-    // (Actual live points will replace this once your stats feed is wired)
-  }
+  // Payment CTA (moved here, not in Admin)
+  const showPaymentCTA = entryRequired && !alreadyPaid;
+  const amountPi = Number(league?.entry?.amountPi || 0);
 
   return (
     <div>
-      {/* Payments prompt (before/after draft, hidden if already paid or entry disabled) */}
-      <PaymentsGate league={league} leagueId={leagueId} username={username} />
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <h3 style={{ margin: 0 }}>{team?.name || username}</h3>
+        <div style={{ color: "#666" }}>
+          Week {week} Total: <b>{points.total.toFixed(1)}</b>
+        </div>
+      </div>
 
-      <h3>Starters — Week {week}</h3>
-      <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
-        <thead>
-          <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
-            <th style={{ width: 60 }}>Slot</th>
-            <th>Name</th>
-            <th>Pos</th>
-            <th>Team</th>
-            <th>Opp</th>
-            <th>Proj</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {starters.map(({ slot, id, p }) => (
-            <tr key={slot} style={{ borderBottom: "1px solid #f5f5f5" }}>
-              <td><b>{slot}</b></td>
-              <td>{nameOf(p)}</td>
-              <td>{posOf(p)}</td>
-              <td>{teamOf(p)}</td>
-              <td>{oppOf(p)}</td>
-              <td>{projOf(p)}</td>
-              <td>
-                {id ? (
-                  <button onClick={() => handleSlotToBench(slot)}>Send to Bench</button>
-                ) : (
-                  <span style={{ color: "#999" }}>(empty)</span>
-                )}
-              </td>
+      {/* Entry Payment CTA */}
+      {showPaymentCTA && (
+        <div
+          style={{
+            marginTop: 12,
+            marginBottom: 12,
+            padding: 12,
+            border: "1px dashed #e6b800",
+            background: "#fffbe6",
+            borderRadius: 8,
+          }}
+        >
+          <b>Entry Fee:</b> {amountPi.toFixed(2)} Pi
+          <div style={{ marginTop: 8 }}>
+            {/* Link this to your real payments screen/flow */}
+            <a href="/payments" style={{ textDecoration: "none" }}>
+              <button>Go to Payments</button>
+            </a>
+          </div>
+          <div style={{ color: "#666", marginTop: 6 }}>
+            After you pay, your payment provider webhook should call the server to record the
+            receipt; the banner will disappear automatically.
+          </div>
+        </div>
+      )}
+
+      {/* Draft status banner */}
+      <div style={{ color: "#666", marginBottom: 12 }}>
+        Draft status: <b>{draftStatus}</b>
+        {league?.draft?.scheduledAt ? (
+          <> &middot; Scheduled for {new Date(league.draft.scheduledAt).toLocaleString()}</>
+        ) : null}
+      </div>
+
+      {/* Starters */}
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginBottom: 16 }}>
+        <h4 style={{ marginTop: 0 }}>Starters</h4>
+        <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+              <th style={{ width: 70 }}>Slot</th>
+              <th>Player</th>
+              <th style={{ width: 120, textAlign: "right" }}>Pts</th>
+              <th style={{ width: 220 }}>Actions</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {ROSTER_SLOTS.map((slot) => {
+              const pid = roster[slot] || null;
+              const p = pid ? playersMap.get(String(pid)) : null;
+              const line = points.lines.find((l) => l.slot === slot);
+              const pts = line ? Number(line.points || 0) : 0;
 
-      <h3 style={{ marginTop: 18 }}>Bench</h3>
-      <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
-        <thead>
-          <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
-            <th>Name</th>
-            <th>Pos</th>
-            <th>Team</th>
-            <th>Opp</th>
-            <th>Proj</th>
-            <th>Move to slot…</th>
-          </tr>
-        </thead>
-        <tbody>
-          {bench.map((pid) => {
-            const p = playersMap.get(String(pid));
-            const options = validSlotsFor(p);
-            return (
-              <tr key={pid} style={{ borderBottom: "1px solid #f5f5f5" }}>
-                <td>{nameOf(p)}</td>
-                <td>{posOf(p)}</td>
-                <td>{teamOf(p)}</td>
-                <td>{oppOf(p)}</td>
-                <td>{projOf(p)}</td>
-                <td>
-                  {options.length ? (
-                    <select
-                      defaultValue=""
-                      onChange={(e) => {
-                        const slot = e.target.value;
-                        if (slot) handleBenchToSlot(pid, slot);
-                      }}
-                    >
-                      <option value="">Choose slot</option>
-                      {options.map((s) => (
-                        <option key={s} value={s}>
-                          {s}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <span style={{ color: "#999" }}>No eligible slots</span>
-                  )}
-                </td>
+              return (
+                <tr key={slot} style={{ borderBottom: "1px solid #f6f6f6" }}>
+                  <td><b>{slot}</b></td>
+                  <td>{p ? playerDisplay(p) : <span style={{ color: "#999" }}>(empty)</span>}</td>
+                  <td style={{ textAlign: "right" }}>{pts.toFixed(1)}</td>
+                  <td>
+                    {p ? (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button disabled={acting} onClick={() => handleMoveToBench(slot)}>
+                          Move to Bench
+                        </button>
+                        <button disabled={acting} onClick={() => handleRelease(pid)}>
+                          Release
+                        </button>
+                      </div>
+                    ) : (
+                      <span style={{ color: "#999" }}>—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Bench */}
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
+        <h4 style={{ marginTop: 0 }}>Bench</h4>
+        {benchIds.length === 0 ? (
+          <div style={{ color: "#999" }}>No one on the bench.</div>
+        ) : (
+          <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+                <th>Player</th>
+                <th>Allowed Slots</th>
+                <th style={{ width: 240 }}>Actions</th>
               </tr>
-            );
-          })}
-          {bench.length === 0 && (
-            <tr>
-              <td colSpan={6} style={{ color: "#999" }}>(no bench players)</td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+            </thead>
+            <tbody>
+              {benchIds.map((pid) => {
+                const p = playersMap.get(String(pid));
+                if (!p) {
+                  return (
+                    <tr key={pid}>
+                      <td colSpan={3} style={{ color: "crimson" }}>
+                        Unknown player id on bench: {String(pid)}
+                      </td>
+                    </tr>
+                  );
+                }
+                const allowed = allowedSlotsForPlayer(p);
+                return (
+                  <tr key={pid} style={{ borderBottom: "1px solid #f6f6f6" }}>
+                    <td>{playerDisplay(p)}</td>
+                    <td>
+                      {allowed.length ? allowed.join(", ") : <span style={{ color: "#999" }}>—</span>}
+                    </td>
+                    <td>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {allowed.map((slot) => (
+                          <button
+                            key={slot}
+                            disabled={acting}
+                            onClick={() => handleMoveToStarter(pid, slot)}
+                          >
+                            Start at {slot}
+                          </button>
+                        ))}
+                        <button disabled={acting} onClick={() => handleRelease(pid)}>Release</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Helpful hints */}
+      <div style={{ color: "#777", marginTop: 12 }}>
+        • You can only place players in legal positions (QB/RB/WR/TE/FLEX/K/DEF).<br />
+        • If a starter slot is filled, “Move to Bench” swaps roster spots safely.<br />
+        • Projected/actual stats wiring is coming next.
+      </div>
+
+      {/* After-draft reminder for payments still due */}
+      {draftDone && showPaymentCTA && (
+        <div
+          style={{
+            marginTop: 16,
+            padding: 12,
+            borderRadius: 8,
+            border: "1px dashed #e6b800",
+            background: "#fffbe6",
+          }}
+        >
+          The draft is complete—please complete your entry payment to keep your team eligible.
+        </div>
+      )}
     </div>
   );
 }
