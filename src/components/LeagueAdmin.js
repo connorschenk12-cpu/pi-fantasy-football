@@ -33,7 +33,7 @@ export default function LeagueAdmin({ leagueId, username }) {
   const isOwner = useMemo(() => !!league && league.owner === username, [league, username]);
 
   {isOwner && (
-  <EspnIdBackfill leagueId={null} />
+  <EspnIdBackfill leagueId={leagueId} />
 )}
   
   // Subscribe to league
