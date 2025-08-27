@@ -274,6 +274,31 @@ export default function LeagueAdmin({ leagueId, username }) {
         )}
       </div>
 
+{/* ESPN Player Import */}
+<div className="card mt12">
+  <div className="card-title">Import Players (ESPN)</div>
+  <div className="row gap12 ai-center">
+    <button
+      className="btn btn-primary"
+      onClick={async () => {
+        try {
+          const r = await fetch("/api/players/espn");
+          const { players } = await r.json();
+          const result = await seedPlayersToGlobal(players);
+          alert(`Imported ${result.written} players into global DB.`);
+        } catch (err) {
+          console.error("ESPN import failed:", err);
+          alert("Error refreshing players from ESPN.");
+        }
+      }}
+    >
+      Refresh Players from ESPN
+    </button>
+    <div className="muted">
+      Pulls the latest roster, teams, and ESPN IDs into your <code>players</code> collection.
+    </div>
+  </div>
+</div>
       {/* Season Controls */}
       <div className="card mb12">
         <div className="card-title">Season Controls</div>
