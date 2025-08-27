@@ -17,8 +17,15 @@ import {
   ROSTER_SLOTS,
   hasPaidEntry,
   leagueIsFree,
-  payEntry, // <-- NEW: used after sandbox payment to hide banner
+  payEntry,
 } from "../lib/storage.js";
+
+function getPi() {
+  if (typeof window !== "undefined" && window.Pi && typeof window.Pi.init === "function") {
+    return window.Pi;
+  }
+  return null;
+}
 
 export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   const [league, setLeague] = useState(null);
@@ -130,19 +137,23 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     }
   }
 
-  // ----- Pi Payments -----
-  function getPi() {
-    if (typeof window !== "undefined" && window.Pi && typeof window.Pi.createPayment === "function") {
-      return window.Pi;
-    }
-    return null;
-  }
-
+  // 🔑 Pay league dues via Pi (with scope upgrade if needed)
   async function handlePayDues() {
     try {
       const Pi = getPi();
       if (!Pi) {
-        alert("Pi SDK not found. Open this app in Pi Browser (sandbox) to test payments.");
+        alert("Pi SDK not found. Open this app in Pi Browser (sandbox).");
+        return;
+      }
+
+      // Ensure we have the payments scope (re-auth if needed)
+      try {
+        await Pi.authenticate(["username", "payments"], (payment) =>
+          console.log("incompletePayment", payment)
+        );
+      } catch (e) {
+        console.warn("Re-auth for payments scope failed or was cancelled:", e);
+        alert("We need the Pi payments permission to continue.");
         return;
       }
 
@@ -154,11 +165,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
 
       const memo = `League ${leagueId} entry for @${username}`;
       await Pi.createPayment(
-        {
-          amount,
-          memo,
-          metadata: { leagueId, username },
-        },
+        { amount, memo, metadata: { leagueId, username } },
         {
           onReadyForServerApproval: (paymentId) => {
             console.log("onReadyForServerApproval", paymentId);
@@ -166,9 +173,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
           onReadyForServerCompletion: (paymentId, txId) => {
             console.log("onReadyForServerCompletion", paymentId, txId);
           },
-          onCancel: (paymentId) => {
-            console.log("Payment cancelled", paymentId);
-          },
+          onCancel: (paymentId) => console.log("Payment cancelled", paymentId),
           onError: (error, paymentId) => {
             console.error("Payment error", paymentId, error);
             alert(error?.message || String(error));
@@ -176,7 +181,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
         }
       );
 
-      // Mark as paid in Firestore so the banner hides immediately (sandbox)
+      // Sandbox: immediately flag as paid in Firestore
       await payEntry({ leagueId, username, txId: "pi-sandbox" });
       alert("Payment recorded (sandbox). Thanks!");
     } catch (e) {
@@ -184,7 +189,6 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
       alert(e?.message || String(e));
     }
   }
-  // -----------------------
 
   function lineFor(slot) {
     return points.lines.find((l) => l.slot === slot) || {
@@ -204,6 +208,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   const benchIds = Array.isArray(team?.bench) ? team.bench : [];
   const roster = team?.roster || {};
 
+  // Payment CTA (in My Team, hidden when paid)
   const showPaymentCTA = entryRequired && !alreadyPaid;
   const amountPi = Number(league?.entry?.amountPi || 0);
 
@@ -235,11 +240,10 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
         >
           <b>Entry Fee:</b> {amountPi.toFixed(2)} Pi
           <div style={{ marginTop: 8 }}>
-            <button type="button" onClick={handlePayDues}>Pay League Dues</button>
+            <button onClick={handlePayDues}>Pay League Dues</button>
           </div>
           <div style={{ color: "#666", marginTop: 6 }}>
-            Payments run in Pi Browser sandbox right now; no real Pi is deducted. After success,
-            you’ll be marked as paid and this banner will hide.
+            After you pay, your provider webhook should mark you as paid; this banner will disappear automatically.
           </div>
         </div>
       )}
