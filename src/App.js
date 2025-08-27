@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from "react";
 import LeagueHome from "./components/LeagueHome";
 import Leagues from "./components/Leagues";
+import "./styles.css";
 
 function getPi() {
   if (typeof window !== "undefined" && window.Pi && typeof window.Pi.init === "function") {
