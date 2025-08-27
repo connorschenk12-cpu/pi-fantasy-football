@@ -517,7 +517,12 @@ export function actualPointsForPlayerLoose(p, statsMap) {
   }
   return 0;
 }
-
+// --- shim so older components that import `pointsForPlayer` keep working ---
+export function pointsForPlayer(p, week, statsMap = null) {
+  const actual = statsMap ? actualPointsForPlayer(p, week, statsMap) : 0;
+  const proj = projForWeek(p, week);
+  return actual || proj || 0;
+}
 /** Sum up team points using actual when present else projection */
 export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
   const lines = [];
