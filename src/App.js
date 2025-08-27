@@ -16,7 +16,7 @@ export default function App() {
   const [leagueId, setLeagueId] = useState(null);
   const [err, setErr] = useState(null);
 
-  // Parse URL params early
+  // Parse URL params early & rehydrate from localStorage if needed
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
@@ -25,7 +25,16 @@ export default function App() {
 
       // Dev-only fast login: ?devuser=alice
       const devuser = params.get("devuser");
-      if (devuser) setUsername(devuser);
+      if (devuser) {
+        setUsername(devuser);
+        localStorage.setItem("piff.username", devuser); // keep sticky too
+      } else {
+        // Sticky login (if available)
+        const storedUser = localStorage.getItem("piff.username");
+        if (storedUser) setUsername(storedUser);
+        const storedLeague = localStorage.getItem("piff.leagueId");
+        if (storedLeague && !lid) setLeagueId(storedLeague);
+      }
     } catch (e) {
       console.warn("URL parse failed", e);
     }
@@ -35,7 +44,6 @@ export default function App() {
   useEffect(() => {
     const Pi = getPi();
     if (!Pi) {
-      // No Pi SDK (desktop browser or blocked). We can still show the manual login button.
       setPiReady(false);
       return;
     }
@@ -48,6 +56,11 @@ export default function App() {
       setErr(e);
     }
   }, []);
+
+  // Persist leagueId when it changes
+  useEffect(() => {
+    if (leagueId) localStorage.setItem("piff.leagueId", leagueId);
+  }, [leagueId]);
 
   async function doLogin(scopes = ["username"]) {
     try {
@@ -66,10 +79,17 @@ export default function App() {
       const uname = user?.user?.username;
       if (!uname) throw new Error("No username returned from Pi SDK");
       setUsername(uname);
+      localStorage.setItem("piff.username", uname); // sticky login
     } catch (e) {
       console.error("Login failed", e);
       setErr(e);
     }
+  }
+
+  // Optional helper if you add a "Sign out" button somewhere
+  function signOut() {
+    localStorage.removeItem("piff.username");
+    setUsername(null);
   }
 
   // UI states
