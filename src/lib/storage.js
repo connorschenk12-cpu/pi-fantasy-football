@@ -28,6 +28,9 @@ export const BENCH_SIZE = 3;
 export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE; // 12
 export const PICK_CLOCK_MS = 5000; // 5s auto-pick clock
 
+// Owner rake (basis points). 200 bps = 2%.
+const OWNER_RAKE_BPS = 200;
+
 export function emptyRoster() {
   const r = {};
   ROSTER_SLOTS.forEach((s) => (r[s] = null));
@@ -575,7 +578,7 @@ export async function getClaimsSet(leagueId) {
 }
 
 /* =========================================================
-   ENTRY / PAYMENTS (flag only + helper)
+   ENTRY / PAYMENTS (flag + rake + pool)
    ========================================================= */
 
 export async function setEntrySettings({ leagueId, enabled, amountPi }) {
@@ -583,11 +586,17 @@ export async function setEntrySettings({ leagueId, enabled, amountPi }) {
   const ref = doc(db, "leagues", leagueId);
   const snap = await getDoc(ref);
   const prev = snap.exists() ? snap.data() : {};
+
+  const amt = Number(amountPi || 0);
+  const isPaidLeague = !!enabled && amt > 0;
+
   await updateDoc(ref, {
     entry: {
       ...(prev.entry || {}),
       enabled: !!enabled,
-      amountPi: Number(amountPi || 0),
+      amountPi: amt,
+      // lock rake to 2% for paid leagues, 0% for free leagues
+      rakeBps: isPaidLeague ? OWNER_RAKE_BPS : 0,
     },
   });
 }
@@ -597,6 +606,42 @@ export function hasPaidEntry(league, username) {
   return !!(league?.entry?.paid && league.entry.paid[username]);
 }
 
+/**
+ * Mark a successful entry payment and update treasury pool/rake.
+ * Call this after a confirmed Pi payment (e.g. your /payments return step or webhook).
+ */
+export async function recordSuccessfulEntryPayment({ leagueId, username, amountPi, paymentId = "sandbox" }) {
+  if (!leagueId || !username) throw new Error("Missing args");
+
+  const ref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error("League not found");
+  const L = snap.data();
+
+  const rakeBps = Number(L?.entry?.rakeBps || 0);
+  const amt = Number(amountPi || 0);
+  const rakePi = Math.round((amt * rakeBps / 10000) * 10000) / 10000;
+  const netPi  = Math.round((amt - rakePi) * 10000) / 10000;
+
+  const paid = { ...(L.entry?.paid || {}) };
+  paid[username] = { paidAt: serverTimestamp(), txId: paymentId };
+
+  const t = L.treasury || {};
+  const next = {
+    poolPi: Number(t.poolPi || 0) + netPi,
+    rakePi: Number(t.rakePi || 0) + rakePi,
+    txs: {
+      ...(t.txs || {}),
+      [paymentId]: { user: username, amountPi: amt, rakePi, netPi, at: serverTimestamp() },
+    },
+    payouts: t.payouts || [],
+  };
+
+  await updateDoc(ref, { "entry.paid": paid, treasury: next });
+  return { netPi, rakePi };
+}
+
+/** Legacy manual marking (kept for back-compat; does not update pool) */
 export async function payEntry({ leagueId, username, txId = null }) {
   if (!leagueId || !username) throw new Error("Missing leagueId/username");
   const ref = doc(db, "leagues", leagueId);
