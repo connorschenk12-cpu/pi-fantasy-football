@@ -12,6 +12,9 @@ import {
   setDraftSchedule,
   ensureOrRecreateSchedule, // back-compat wrapper exported from storage.js
   leagueIsFree,
+  // NEW:
+  setCurrentWeek,
+  setSeasonEnded,
 } from "../lib/storage.js";
 
 export default function LeagueAdmin({ leagueId, username }) {
@@ -170,6 +173,9 @@ export default function LeagueAdmin({ leagueId, username }) {
     return s ? new Date(s).toLocaleString() : "—";
   })();
 
+  const currentWeek = Number(league?.settings?.currentWeek || 1);
+  const seasonEnded = !!league?.settings?.seasonEnded;
+
   return (
     <div>
       <h3>League Admin</h3>
@@ -180,6 +186,7 @@ export default function LeagueAdmin({ leagueId, username }) {
         <div><b>Members:</b> {members.join(", ")}</div>
       </div>
 
+      {/* Draft Controls */}
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginBottom: 16 }}>
         <h4 style={{ marginTop: 0 }}>Draft Controls</h4>
 
@@ -218,6 +225,7 @@ export default function LeagueAdmin({ leagueId, username }) {
         </div>
       </div>
 
+      {/* Entry Settings */}
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
         <h4 style={{ marginTop: 0 }}>Entry Settings</h4>
         <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -249,6 +257,97 @@ export default function LeagueAdmin({ leagueId, username }) {
             Payments are collected in the <b>My Team</b> tab via your provider flow.
           </div>
         )}
+      </div>
+
+      {/* Season Controls */}
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginTop: 16 }}>
+        <h4 style={{ marginTop: 0 }}>Season Controls</h4>
+
+        <div style={{ color: "#555", marginBottom: 8 }}>
+          Current Week: <b>{currentWeek}</b>{" · "}
+          Season Ended: <b>{seasonEnded ? "Yes" : "No"}</b>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <label>
+            Set Week:{" "}
+            <input
+              id="admin-week-input"
+              type="number"
+              min="1"
+              step="1"
+              defaultValue={currentWeek}
+              style={{ width: 80 }}
+            />
+          </label>
+          <button
+            disabled={saving}
+            onClick={async () => {
+              try {
+                setSaving(true);
+                const input = document.getElementById("admin-week-input");
+                const w = Number(input?.value || 1);
+                await setCurrentWeek({ leagueId, week: w });
+                // auto-mark ended at 18+
+                if (w >= 18 && !seasonEnded) {
+                  await setSeasonEnded({ leagueId, seasonEnded: true });
+                }
+                alert("Week updated.");
+              } catch (err) {
+                console.error(err);
+                alert(err?.message || String(err));
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            Save Week
+          </button>
+
+          <button
+            disabled={saving || seasonEnded}
+            onClick={async () => {
+              try {
+                setSaving(true);
+                await setSeasonEnded({ leagueId, seasonEnded: true });
+                alert("Season marked as ended.");
+              } catch (err) {
+                console.error(err);
+                alert(err?.message || String(err));
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            End Season Now
+          </button>
+
+          <button
+            disabled={saving}
+            title="Calls the daily cron endpoint immediately to compute winners and enqueue payouts."
+            onClick={async () => {
+              try {
+                setSaving(true);
+                const r = await fetch("/api/cron/settle-season");
+                const j = await r.json().catch(() => ({}));
+                alert(`Settlement triggered.\n${JSON.stringify(j)}`);
+              } catch (err) {
+                console.error(err);
+                alert(err?.message || String(err));
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            Run Payout Settlement
+          </button>
+        </div>
+
+        <div style={{ color: "#777", marginTop: 8, lineHeight: 1.4 }}>
+          • When <b>Week ≥ 18</b> or <b>Season Ended = Yes</b>, the daily cron will settle the league.<br />
+          • Ensure all entry payments are recorded and <code>treasury.poolPi</code> is funded.<br />
+          • The cron enqueues payouts and calls your server to send Pi (see <code>sendPiServerSide</code>).
+        </div>
       </div>
     </div>
   );
