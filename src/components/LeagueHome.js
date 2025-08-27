@@ -35,28 +35,63 @@ export default function LeagueHome({ leagueId, username, onBack }) {
   const showDraftTab = (league?.draft?.status || "scheduled") !== "done";
 
   return (
-    <div>
-      <div style={{ marginBottom: 8 }}>
-        <button onClick={onBack}>&larr; Back</button>
+    <div className="container">
+      <div className="mb8">
+        <button className="btn btn-ghost" onClick={onBack}>
+          &larr; Back
+        </button>
       </div>
 
-      <h2 style={{ margin: "8px 0" }}>{league?.name || leagueId}</h2>
+      <div className="header">
+        <h2 className="m0">{league?.name || leagueId}</h2>
+        <span className="badge">Week {currentWeek}</span>
+      </div>
 
       {/* Tabs */}
-      <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-        <TabButton label="My Team"  active={tab === "team"}     onClick={() => setTab("team")} />
-        <TabButton label="Players"  active={tab === "players"}  onClick={() => setTab("players")} />
+      <div className="tabbar">
+        <button
+          className={`tab ${tab === "team" ? "active" : ""}`}
+          onClick={() => setTab("team")}
+        >
+          My Team
+        </button>
+        <button
+          className={`tab ${tab === "players" ? "active" : ""}`}
+          onClick={() => setTab("players")}
+        >
+          Players
+        </button>
         {showDraftTab && (
-          <TabButton label="Draft"   active={tab === "draft"}    onClick={() => setTab("draft")} />
+          <button
+            className={`tab ${tab === "draft" ? "active" : ""}`}
+            onClick={() => setTab("draft")}
+          >
+            Draft
+          </button>
         )}
-        <TabButton label="Matchups" active={tab === "matchups"} onClick={() => setTab("matchups")} />
-        <TabButton label="League"   active={tab === "league"}   onClick={() => setTab("league")} />
+        <button
+          className={`tab ${tab === "matchups" ? "active" : ""}`}
+          onClick={() => setTab("matchups")}
+        >
+          Matchups
+        </button>
+        <button
+          className={`tab ${tab === "league" ? "active" : ""}`}
+          onClick={() => setTab("league")}
+        >
+          League
+        </button>
         {isOwner && (
-          <TabButton label="Admin"   active={tab === "admin"}    onClick={() => setTab("admin")} />
+          <button
+            className={`tab ${tab === "admin" ? "active" : ""}`}
+            onClick={() => setTab("admin")}
+          >
+            Admin
+          </button>
         )}
       </div>
 
-      {/* My Team — now rendered by the dedicated component */}
+      {/* My Team */}
       {tab === "team" && (
         <MyTeam leagueId={leagueId} username={username} currentWeek={currentWeek} />
       )}
@@ -77,33 +112,19 @@ export default function LeagueHome({ leagueId, username, onBack }) {
       )}
 
       {/* Matchups */}
-      {tab === "matchups" && <MatchupsTab leagueId={leagueId} currentWeek={currentWeek} />}
+      {tab === "matchups" && (
+        <MatchupsTab leagueId={leagueId} currentWeek={currentWeek} />
+      )}
 
       {/* League (other rosters + full schedule) */}
-      {tab === "league" && <LeagueTab leagueId={leagueId} currentWeek={currentWeek} />}
+      {tab === "league" && (
+        <LeagueTab leagueId={leagueId} currentWeek={currentWeek} />
+      )}
 
       {/* Admin (owner only) */}
       {tab === "admin" && isOwner && (
         <LeagueAdmin leagueId={leagueId} username={username} />
       )}
     </div>
-  );
-}
-
-function TabButton({ label, active, onClick }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: "6px 10px",
-        borderRadius: 6,
-        border: active ? "2px solid #333" : "1px solid #ccc",
-        background: active ? "#f2f2f2" : "#fff",
-        fontWeight: active ? 700 : 400,
-        cursor: "pointer",
-      }}
-    >
-      {label}
-    </button>
   );
 }
