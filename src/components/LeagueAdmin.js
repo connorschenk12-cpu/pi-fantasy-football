@@ -365,23 +365,24 @@ export default function LeagueAdmin({ leagueId, username }) {
         </div>
       </div>
 
-        // in LeagueAdmin JSX, owner-only area (e.g., under Season Controls as another card)
-<div className="card mb12">
-  <div className="card-title">Data Maintenance</div>
-  <div className="row gap12 ai-center">
-    <button
-      className="btn"
-      onClick={async () => {
-        const r = await fetch("/api/cron/backfill-headshots");
-        const j = await r.json().catch(() => ({}));
-        alert("Backfill complete:\n" + JSON.stringify(j, null, 2));
-      }}
-    >
-      Run Headshot Backfill Now
-    </button>
-    <div className="muted">This also captures ESPN IDs when available.</div>
-  </div>
-</div>                                                                
+      {/* Data Maintenance */}
+      <div className="card mb12">
+        <div className="card-title">Data Maintenance</div>
+        <div className="row gap12 ai-center">
+          <button
+            className="btn"
+            onClick={async () => {
+              const r = await fetch("/api/cron/backfill-headshots");
+              const j = await r.json().catch(() => ({}));
+              alert("Backfill complete:\n" + JSON.stringify(j, null, 2));
+            }}
+          >
+            Run Headshot Backfill Now
+          </button>
+          <div className="muted">This also captures ESPN IDs when available.</div>
+        </div>
+      </div>
+
       {/* ESPN Backfill Tool */}
       <div className="card mt12">
         <div className="card-title">Data Tools</div>
