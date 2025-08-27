@@ -16,7 +16,7 @@ export default function App() {
   const [leagueId, setLeagueId] = useState(null);
   const [err, setErr] = useState(null);
 
-  // Parse URL params early & rehydrate from localStorage if needed
+  // Parse URL params early
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
@@ -25,16 +25,7 @@ export default function App() {
 
       // Dev-only fast login: ?devuser=alice
       const devuser = params.get("devuser");
-      if (devuser) {
-        setUsername(devuser);
-        localStorage.setItem("piff.username", devuser); // keep sticky too
-      } else {
-        // Sticky login (if available)
-        const storedUser = localStorage.getItem("piff.username");
-        if (storedUser) setUsername(storedUser);
-        const storedLeague = localStorage.getItem("piff.leagueId");
-        if (storedLeague && !lid) setLeagueId(storedLeague);
-      }
+      if (devuser) setUsername(devuser);
     } catch (e) {
       console.warn("URL parse failed", e);
     }
@@ -44,6 +35,7 @@ export default function App() {
   useEffect(() => {
     const Pi = getPi();
     if (!Pi) {
+      // No Pi SDK (desktop browser or blocked). We can still show the manual login button.
       setPiReady(false);
       return;
     }
@@ -57,12 +49,7 @@ export default function App() {
     }
   }, []);
 
-  // Persist leagueId when it changes
-  useEffect(() => {
-    if (leagueId) localStorage.setItem("piff.leagueId", leagueId);
-  }, [leagueId]);
-
-  async function doLogin(scopes = ["username"]) {
+  async function doLogin(scopes = ["username", "payments"]) {
     try {
       const Pi = getPi();
       if (!Pi) {
@@ -79,17 +66,10 @@ export default function App() {
       const uname = user?.user?.username;
       if (!uname) throw new Error("No username returned from Pi SDK");
       setUsername(uname);
-      localStorage.setItem("piff.username", uname); // sticky login
     } catch (e) {
       console.error("Login failed", e);
       setErr(e);
     }
-  }
-
-  // Optional helper if you add a "Sign out" button somewhere
-  function signOut() {
-    localStorage.removeItem("piff.username");
-    setUsername(null);
   }
 
   // UI states
@@ -121,7 +101,8 @@ export default function App() {
             ? "Log in with your Pi account."
             : "Pi SDK not detected yet. If you're in Pi Browser and still see this, try the Login button or use ?devuser=YourName for a dev login."}
         </p>
-        <button onClick={() => doLogin(["username"])}>Login with Pi</button>
+        {/* 🔑 Ask for username + payments from the start */}
+        <button onClick={() => doLogin(["username", "payments"])}>Login with Pi</button>
         <div style={{ marginTop: 12, fontSize: 12, opacity: 0.7 }}>
           Dev tip: append <code>?devuser=alice</code> to the URL to bypass Pi login temporarily.
         </div>
