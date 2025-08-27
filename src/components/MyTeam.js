@@ -17,9 +17,10 @@ import {
   ROSTER_SLOTS,
   hasPaidEntry,
   leagueIsFree,
-  payEntry,
+  payEntry, // sandbox flagging after Pi payment
 } from "../lib/storage.js";
 
+// Pi helper
 function getPi() {
   if (typeof window !== "undefined" && window.Pi && typeof window.Pi.init === "function") {
     return window.Pi;
@@ -34,14 +35,6 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   const [statsMap, setStatsMap] = useState(new Map());
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
-
-  {/* Prize pool / rake info */}
-{!leagueIsFree(league) && (
-  <div style={{margin:"8px 0", color:"#555"}}>
-    Current prize pool: <b>{Number(league?.treasury?.poolPi || 0).toFixed(2)} Pi</b>
-    {" "}· Rake: <b>{((Number(league?.entry?.rakeBps || 0))/100).toFixed(2)}%</b>
-  </div>
-)}
 
   // subscribe league + my team
   useEffect(() => {
@@ -98,7 +91,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
       roster: team?.roster || {},
       week,
       playersMap,
-      statsMap, // <- actuals override projections if available
+      statsMap, // actuals override projections if available
     });
   }, [team, playersMap, statsMap, week]);
 
@@ -145,7 +138,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     }
   }
 
-  // 🔑 Pay league dues via Pi (with scope upgrade if needed)
+  // 🔑 Pay league dues via Pi (with payments scope)
   async function handlePayDues() {
     try {
       const Pi = getPi();
@@ -210,7 +203,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   }
 
   if (loading || !league || !team) {
-    return <div>Loading your team…</div>;
+    return <div className="container">Loading your team…</div>;
   }
 
   const benchIds = Array.isArray(team?.bench) ? team.bench : [];
@@ -221,162 +214,163 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   const amountPi = Number(league?.entry?.amountPi || 0);
 
   return (
-    <div>
+    <div className="container">
       {/* Debug marker */}
-      <div style={{padding:8, border:'2px solid #00aa88', borderRadius:6, marginBottom:8}}>
+      <div className="ribbon ribbon-info mb12">
         <b>MyTeam v3 marker:</b> if you can see this box, the latest MyTeam.js is LIVE.
       </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <h3 style={{ margin: 0 }}>{team?.name || username}</h3>
-        <div style={{ color: "#666" }}>
-          Week {week} Total: <b>{points.total.toFixed(1)}</b>
-        </div>
+      <div className="header">
+        <h3 className="m0">{team?.name || username}</h3>
+        <div className="badge">Week {week} • Total {points.total.toFixed(1)}</div>
       </div>
+
+      {/* Prize pool / rake info */}
+      {!leagueIsFree(league) && (
+        <div className="muted mb12">
+          Current prize pool:{" "}
+          <b>{Number(league?.treasury?.poolPi || 0).toFixed(2)} Pi</b>{" "}
+          · Rake:{" "}
+          <b>{((Number(league?.entry?.rakeBps || 0)) / 100).toFixed(2)}%</b>
+        </div>
+      )}
 
       {/* Entry Payment CTA */}
       {showPaymentCTA && (
-        <div
-          style={{
-            marginTop: 12,
-            marginBottom: 12,
-            padding: 12,
-            border: "1px dashed #e6b800",
-            background: "#fffbe6",
-            borderRadius: 8,
-          }}
-        >
-          <b>Entry Fee:</b> {amountPi.toFixed(2)} Pi
-          <div style={{ marginTop: 8 }}>
-            <button onClick={handlePayDues}>Pay League Dues</button>
-          </div>
-          <div style={{ color: "#666", marginTop: 6 }}>
-            After you pay, your provider webhook should mark you as paid; this banner will disappear automatically.
+        <div className="ribbon ribbon-warn mb12">
+          <div className="ribbon-title">Entry Fee Due</div>
+          <div className="ribbon-body">
+            <div className="mb8">
+              <b>Amount:</b> {amountPi.toFixed(2)} Pi
+            </div>
+            <button className="btn btn-primary" onClick={handlePayDues}>
+              Pay League Dues
+            </button>
+            <div className="muted mt8">
+              After your payment completes, this banner will disappear automatically.
+            </div>
           </div>
         </div>
       )}
 
       {/* Starters */}
-      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginBottom: 16 }}>
-        <h4 style={{ marginTop: 0 }}>Starters</h4>
-        <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
-              <th style={{ width: 70 }}>Slot</th>
-              <th>Player</th>
-              <th style={{ width: 120 }}>Opp</th>
-              <th style={{ width: 90, textAlign: "right" }}>Proj</th>
-              <th style={{ width: 90, textAlign: "right" }}>Actual</th>
-              <th style={{ width: 100, textAlign: "right" }}>Pts</th>
-              <th style={{ width: 220 }}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {ROSTER_SLOTS.map((slot) => {
-              const pid = roster[slot] || null;
-              const p = pid ? playersMap.get(String(pid)) : null;
-              const line = lineFor(slot);
-              const proj = p ? projForWeek(p, week) : 0;
-              const actual = line.actual || 0;
-              const opp = p ? opponentForWeek(p, week) : "";
-
-              return (
-                <tr key={slot} style={{ borderBottom: "1px solid #f6f6f6" }}>
-                  <td><b>{slot}</b></td>
-                  <td>{p ? playerDisplay(p) : <span style={{ color: "#999" }}>(empty)</span>}</td>
-                  <td>{p ? (opp || <span style={{ color: "#999" }}>—</span>) : <span style={{ color: "#999" }}>—</span>}</td>
-                  <td style={{ textAlign: "right" }}>{proj.toFixed(1)}</td>
-                  <td style={{ textAlign: "right" }}>{actual ? actual.toFixed(1) : "—"}</td>
-                  <td style={{ textAlign: "right" }}>
-                    {Number(line.points || 0).toFixed(1)}
-                  </td>
-                  <td>
-                    {p ? (
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        <button disabled={acting} onClick={() => handleMoveToBench(slot)}>
-                          Move to Bench
-                        </button>
-                        <button disabled={acting} onClick={() => handleRelease(pid)}>
-                          Release
-                        </button>
-                      </div>
-                    ) : (
-                      <span style={{ color: "#999" }}>—</span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Bench */}
-      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
-        <h4 style={{ marginTop: 0 }}>Bench</h4>
-        {benchIds.length === 0 ? (
-          <div style={{ color: "#999" }}>No one on the bench.</div>
-        ) : (
-          <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
+      <div className="card mb12">
+        <div className="card-title">Starters</div>
+        <div className="table-wrap">
+          <table className="table table-sm">
             <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+              <tr>
+                <th style={{ width: 70 }}>Slot</th>
                 <th>Player</th>
-                <th>Allowed Slots</th>
+                <th style={{ width: 120 }}>Opp</th>
+                <th style={{ width: 80, textAlign: "right" }}>Proj</th>
+                <th style={{ width: 80, textAlign: "right" }}>Actual</th>
+                <th style={{ width: 90, textAlign: "right" }}>Pts</th>
                 <th style={{ width: 240 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {benchIds.map((pid) => {
-                const p = playersMap.get(String(pid));
-                if (!p) {
-                  return (
-                    <tr key={pid}>
-                      <td colSpan={3} style={{ color: "crimson" }}>
-                        Unknown player id on bench: {String(pid)}
-                      </td>
-                    </tr>
-                  );
-                }
-                const allowed = allowedSlotsForPlayer(p);
+              {ROSTER_SLOTS.map((slot) => {
+                const pid = roster[slot] || null;
+                const p = pid ? playersMap.get(String(pid)) : null;
+                const line = lineFor(slot);
+                const proj = p ? projForWeek(p, week) : 0;
+                const actual = line.actual || 0;
+                const opp = p ? opponentForWeek(p, week) : "";
+
                 return (
-                  <tr key={pid} style={{ borderBottom: "1px solid #f6f6f6" }}>
-                    <td>{playerDisplay(p)}</td>
+                  <tr key={slot}>
+                    <td><b>{slot}</b></td>
+                    <td>{p ? playerDisplay(p) : <span className="muted">(empty)</span>}</td>
+                    <td>{p ? (opp || <span className="muted">—</span>) : <span className="muted">—</span>}</td>
+                    <td style={{ textAlign: "right" }}>{proj.toFixed(1)}</td>
+                    <td style={{ textAlign: "right" }}>{actual ? actual.toFixed(1) : "—"}</td>
+                    <td style={{ textAlign: "right" }}>{Number(line.points || 0).toFixed(1)}</td>
                     <td>
-                      {allowed.length ? allowed.join(", ") : <span style={{ color: "#999" }}>—</span>}
-                    </td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {allowed.map((slot) => (
-                          <button
-                            key={slot}
-                            disabled={acting}
-                            onClick={() => handleMoveToStarter(pid, slot)}
-                          >
-                            Start at {slot}
+                      {p ? (
+                        <div className="btnbar">
+                          <button className="btn btn-ghost" disabled={acting} onClick={() => handleMoveToBench(slot)}>
+                            Move to Bench
                           </button>
-                        ))}
-                        <button disabled={acting} onClick={() => handleRelease(pid)}>Release</button>
-                      </div>
+                          <button className="btn btn-danger" disabled={acting} onClick={() => handleRelease(pid)}>
+                            Release
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
                     </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {/* Bench */}
+      <div className="card">
+        <div className="card-title">Bench</div>
+        {benchIds.length === 0 ? (
+          <div className="muted">No one on the bench.</div>
+        ) : (
+          <div className="table-wrap">
+            <table className="table table-sm">
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Allowed Slots</th>
+                  <th style={{ width: 320 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {benchIds.map((pid) => {
+                  const p = playersMap.get(String(pid));
+                  if (!p) {
+                    return (
+                      <tr key={pid}>
+                        <td colSpan={3} style={{ color: "crimson" }}>
+                          Unknown player id on bench: {String(pid)}
+                        </td>
+                      </tr>
+                    );
+                  }
+                  const allowed = allowedSlotsForPlayer(p);
+                  return (
+                    <tr key={pid}>
+                      <td>{playerDisplay(p)}</td>
+                      <td>
+                        {allowed.length ? allowed.join(", ") : <span className="muted">—</span>}
+                      </td>
+                      <td>
+                        <div className="btnbar">
+                          {allowed.map((slot) => (
+                            <button
+                              key={slot}
+                              className="btn btn-primary"
+                              disabled={acting}
+                              onClick={() => handleMoveToStarter(pid, slot)}
+                            >
+                              Start at {slot}
+                            </button>
+                          ))}
+                          <button className="btn btn-danger" disabled={acting} onClick={() => handleRelease(pid)}>
+                            Release
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
       {/* After-draft reminder for payments still due */}
       {draftDone && showPaymentCTA && (
-        <div
-          style={{
-            marginTop: 16,
-            padding: 12,
-            borderRadius: 8,
-            border: "1px dashed #e6b800",
-            background: "#fffbe6",
-          }}
-        >
+        <div className="ribbon ribbon-warn mt12">
           The draft is complete—please complete your entry payment to keep your team eligible.
         </div>
       )}
