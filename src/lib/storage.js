@@ -1308,7 +1308,26 @@ export function memberCanDraft(league, username) {
   if (league?.entry?.enabled && !hasPaidEntry(league, username)) return false;
   return true;
 }
+// --- Headshots (ESPN) ---
+export function headshotUrlFor(p) {
+  if (!p) return null;
+  // Accept several field shapes
+  const espnId =
+    p.espnId ??
+    p.espn_id ??
+    (p.espn && (p.espn.playerId || p.espn.id)) ??
+    null;
 
+  if (espnId) {
+    // ESPN NFL player headshots
+    return `https://a.espncdn.com/i/headshots/nfl/players/full/${espnId}.png`;
+  }
+
+  // Optional: allow a direct image override if you store one
+  if (p.photo || p.headshotUrl || p.imageUrl) return p.photo || p.headshotUrl || p.imageUrl;
+
+  return null; // no known headshot
+}
 /* =========================================================
    TREASURY / AUTO-SETTLEMENT / PAYOUTS QUEUE
    ========================================================= */
