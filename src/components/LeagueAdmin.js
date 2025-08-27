@@ -27,15 +27,11 @@ export default function LeagueAdmin({ leagueId, username }) {
   const [entryEnabled, setEntryEnabled] = useState(false);
   const [entryAmountPi, setEntryAmountPi] = useState(0);
 
-  // Draft scheduling form state (HTML datetime-local expects "YYYY-MM-DDTHH:mm")
+  // Draft scheduling form state
   const [draftDateTime, setDraftDateTime] = useState("");
 
   const isOwner = useMemo(() => !!league && league.owner === username, [league, username]);
 
-  {isOwner && (
-  <EspnIdBackfill leagueId={leagueId} />
-)}
-  
   // Subscribe to league
   useEffect(() => {
     if (!leagueId) return;
@@ -203,14 +199,12 @@ export default function LeagueAdmin({ leagueId, username }) {
       {/* Draft Controls */}
       <div className="card mb12">
         <div className="card-title">Draft Controls</div>
-
         <div className="grid2 mb8">
           <div><b>Status:</b> {league?.draft?.status || "scheduled"}</div>
           <div><b>Scheduled for:</b> {schedStr}</div>
           <div><b>Clock (ms):</b> {league?.draft?.clockMs || 5000}</div>
           <div><b>Rounds:</b> {league?.draft?.roundsTotal || 12}</div>
         </div>
-
         <div className="btnbar">
           <button className="btn btn-primary" disabled={saving} onClick={handleInitDraftOrder}>
             Initialize Draft Order
@@ -225,7 +219,6 @@ export default function LeagueAdmin({ leagueId, username }) {
             End Draft
           </button>
         </div>
-
         <div className="mt12">
           <label className="block mb4"><b>Schedule draft (local time)</b></label>
           <input
@@ -240,8 +233,7 @@ export default function LeagueAdmin({ leagueId, username }) {
             </button>
           </div>
           <div className="muted mt8">
-            When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code> and then{" "}
-            <code>startDraft()</code> for each due league.
+            When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code> and then <code>startDraft()</code>.
           </div>
         </div>
       </div>
@@ -249,7 +241,6 @@ export default function LeagueAdmin({ leagueId, username }) {
       {/* Entry Settings */}
       <div className="card mb12">
         <div className="card-title">Entry Settings</div>
-
         <div className="row wrap gap12 ai-center">
           <label className="row ai-center gap8">
             <input
@@ -259,8 +250,7 @@ export default function LeagueAdmin({ leagueId, username }) {
             />
             Require entry fee
           </label>
-
-        <label className="row ai-center gap8">
+          <label className="row ai-center gap8">
             Amount (Pi):
             <input
               className="input"
@@ -273,12 +263,10 @@ export default function LeagueAdmin({ leagueId, username }) {
               disabled={!entryEnabled}
             />
           </label>
-
           <button className="btn btn-primary" disabled={saving} onClick={handleSaveEntry}>
             Save
           </button>
         </div>
-
         {!leagueIsFree(league) && (
           <div className="muted mt8">
             Payments are collected in the <b>My Team</b> tab via your provider flow.
@@ -287,16 +275,14 @@ export default function LeagueAdmin({ leagueId, username }) {
       </div>
 
       {/* Season Controls */}
-      <div className="card">
+      <div className="card mb12">
         <div className="card-title">Season Controls</div>
-
         <div className="mb8">
           <span className="badge">Current Week: {currentWeek}</span>{" "}
           <span className="badge" style={{ marginLeft: 6 }}>
             Season Ended: {seasonEnded ? "Yes" : "No"}
           </span>
         </div>
-
         <div className="row wrap gap12 ai-center">
           <label className="row ai-center gap8">
             Set Week:
@@ -310,7 +296,6 @@ export default function LeagueAdmin({ leagueId, username }) {
               style={{ width: 100 }}
             />
           </label>
-
           <button
             className="btn btn-primary"
             disabled={saving}
@@ -334,7 +319,6 @@ export default function LeagueAdmin({ leagueId, username }) {
           >
             Save Week
           </button>
-
           <button
             className="btn btn-danger"
             disabled={saving || seasonEnded}
@@ -353,7 +337,6 @@ export default function LeagueAdmin({ leagueId, username }) {
           >
             End Season Now
           </button>
-
           <button
             className="btn"
             title="Calls the daily cron endpoint immediately to compute winners and enqueue payouts."
@@ -375,12 +358,17 @@ export default function LeagueAdmin({ leagueId, username }) {
             Run Payout Settlement
           </button>
         </div>
-
         <div className="muted mt8" style={{ lineHeight: 1.5 }}>
           • When <b>Week ≥ 18</b> or <b>Season Ended = Yes</b>, the daily cron will settle the league.<br />
           • Ensure all entry payments are recorded and <code>treasury.poolPi</code> is funded.<br />
           • The cron enqueues payouts and calls your server to send Pi (see <code>sendPiServerSide</code>).
         </div>
+      </div>
+
+      {/* ESPN Backfill Tool */}
+      <div className="card mt12">
+        <div className="card-title">Data Tools</div>
+        <EspnIdBackfill leagueId={leagueId} />
       </div>
     </div>
   );
