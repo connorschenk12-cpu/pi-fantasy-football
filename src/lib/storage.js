@@ -502,9 +502,6 @@ export async function bulkSetHeadshots({ leagueId = null, mapping = {} }) {
 /* =========================================================
    PROJECTED & ACTUAL POINTS
    ========================================================= */
-/* =========================================================
-   PROJECTED & ACTUAL POINTS
-   ========================================================= */
 
 function nameTeamKey(p) {
   const name = (p.name || p.displayName || "").toUpperCase().trim();
@@ -647,42 +644,6 @@ export async function fetchWeekStats({ leagueId, week }) {
     console.warn("fetchWeekStats failed:", e);
     return new Map();
   }
-}
-
-/* ---- Loose id matching for actual points ---- */
-
-function candidateIdsForStats(p) {
-  const ids = [
-    p?.id,
-    p?.sleeperId,
-    p?.player_id,
-    p?.externalId,
-    p?.pid,
-    p?.espnId,
-    p?.espn_id,
-    p?.yahooId,
-    p?.gsisId,
-  ]
-    .map(asId)
-    .filter(Boolean);
-  const plus = new Set(ids);
-  for (const k of ids) {
-    const n = Number(k);
-    if (Number.isFinite(n)) plus.add(String(n));
-  }
-  return Array.from(plus);
-}
-
-export function actualPointsForPlayerLoose(p, statsMap) {
-  if (!p || !statsMap?.get) return 0;
-  const canonical = asId(p.id);
-  const ids = [canonical, ...candidateIdsForStats(p).filter((x) => x !== canonical)];
-  for (const k of ids) {
-    if (!k) continue;
-    const row = statsMap.get(k);
-    if (row && row.points != null) return Number(row.points) || 0;
-  }
-  return 0;
 }
 
 // ---------- scoring helpers ----------
