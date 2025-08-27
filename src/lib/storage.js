@@ -523,6 +523,22 @@ export function pointsForPlayer(p, week, statsMap = null) {
   const proj = projForWeek(p, week);
   return actual || proj || 0;
 }
+// ---------- scoring helpers ----------
+export function actualPointsForPlayer(p, week, statsMap) {
+  const id = asId(p?.id);
+  if (!id || !statsMap?.get) return 0;
+  const row = statsMap.get(id);
+  if (!row) return 0;
+  if (row.points != null) return Number(row.points) || 0;
+  // If your /api/stats/week returns per-stat fields, you can compute here too.
+  return 0;
+}
+
+export function pointsForPlayer(p, week, statsMap = null) {
+  const actual = statsMap ? actualPointsForPlayer(p, week, statsMap) : 0;
+  const proj = projForWeek(p, week);
+  return actual || proj || 0;
+}
 /** Sum up team points using actual when present else projection */
 export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
   const lines = [];
