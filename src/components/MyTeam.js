@@ -5,7 +5,6 @@ import {
   listenLeague,
   listenTeam,
   listPlayersMap,
-  playerDisplay,
   computeTeamPoints,
   projForWeek,
   opponentForWeek,
@@ -19,6 +18,9 @@ import {
   leagueIsFree,
   payEntry, // sandbox flagging after Pi payment
 } from "../lib/storage.js";
+
+// NEW: pretty badge with headshot
+import PlayerBadge from "./common/PlayerBadge";
 
 // Pi helper
 function getPi() {
@@ -91,7 +93,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
       roster: team?.roster || {},
       week,
       playersMap,
-      statsMap, // actuals override projections if available
+      statsMap,
     });
   }, [team, playersMap, statsMap, week]);
 
@@ -138,7 +140,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     }
   }
 
-  // 🔑 Pay league dues via Pi (with payments scope)
+  // 🔑 Pay league dues via Pi
   async function handlePayDues() {
     try {
       const Pi = getPi();
@@ -146,34 +148,27 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
         alert("Pi SDK not found. Open this app in Pi Browser (sandbox).");
         return;
       }
-
-      // Ensure we have the payments scope (re-auth if needed)
       try {
         await Pi.authenticate(["username", "payments"], (payment) =>
           console.log("incompletePayment", payment)
         );
       } catch (e) {
-        console.warn("Re-auth for payments scope failed or was cancelled:", e);
+        console.warn("Re-auth for payments scope failed:", e);
         alert("We need the Pi payments permission to continue.");
         return;
       }
-
       const amount = Number(league?.entry?.amountPi || 0);
       if (!amount) {
         alert("No league dues amount set.");
         return;
       }
-
       const memo = `League ${leagueId} entry for @${username}`;
       await Pi.createPayment(
         { amount, memo, metadata: { leagueId, username } },
         {
-          onReadyForServerApproval: (paymentId) => {
-            console.log("onReadyForServerApproval", paymentId);
-          },
-          onReadyForServerCompletion: (paymentId, txId) => {
-            console.log("onReadyForServerCompletion", paymentId, txId);
-          },
+          onReadyForServerApproval: (paymentId) => console.log("onReadyForServerApproval", paymentId),
+          onReadyForServerCompletion: (paymentId, txId) =>
+            console.log("onReadyForServerCompletion", paymentId, txId),
           onCancel: (paymentId) => console.log("Payment cancelled", paymentId),
           onError: (error, paymentId) => {
             console.error("Payment error", paymentId, error);
@@ -181,8 +176,6 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
           },
         }
       );
-
-      // Sandbox: immediately flag as paid in Firestore
       await payEntry({ leagueId, username, txId: "pi-sandbox" });
       alert("Payment recorded (sandbox). Thanks!");
     } catch (e) {
@@ -208,8 +201,6 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
 
   const benchIds = Array.isArray(team?.bench) ? team.bench : [];
   const roster = team?.roster || {};
-
-  // Payment CTA (in My Team, hidden when paid)
   const showPaymentCTA = entryRequired && !alreadyPaid;
   const amountPi = Number(league?.entry?.amountPi || 0);
 
@@ -225,7 +216,6 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
         <div className="badge">Week {week} • Total {points.total.toFixed(1)}</div>
       </div>
 
-      {/* Prize pool / rake info */}
       {!leagueIsFree(league) && (
         <div className="muted mb12">
           Current prize pool:{" "}
@@ -235,20 +225,12 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
         </div>
       )}
 
-      {/* Entry Payment CTA */}
       {showPaymentCTA && (
         <div className="ribbon ribbon-warn mb12">
           <div className="ribbon-title">Entry Fee Due</div>
           <div className="ribbon-body">
-            <div className="mb8">
-              <b>Amount:</b> {amountPi.toFixed(2)} Pi
-            </div>
-            <button className="btn btn-primary" onClick={handlePayDues}>
-              Pay League Dues
-            </button>
-            <div className="muted mt8">
-              After your payment completes, this banner will disappear automatically.
-            </div>
+            <div className="mb8"><b>Amount:</b> {amountPi.toFixed(2)} Pi</div>
+            <button className="btn btn-primary" onClick={handlePayDues}>Pay League Dues</button>
           </div>
         </div>
       )}
@@ -260,13 +242,13 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
           <table className="table table-sm">
             <thead>
               <tr>
-                <th style={{ width: 70 }}>Slot</th>
+                <th>Slot</th>
                 <th>Player</th>
-                <th style={{ width: 120 }}>Opp</th>
-                <th style={{ width: 80, textAlign: "right" }}>Proj</th>
-                <th style={{ width: 80, textAlign: "right" }}>Actual</th>
-                <th style={{ width: 90, textAlign: "right" }}>Pts</th>
-                <th style={{ width: 240 }}>Actions</th>
+                <th>Opp</th>
+                <th style={{ textAlign: "right" }}>Proj</th>
+                <th style={{ textAlign: "right" }}>Actual</th>
+                <th style={{ textAlign: "right" }}>Pts</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -281,24 +263,20 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                 return (
                   <tr key={slot}>
                     <td><b>{slot}</b></td>
-                    <td>{p ? playerDisplay(p) : <span className="muted">(empty)</span>}</td>
-                    <td>{p ? (opp || <span className="muted">—</span>) : <span className="muted">—</span>}</td>
+                    <td>
+                      {p ? <PlayerBadge player={p} right={opp ? `vs ${opp}` : ""}/> : <span className="muted">(empty)</span>}
+                    </td>
+                    <td>{opp || "—"}</td>
                     <td style={{ textAlign: "right" }}>{proj.toFixed(1)}</td>
                     <td style={{ textAlign: "right" }}>{actual ? actual.toFixed(1) : "—"}</td>
                     <td style={{ textAlign: "right" }}>{Number(line.points || 0).toFixed(1)}</td>
                     <td>
                       {p ? (
                         <div className="btnbar">
-                          <button className="btn btn-ghost" disabled={acting} onClick={() => handleMoveToBench(slot)}>
-                            Move to Bench
-                          </button>
-                          <button className="btn btn-danger" disabled={acting} onClick={() => handleRelease(pid)}>
-                            Release
-                          </button>
+                          <button className="btn btn-ghost" disabled={acting} onClick={() => handleMoveToBench(slot)}>Bench</button>
+                          <button className="btn btn-danger" disabled={acting} onClick={() => handleRelease(pid)}>Release</button>
                         </div>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
+                      ) : <span className="muted">—</span>}
                     </td>
                   </tr>
                 );
@@ -320,7 +298,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                 <tr>
                   <th>Player</th>
                   <th>Allowed Slots</th>
-                  <th style={{ width: 320 }}>Actions</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -338,25 +316,16 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                   const allowed = allowedSlotsForPlayer(p);
                   return (
                     <tr key={pid}>
-                      <td>{playerDisplay(p)}</td>
-                      <td>
-                        {allowed.length ? allowed.join(", ") : <span className="muted">—</span>}
-                      </td>
+                      <td><PlayerBadge player={p}/></td>
+                      <td>{allowed.length ? allowed.join(", ") : "—"}</td>
                       <td>
                         <div className="btnbar">
                           {allowed.map((slot) => (
-                            <button
-                              key={slot}
-                              className="btn btn-primary"
-                              disabled={acting}
-                              onClick={() => handleMoveToStarter(pid, slot)}
-                            >
+                            <button key={slot} className="btn btn-primary" disabled={acting} onClick={() => handleMoveToStarter(pid, slot)}>
                               Start at {slot}
                             </button>
                           ))}
-                          <button className="btn btn-danger" disabled={acting} onClick={() => handleRelease(pid)}>
-                            Release
-                          </button>
+                          <button className="btn btn-danger" disabled={acting} onClick={() => handleRelease(pid)}>Release</button>
                         </div>
                       </td>
                     </tr>
@@ -367,13 +336,6 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
           </div>
         )}
       </div>
-
-      {/* After-draft reminder for payments still due */}
-      {draftDone && showPaymentCTA && (
-        <div className="ribbon ribbon-warn mt12">
-          The draft is complete—please complete your entry payment to keep your team eligible.
-        </div>
-      )}
     </div>
   );
 }
