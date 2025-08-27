@@ -3,12 +3,14 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   listPlayers,
-  playerDisplay,
   projForWeek,
   opponentForWeek,
   addDropPlayer,
   listenLeagueClaims,
 } from "../lib/storage";
+
+// NEW: pretty name + headshot
+import PlayerBadge from "./common/PlayerBadge";
 
 export default function PlayersList({ leagueId, league, username, currentWeek }) {
   const [players, setPlayers] = useState([]);
@@ -60,11 +62,11 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
       .filter((p) => (teamFilter === "ALL" ? true : String(p.team || "") === teamFilter))
       .filter((p) => {
         if (!needle) return true;
-        const name = playerDisplay(p).toLowerCase();
+        const name = (p.name || "").toLowerCase();
         const idStr = String(p.id || "").toLowerCase();
         return name.includes(needle) || idStr.includes(needle);
       })
-      .sort((a, b) => (projForWeek(b, week) - projForWeek(a, week)));
+      .sort((a, b) => projForWeek(b, week) - projForWeek(a, week));
   }, [players, q, pos, teamFilter, week]);
 
   // Can user add/drop? (disabled during draft if league.settings.lockAddDuringDraft is true)
@@ -134,7 +136,12 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
             const claimedBy = claims.get(p.id)?.claimedBy || null;
             return (
               <tr key={p.id} style={{ borderBottom: "1px solid #f1f1f1" }}>
-                <td>{playerDisplay(p)}</td>
+                <td>
+                  <PlayerBadge
+                    player={p}
+                    right={p.team ? `· ${p.team} ${p.position || ""}` : p.position || ""}
+                  />
+                </td>
                 <td>{p.position || "-"}</td>
                 <td>{p.team || "-"}</td>
                 <td>{opponentForWeek(p, week) || "-"}</td>
