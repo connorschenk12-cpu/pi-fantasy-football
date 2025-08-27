@@ -21,20 +21,70 @@ import {
   // payments
   hasPaidEntry,
   leagueIsFree,
+  // optional; if you don't have this helper just leave the href as "/payments"
   paymentCheckoutUrl,
 } from "../lib/storage.js";
+
+/** Client-side scoring in case the API doesn't return a "points" number */
+const SCORING = {
+  passYds: 0.04, // 1 per 25
+  passTD: 4,
+  passInt: -2,
+  rushYds: 0.1, // 1 per 10
+  rushTD: 6,
+  recYds: 0.1, // 1 per 10
+  recTD: 6,
+  rec: 1, // PPR (change to 0 for standard)
+  fumbles: -2,
+};
+
+function computePointsFromRow(row) {
+  if (!row) return 0;
+  const s = SCORING;
+  const n = (v) => (v == null ? 0 : Number(v) || 0);
+  const pts =
+    n(row.passYds) * s.passYds +
+    n(row.passTD) * s.passTD +
+    n(row.passInt) * s.passInt +
+    n(row.rushYds) * s.rushYds +
+    n(row.rushTD) * s.rushTD +
+    n(row.recYds) * s.recYds +
+    n(row.recTD) * s.recTD +
+    n(row.rec) * s.rec +
+    n(row.fumbles) * s.fumbles;
+  return Math.round(pts * 10) / 10;
+}
+
+/** Try multiple IDs so stats can match players regardless of provider */
+function firstStatRowForPlayer(p, statsMap) {
+  if (!p || !statsMap) return null;
+  const candidates = [
+    p?.id,
+    p?.sleeperId,
+    p?.player_id,
+    p?.externalId,
+    p?.pid,
+  ]
+    .map((x) => (x == null ? null : String(x)))
+    .filter(Boolean);
+
+  for (const k of candidates) {
+    if (statsMap.has(k)) return statsMap.get(k);
+  }
+  // last chance: exact roster id (if caller already has it)
+  return null;
+}
 
 export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   const [league, setLeague] = useState(null);
   const [team, setTeam] = useState(null);
   const [playersMap, setPlayersMap] = useState(new Map());
   const [statsMap, setStatsMap] = useState(new Map());
-
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
   const week = Number(currentWeek || 1);
 
-  // Subscribe to league + my team
+  // Live league + team
   useEffect(() => {
     if (!leagueId) return;
     const unsubLeague = listenLeague(leagueId, (L) => setLeague(L));
@@ -45,7 +95,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     };
   }, [leagueId, username]);
 
-  // Load players map (for names/positions/projections)
+  // Load players
   useEffect(() => {
     let live = true;
     (async () => {
@@ -63,15 +113,29 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     };
   }, [leagueId]);
 
-  // Load weekly stats (actuals) from API and store as Map
+  // Load weekly stats from API → Map(playerIdVariant -> {…stats…, points?})
   useEffect(() => {
     let live = true;
     (async () => {
       try {
         const map = await fetchWeekStats({ leagueId, week });
-        if (live) setStatsMap(map || new Map());
+        // `fetchWeekStats` in storage.js may return either:
+        //  - Map(id -> {points, ...})
+        //  - Map(id -> {raw stats w/o points})
+        // If points missing, compute them here.
+        if (map && map.forEach) {
+          const out = new Map();
+          map.forEach((row, k) => {
+            const pts = row && row.points != null ? Number(row.points) || 0 : computePointsFromRow(row);
+            out.set(String(k), { ...row, points: pts });
+          });
+          if (live) setStatsMap(out);
+        } else if (live) {
+          setStatsMap(new Map());
+        }
       } catch (e) {
         console.error("fetchWeekStats:", e);
+        if (live) setStatsMap(new Map());
       }
     })();
     return () => {
@@ -79,9 +143,11 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     };
   }, [leagueId, week]);
 
-  // Compute totals (uses actual if present, else projection)
+  // Totals (uses actual if present, else projection)
   const points = useMemo(() => {
     if (!team) return { lines: [], total: 0 };
+    // computeTeamPoints uses statsMap.get(playerId).points — we’ll make sure
+    // each row in statsMap now has a .points from the effect above.
     return computeTeamPoints({
       roster: team?.roster || {},
       week,
@@ -90,12 +156,16 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     });
   }, [team, playersMap, statsMap, week]);
 
+  // Payment state
   const entryRequired = useMemo(() => !leagueIsFree(league), [league]);
   const alreadyPaid = useMemo(() => hasPaidEntry(league, username), [league, username]);
+  const amountPi = Number(league?.entry?.amountPi || 0);
+  const payUrl =
+    typeof paymentCheckoutUrl === "function"
+      ? paymentCheckoutUrl({ leagueId, username })
+      : `/payments?league=${encodeURIComponent(leagueId)}&user=${encodeURIComponent(username)}`;
 
-  const draftStatus = league?.draft?.status || "scheduled";
-  const draftDone = draftStatus === "done";
-
+  // Actions
   async function handleMoveToStarter(pid, slot) {
     setActing(true);
     try {
@@ -137,13 +207,11 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     return <div>Loading your team…</div>;
   }
 
+  const draftStatus = league?.draft?.status || "scheduled";
+  const draftDone = draftStatus === "done";
   const benchIds = Array.isArray(team?.bench) ? team.bench : [];
   const roster = team?.roster || {};
-
-  // Payment CTA
   const showPaymentCTA = entryRequired && !alreadyPaid;
-  const amountPi = Number(league?.entry?.amountPi || 0);
-  const payUrl = paymentCheckoutUrl({ leagueId, username });
 
   return (
     <div>
@@ -154,7 +222,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
         </div>
       </div>
 
-      {/* Entry Payment CTA */}
+      {/* Payment CTA */}
       {showPaymentCTA && (
         <div
           style={{
@@ -173,13 +241,13 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
             </a>
           </div>
           <div style={{ color: "#666", marginTop: 6 }}>
-            After payment, your provider webhook (or admin action) should mark you as paid; this
-            banner will disappear automatically.
+            After payment, your provider webhook (or admin action) should record it in{" "}
+            <code>league.entry.paid[username]</code>; this banner will disappear automatically.
           </div>
         </div>
       )}
 
-      {/* Draft status banner */}
+      {/* Draft status */}
       <div style={{ color: "#666", marginBottom: 12 }}>
         Draft status: <b>{draftStatus}</b>
         {league?.draft?.scheduledAt ? (
@@ -196,10 +264,10 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
               <th style={{ width: 70 }}>Slot</th>
               <th>Player</th>
               <th style={{ width: 70 }}>Opp</th>
-              <th style={{ width: 100, textAlign: "right" }}>Proj</th>
-              <th style={{ width: 100, textAlign: "right" }}>Actual</th>
-              <th style={{ width: 110, textAlign: "right" }}>Pts Used</th>
-              <th style={{ width: 260 }}>Actions</th>
+              <th style={{ width: 88, textAlign: "right" }}>Proj</th>
+              <th style={{ width: 88, textAlign: "right" }}>Actual</th>
+              <th style={{ width: 88, textAlign: "right" }}>Used</th>
+              <th style={{ width: 240 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -210,11 +278,9 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
               const opp = p ? opponentForWeek(p, week) : "";
               const proj = p ? Number(projForWeek(p, week) || 0) : 0;
 
-              // Actual from statsMap if available
-              const statRow = pid ? statsMap.get(String(pid)) : null;
-              const actual = statRow ? Number(statRow.points || 0) : 0;
+              const srow = p ? firstStatRowForPlayer(p, statsMap) : null;
+              const actual = srow ? Number((srow.points != null ? srow.points : computePointsFromRow(srow)) || 0) : 0;
 
-              // Used = prefer actual if present else projection
               const used = actual || proj || 0;
 
               return (
@@ -224,9 +290,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                   <td>{opp || "—"}</td>
                   <td style={{ textAlign: "right" }}>{proj.toFixed(1)}</td>
                   <td style={{ textAlign: "right" }}>{actual ? actual.toFixed(1) : "—"}</td>
-                  <td style={{ textAlign: "right" }}>
-                    <b>{used.toFixed(1)}</b>
-                  </td>
+                  <td style={{ textAlign: "right" }}><b>{used.toFixed(1)}</b></td>
                   <td>
                     {p ? (
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -259,9 +323,9 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
               <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
                 <th>Player</th>
                 <th style={{ width: 70 }}>Opp</th>
-                <th style={{ width: 100, textAlign: "right" }}>Proj</th>
-                <th style={{ width: 100, textAlign: "right" }}>Actual</th>
-                <th style={{ width: 220 }}>Actions</th>
+                <th style={{ width: 88, textAlign: "right" }}>Proj</th>
+                <th style={{ width: 88, textAlign: "right" }}>Actual</th>
+                <th style={{ width: 260 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -279,8 +343,8 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                 const allowed = allowedSlotsForPlayer(p);
                 const opp = opponentForWeek(p, week) || "—";
                 const proj = Number(projForWeek(p, week) || 0);
-                const statRow = statsMap.get(String(pid));
-                const actual = statRow ? Number(statRow.points || 0) : 0;
+                const srow = firstStatRowForPlayer(p, statsMap);
+                const actual = srow ? Number((srow.points != null ? srow.points : computePointsFromRow(srow)) || 0) : 0;
 
                 return (
                   <tr key={pid} style={{ borderBottom: "1px solid #f6f6f6" }}>
@@ -299,7 +363,9 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                             Start at {slot}
                           </button>
                         ))}
-                        <button disabled={acting} onClick={() => handleRelease(pid)}>Release</button>
+                        <button disabled={acting} onClick={() => handleRelease(pid)}>
+                          Release
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -308,14 +374,6 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
             </tbody>
           </table>
         )}
-      </div>
-
-      {/* Helpful hints */}
-      <div style={{ color: "#777", marginTop: 12 }}>
-        • “Actual” shows live/stat-based points if available for this week. <br />
-        • “Proj” shows your saved projection for the week. <br />
-        • “Pts Used” = Actual if present, otherwise Proj. <br />
-        • “Release” removes the player from your team and frees their claim.
       </div>
 
       {/* After-draft reminder for payments still due */}
