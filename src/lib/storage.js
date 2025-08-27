@@ -286,7 +286,28 @@ export async function listPlayers({ leagueId }) {
       p.playerName ??
       (typeof p.id === "string" ? p.id : null);
     const team = p.team || p.nflTeam || p.proTeam || null;
-    return { ...p, id, name, position, team };
+
+    // carry espnId through in a normalized slot if it exists in any known shape
+    const espnId =
+      p.espnId ??
+      p.espn_id ??
+      (p.espn && (p.espn.playerId || p.espn.id)) ??
+      null;
+
+    // preferred headshot field if already present
+    const photo =
+      p.photo ||
+      p.photoUrl ||
+      p.photoURL ||
+      p.headshot ||
+      p.headshotUrl ||
+      p.image ||
+      p.imageUrl ||
+      p.img ||
+      p.avatar ||
+      null;
+
+    return { ...p, id, name, position, team, espnId, photo };
   });
 
   const byId = new Map();
@@ -315,6 +336,7 @@ function indexKeysFor(p) {
     p?.sleeperId,
     p?.sleeper_id,
     p?.espnId,
+    p?.espn_id,
     p?.yahooId,
     p?.gsisId,
     p?.externalId,
@@ -373,6 +395,9 @@ export async function seedPlayersToGlobal(players = []) {
         team: raw.team || raw.nflTeam || raw.proTeam || null,
         projections: raw.projections || null,
         matchups: raw.matchups || null,
+        // preserve espnId/photo if provided
+        espnId: raw.espnId ?? raw.espn_id ?? (raw.espn && (raw.espn.playerId || raw.espn.id)) ?? null,
+        photo: raw.photo || raw.photoUrl || raw.headshot || raw.image || null,
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -399,6 +424,8 @@ export async function seedPlayersToLeague(leagueId, players = []) {
         team: raw.team || raw.nflTeam || raw.proTeam || null,
         projections: raw.projections || null,
         matchups: raw.matchups || null,
+        espnId: raw.espnId ?? raw.espn_id ?? (raw.espn && (raw.espn.playerId || raw.espn.id)) ?? null,
+        photo: raw.photo || raw.photoUrl || raw.headshot || raw.image || null,
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -444,6 +471,34 @@ export async function bulkSetEspnIds({ leagueId = null, mapping = {} }) {
   if (count) await batch.commit();
   return { updated: count };
 }
+
+/** Set a direct headshot URL for a player */
+export async function setPlayerHeadshot({ leagueId = null, id, url }) {
+  const pid = asId(id);
+  if (!pid) throw new Error("Missing player id");
+  const ref = leagueId
+    ? doc(db, "leagues", leagueId, "players", pid)
+    : doc(db, "players", pid);
+  await updateDoc(ref, { photo: url || null, updatedAt: serverTimestamp() });
+}
+
+/** Bulk set: mapping { "<playerId>": "<url>" } */
+export async function bulkSetHeadshots({ leagueId = null, mapping = {} }) {
+  const batch = writeBatch(db);
+  let count = 0;
+  Object.entries(mapping).forEach(([pidRaw, url]) => {
+    const pid = asId(pidRaw);
+    if (!pid || !url) return;
+    const ref = leagueId
+      ? doc(db, "leagues", leagueId, "players", pid)
+      : doc(db, "players", pid);
+    batch.set(ref, { photo: url, updatedAt: serverTimestamp() }, { merge: true });
+    count++;
+  });
+  if (count) await batch.commit();
+  return { updated: count };
+}
+
 /* =========================================================
    PROJECTED & ACTUAL POINTS
    ========================================================= */
@@ -560,6 +615,7 @@ function candidateIdsForStats(p) {
     p?.externalId,
     p?.pid,
     p?.espnId,
+    p?.espn_id,
     p?.yahooId,
     p?.gsisId,
   ]
@@ -590,9 +646,7 @@ export function actualPointsForPlayer(p, week, statsMap) {
   const id = asId(p?.id);
   if (!id || !statsMap?.get) return 0;
   const row = statsMap.get(id);
-  if (!row) return 0;
-  if (row.points != null) return Number(row.points) || 0;
-  // If your /api/stats/week returns per-stat fields, you can compute here too.
+  if (row && row.points != null) return Number(row.points) || 0;
   return 0;
 }
 
@@ -1287,12 +1341,15 @@ export async function setCurrentWeek({ leagueId, week }) {
   });
 }
 
-export async function setSeasonEnded({ leagueId, ended }) {
+/** Accepts either {ended} or {seasonEnded} for convenience */
+export async function setSeasonEnded({ leagueId, ended, seasonEnded }) {
   if (!leagueId) throw new Error("Missing leagueId");
+  const value = ended ?? seasonEnded ?? false;
   await updateDoc(doc(db, "leagues", leagueId), {
-    "settings.seasonEnded": !!ended,
+    "settings.seasonEnded": !!value,
   });
 }
+
 /* =========================================================
    SMALL UTILITIES
    ========================================================= */
@@ -1308,10 +1365,15 @@ export function memberCanDraft(league, username) {
   if (league?.entry?.enabled && !hasPaidEntry(league, username)) return false;
   return true;
 }
-// --- Headshots (ESPN) ---
+
+/* ------------------- Headshots (ESPN + overrides) ------------------- */
+function isHttpUrl(u) {
+  if (!u || typeof u !== "string") return false;
+  return /^https?:\/\//i.test(u);
+}
 export function headshotUrlFor(p) {
   if (!p) return null;
-  // Accept several field shapes
+
   const espnId =
     p.espnId ??
     p.espn_id ??
@@ -1319,15 +1381,26 @@ export function headshotUrlFor(p) {
     null;
 
   if (espnId) {
-    // ESPN NFL player headshots
-    return `https://a.espncdn.com/i/headshots/nfl/players/full/${espnId}.png`;
+    const idStr = String(espnId).replace(/[^\d]/g, "");
+    if (idStr) return `https://a.espncdn.com/i/headshots/nfl/players/full/${idStr}.png`;
   }
 
-  // Optional: allow a direct image override if you store one
-  if (p.photo || p.headshotUrl || p.imageUrl) return p.photo || p.headshotUrl || p.imageUrl;
+  const direct =
+    p.photo ||
+    p.photoUrl ||
+    p.photoURL ||
+    p.headshot ||
+    p.headshotUrl ||
+    p.image ||
+    p.imageUrl ||
+    p.img ||
+    p.avatar ||
+    null;
 
+  if (isHttpUrl(direct)) return direct;
   return null; // no known headshot
 }
+
 /* =========================================================
    TREASURY / AUTO-SETTLEMENT / PAYOUTS QUEUE
    ========================================================= */
