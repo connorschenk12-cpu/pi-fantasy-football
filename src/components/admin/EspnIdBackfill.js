@@ -1,191 +1,111 @@
+// src/components/admin/EspnIdBackfill.js
 /* eslint-disable no-console */
 import React, { useState } from "react";
-import {
-  collection,
-  getDocs,
-  writeBatch,
-  doc,
-  serverTimestamp,
-} from "firebase/firestore";
+import { doc, updateDoc } from "firebase/firestore";
 import { db } from "../../lib/firebase";
+import { listPlayers } from "../../lib/storage";
 
-/**
- * Props:
- * - leagueId?: string | null  (null => backfill global /players; else leagues/{leagueId}/players)
- *
- * What it does:
- * 1) Fetch Sleeper's NFL players JSON (public endpoint)
- * 2) Build maps -> sleeperId -> espn_id & name -> espn_id
- * 3) Scan your Firestore players (global or league-scoped)
- * 4) When it finds an espn_id, writes:
- *    - espnId: string
- *    - headshotUrl: https://a.espncdn.com/i/headshots/nfl/players/full/${espnId}.png
- */
+const TEAM_ALIASES = { JAX:"JAC", LA:"LAR", OAK:"LV", STL:"LAR", SD:"LAC", WAS:"WAS" };
+const fixTeam = t => TEAM_ALIASES[String(t||"").toUpperCase()] || String(t||"").toUpperCase();
+const fixPos  = p => String(p||"").toUpperCase();
+const fixName = n => String(n||"").trim().toLowerCase()
+  // remove suffixes/punctuation for better matching
+  .replace(/\./g,"").replace(/ jr$| sr$| ii$| iii$| iv$| v$/g,"")
+  .replace(/'/g,"");
+
+const key = (name, team, pos) => `${fixName(name)}|${fixTeam(team)}|${fixPos(pos)}`;
+
 export default function EspnIdBackfill({ leagueId = null }) {
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
+  const [summary, setSummary] = useState(null);
 
-  function normName(n) {
-    return String(n || "")
-      .toLowerCase()
-      .replace(/\./g, "")
-      .replace(/\s+/g, " ")
-      .trim();
+  async function updatePlayerDoc(pid, payload) {
+    if (leagueId) {
+      try {
+        await updateDoc(doc(db, "leagues", leagueId, "players", String(pid)), payload);
+        return;
+      } catch {}
+    }
+    await updateDoc(doc(db, "players", String(pid)), payload);
   }
 
   async function run() {
-    if (busy) return;
     setBusy(true);
-    setResult(null);
-
     try {
-      // 1) Sleeper catalog
-      const url = "https://api.sleeper.app/v1/players/nfl";
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`Sleeper fetch failed: ${res.status}`);
-      const data = await res.json(); // big object keyed by player_id
-
-      // 2) Build lookups
-      const bySleeper = new Map(); // sleeper_id -> espn_id
-      const byName = new Map();    // normalized name -> espn_id
-      const byNameTeamPos = new Map(); // "name|team|pos" -> espn_id
-
-      for (const [sleeperId, row] of Object.entries(data)) {
-        const espn = row?.espn_id ?? row?.espn ?? null;
-        if (!espn) continue;
-
-        const espnId = String(espn);
-        const full = normName(row?.full_name || `${row?.first_name || ""} ${row?.last_name || ""}`);
-        const team = String(row?.team || row?.fantasy_positions?.[0] || row?.position || "").toUpperCase();
-        const pos  = String(row?.position || row?.fantasy_positions?.[0] || "").toUpperCase();
-
-        bySleeper.set(String(sleeperId), espnId);
-        if (full) byName.set(full, espnId);
-        if (full) byNameTeamPos.set(`${full}|${team}|${pos}`, espnId);
+      // 1) your players
+      const players = await listPlayers({ leagueId });
+      const byKey = new Map();
+      for (const p of players) {
+        const name = p.name || p.fullName || p.playerName;
+        const pos  = p.position || p.pos;
+        const team = p.team || p.nflTeam || p.proTeam;
+        if (!name || !pos) continue;
+        byKey.set(key(name, team, pos), p);
       }
 
-      // 3) Load Firestore players to update
-      const colRef = leagueId
-        ? collection(db, "leagues", leagueId, "players")
-        : collection(db, "players");
-      const snap = await getDocs(colRef);
+      // 2) Sleeper dump
+      const res = await fetch("https://api.sleeper.app/v1/players/nfl");
+      if (!res.ok) throw new Error("Failed to fetch Sleeper players");
+      const sleeper = await res.json();
 
-      let scanned = 0;
-      let already = 0;
-      let matched = 0;
-      let wrote = 0;
-
-      // Batch in chunks
-      let batch = writeBatch(db);
-      let ops = 0;
-
-      const commitIfNeeded = async (force = false) => {
-        if (ops >= 400 || force) {
-          await batch.commit();
-          batch = writeBatch(db);
-          ops = 0;
-        }
-      };
-
-      for (const d of snap.docs) {
-        scanned += 1;
-        const p = d.data() || {};
-        // If already has espnId & headshotUrl, skip
-        if (p.espnId && p.headshotUrl) {
-          already += 1;
-          continue;
-        }
-
-        // Try to find espnId
-        let espnId = null;
-
-        // (a) If sleeperId on your doc matches
-        const sleeperId =
-          String(p.sleeperId ?? p.sleeper_id ?? p.id ?? "").trim() || null;
-        if (sleeperId && bySleeper.has(String(sleeperId))) {
-          espnId = bySleeper.get(String(sleeperId));
-        }
-
-        // (b) Try by normalized name (+ optional team/pos)
-        if (!espnId) {
-          const name =
-            p.name ??
-            p.displayName ??
-            p.fullName ??
-            p.playerName ??
-            [p.firstName, p.lastName].filter(Boolean).join(" ") ??
-            null;
-          const team = String(p.team || p.nflTeam || p.proTeam || "").toUpperCase();
-          const pos  = String(p.position || p.pos || "").toUpperCase();
-
-          const key = normName(name || "");
-          if (key) {
-            const keyedTeamPos = `${key}|${team}|${pos}`;
-            if (byNameTeamPos.has(keyedTeamPos)) {
-              espnId = byNameTeamPos.get(keyedTeamPos);
-            } else if (byName.has(key)) {
-              espnId = byName.get(key);
-            }
-          }
-        }
-
-        if (!espnId) continue;
-
-        matched += 1;
-        const headshotUrl = `https://a.espncdn.com/i/headshots/nfl/players/full/${espnId}.png`;
-
-        batch.update(doc(colRef, d.id), {
-          espnId: String(espnId),
-          headshotUrl,
-          updatedAt: serverTimestamp(),
-        });
-        ops += 1;
-        wrote += 1;
-
-        await commitIfNeeded(false);
+      // 3) index (only rows that have espn_id)
+      const idx = new Map();
+      for (const sid in sleeper) {
+        const s = sleeper[sid];
+        if (!s) continue;
+        const sName = s.full_name || (s.first_name && s.last_name ? `${s.first_name} ${s.last_name}` : null);
+        const sTeam = s.team;
+        const sPos  = s.position;
+        const espn  = s.espn_id;
+        if (!sName || !sTeam || !sPos || !espn) continue;
+        const k = key(sName, sTeam, sPos);
+        if (!idx.has(k)) idx.set(k, s);
       }
 
-      await commitIfNeeded(true);
+      // 4) match & write espnId
+      let scanned = players.length, matched = 0, updated = 0, already = 0, misses = 0;
 
-      setResult({
-        scanned,
-        alreadyWithPhotos: already,
-        matched,
-        updated: wrote,
-        scope: leagueId ? `league ${leagueId}` : "global",
-      });
-      alert("Headshot backfill complete.");
+      for (const p of players) {
+        const k = key(
+          p.name || p.fullName || p.playerName,
+          p.team || p.nflTeam || p.proTeam,
+          p.position || p.pos
+        );
+        const s = idx.get(k);
+        if (!s) { misses++; continue; }
+
+        matched++;
+        const have = p.espnId || p.espn_id || (p.espn && (p.espn.id || p.espn.playerId));
+        if (have) { already++; continue; }
+
+        await updatePlayerDoc(p.id, { espnId: String(s.espn_id) });
+        updated++;
+      }
+
+      const out = { scanned, matched, updated, already, misses, scope: leagueId ? leagueId : "global" };
+      setSummary(out);
+      alert(
+        `ESPN Backfill\nScanned: ${scanned}\nMatched: ${matched}\nUpdated: ${updated}\nAlready had: ${already}\nMisses: ${misses}\nScope: ${out.scope}`
+      );
     } catch (e) {
       console.error(e);
-      setResult({ error: String(e?.message || e) });
-      alert(`Headshot backfill failed: ${String(e?.message || e)}`);
+      alert(e?.message || String(e));
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="card mb12">
-      <div className="card-title">Headshots (ESPN) Backfill</div>
-      <div className="row wrap ai-center gap12">
-        <div className="muted">
-          Source: Sleeper NFL catalog → write <code>espnId</code> and <code>headshotUrl</code> to{" "}
-          {leagueId ? <b>league-scoped</b> : <b>global</b>} players.
-        </div>
-        <button className="btn btn-primary" disabled={busy} onClick={run}>
-          {busy ? "Running…" : "Run headshot backfill now"}
+    <div>
+      <div className="row gap12 ai-center">
+        <button className="btn" disabled={busy} onClick={run}>
+          {busy ? "Running…" : "Run ESPN ID Backfill"}
         </button>
+        <div className="muted">Maps via Sleeper & writes <code>espnId</code> for ESPN headshots.</div>
       </div>
-      {result && !result.error && (
+      {summary && (
         <div className="muted mt8">
-          Scanned: <b>{result.scanned}</b> · Already had photos: <b>{result.alreadyWithPhotos}</b> ·
-          Matched ESPN IDs: <b>{result.matched}</b> · Updated: <b>{result.updated}</b> · Scope:{" "}
-          <b>{result.scope}</b>
-        </div>
-      )}
-      {result?.error && (
-        <div style={{ color: "crimson", marginTop: 8 }}>
-          Error: {result.error}
+          Scanned: {summary.scanned} · Matched: {summary.matched} · Updated: {summary.updated} · Already: {summary.already} · Misses: {summary.misses} · Scope: {summary.scope}
         </div>
       )}
     </div>
