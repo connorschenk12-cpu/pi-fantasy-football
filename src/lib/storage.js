@@ -1167,3 +1167,194 @@ export function memberCanDraft(league, username) {
   if (league?.entry?.enabled && !hasPaidEntry(league, username)) return false;
   return true;
 }
+/* =========================================================
+   TREASURY / AUTO-SETTLEMENT / PAYOUTS QUEUE
+   ========================================================= */
+
+// --- constants you can tweak ---
+const DEFAULT_RAKE_BP = 200; // 2% in basis points. free leagues ignore rake
+const MAX_WINNERS = 1;       // simple: 1st place takes all
+const MIN_PAYOUT_PI = 0.01;  // ignore dust
+
+/** Ensure treasury shape exists on a league object */
+function normalizeTreasury(league) {
+  const t = league?.treasury || {};
+  return {
+    poolPi: Number(t.poolPi || 0),
+    rakePi: Number(t.rakePi || 0),
+    payouts: t.payouts || {
+      pending: [], // [{id, leagueId, username, amountPi, createdAt}]
+      sent: [],    // [{id, leagueId, username, amountPi, txId, sentAt}]
+    },
+    txs: Array.isArray(t.txs) ? t.txs : [], // entry payment log
+  };
+}
+
+/** Record an entry payment into the treasury (2% rake by default; free leagues ignore rake) */
+export async function recordSuccessfulEntryPayment({ leagueId, username, amountPi, txId = null, rakeBp = DEFAULT_RAKE_BP }) {
+  const lref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(lref);
+  if (!snap.exists()) throw new Error("League not found");
+  const L = snap.data();
+
+  // mark paid
+  const entryPaid = { ...(L?.entry?.paid || {}) };
+  entryPaid[username] = { paidAt: serverTimestamp(), txId: txId || "pi-ok" };
+
+  // free league => 0 rake
+  const isFree = !L?.entry?.enabled || Number(L?.entry?.amountPi || 0) === 0;
+  const useRakeBp = isFree ? 0 : (Number(L?.entry?.rakeBp ?? rakeBp) || 0);
+
+  const rake = Math.round(Number(amountPi || 0) * useRakeBp) / 10000; // bp to fraction
+  const toPool = Math.max(0, Number(amountPi || 0) - rake);
+
+  const T = normalizeTreasury(L);
+  T.poolPi = Math.round((T.poolPi + toPool) * 100) / 100;
+  T.rakePi = Math.round((T.rakePi + rake) * 100) / 100;
+  T.txs.push({
+    kind: "entry",
+    username,
+    amountPi: Number(amountPi || 0),
+    rakePi: rake,
+    netPi: toPool,
+    txId: txId || "pi-ok",
+    at: serverTimestamp(),
+  });
+
+  await updateDoc(lref, {
+    "entry.paid": entryPaid,
+    "treasury.poolPi": T.poolPi,
+    "treasury.rakePi": T.rakePi,
+    "treasury.txs": T.txs
+  });
+}
+
+/** Find leagues that should be settled.
+ *  Simple rule: draft done AND seasonEnd flag true (or currentWeek>18).
+ *  Adjust to your season logic as you like. */
+export async function listLeaguesNeedingSettlement() {
+  const leaguesCol = collection(db, "leagues");
+  const snap = await getDocs(leaguesCol);
+  const out = [];
+  snap.forEach((d) => {
+    const L = { id: d.id, ...d.data() };
+    const curWeek = Number(L?.settings?.currentWeek || 1);
+    const seasonEnded = !!L?.settings?.seasonEnded || curWeek >= 18;
+    if (L?.draft?.status === "done" && seasonEnded) out.push(L);
+  });
+  return out;
+}
+
+/** Compute winners + shares (very simple: 1st place takes all) */
+export async function computeSeasonWinners(league) {
+  // naive: pick highest pointsFor in standings
+  const st = league?.standings || {};
+  const entries = Object.entries(st).map(([u, row]) => ({
+    username: u,
+    pointsFor: Number(row?.pointsFor || 0),
+    wins: Number(row?.wins || 0)
+  }));
+  if (entries.length === 0) return [];
+
+  entries.sort((a, b) => (b.wins - a.wins) || (b.pointsFor - a.pointsFor));
+
+  const winner = entries[0]?.username;
+  if (!winner) return [];
+
+  const T = normalizeTreasury(league);
+  const pot = Number(T.poolPi || 0);
+
+  if (pot < MIN_PAYOUT_PI) return [];
+  return [{ username: winner, sharePi: pot }]; // winner-take-all
+}
+
+/** Move pot → payouts.pending; zero the pool. Idempotent safe-ish. */
+export async function enqueueLeaguePayouts({ leagueId, winners }) {
+  const lref = doc(db, "leagues", leagueId);
+  const snap = await getDoc(lref);
+  if (!snap.exists()) throw new Error("League not found");
+  const L = snap.data();
+  const T = normalizeTreasury(L);
+
+  const total = Number(T.poolPi || 0);
+  if (total < MIN_PAYOUT_PI) return { totalEnqueued: 0 };
+
+  // avoid duplicate enqueues: if there are already pending or sent entries for this league and season end, skip
+  const alreadyPending = (T.payouts.pending || []).some(p => p.amountPi && p.username);
+  if (alreadyPending) return { totalEnqueued: 0 };
+
+  const now = Date.now();
+  const pending = [...(T.payouts.pending || [])];
+
+  let enq = 0;
+  for (const w of winners) {
+    const amt = Number(w.sharePi || 0);
+    if (amt < MIN_PAYOUT_PI) continue;
+    pending.push({
+      id: `${leagueId}_${w.username}_${now}`,
+      leagueId,
+      username: w.username,
+      amountPi: Math.round(amt * 100) / 100,
+      createdAt: serverTimestamp(),
+      status: "pending"
+    });
+    enq += amt;
+  }
+
+  await updateDoc(lref, {
+    "treasury.payouts.pending": pending,
+    "treasury.poolPi": 0 // move all out of the pool; it now sits in the pending queue
+  });
+
+  return { totalEnqueued: pending.length };
+}
+
+/** Hook for actually sending Pi from your custodial league wallet to winners.
+ *  Replace the TODO with your server-side call that executes the Pi transfer. */
+async function sendPiServerSide({ toUsername, amountPi }) {
+  // TODO: Implement with your Pi backend (server secret) to send Pi.
+  // Return { ok: true, txId: '...' } on success; { ok:false, error:'...' } on failure.
+  console.log("SIMULATED sendPiServerSide ->", toUsername, amountPi);
+  return { ok: true, txId: `sim-${Date.now()}` };
+}
+
+/** Try to send all pending payouts (best-effort; safe to call daily) */
+export async function trySendPendingPayouts() {
+  const leaguesCol = collection(db, "leagues");
+  const snap = await getDocs(leaguesCol);
+  let sentCount = 0;
+
+  for (const d of snap.docs) {
+    const L = { id: d.id, ...d.data() };
+    const T = normalizeTreasury(L);
+    const pending = [...(T.payouts.pending || [])];
+    if (pending.length === 0) continue;
+
+    const newPending = [];
+    const sent = [...(T.payouts.sent || [])];
+
+    for (const p of pending) {
+      // attempt to send each
+      const res = await sendPiServerSide({ toUsername: p.username, amountPi: p.amountPi });
+      if (res.ok) {
+        sent.push({
+          ...p,
+          txId: res.txId || "tx-ok",
+          sentAt: serverTimestamp(),
+          status: "sent"
+        });
+        sentCount += 1;
+      } else {
+        // keep it pending to retry next run
+        newPending.push(p);
+      }
+    }
+
+    await updateDoc(doc(db, "leagues", L.id), {
+      "treasury.payouts.pending": newPending,
+      "treasury.payouts.sent": sent
+    });
+  }
+
+  return { sentCount };
+}
