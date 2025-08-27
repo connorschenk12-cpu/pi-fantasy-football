@@ -28,7 +28,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
 
-  // Subscribe to league + my team
+  // subscribe league + my team
   useEffect(() => {
     if (!leagueId) return;
     const unsubLeague = listenLeague(leagueId, (L) => setLeague(L));
@@ -39,7 +39,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     };
   }, [leagueId, username]);
 
-  // Load players map
+  // load players map
   useEffect(() => {
     let live = true;
     (async () => {
@@ -59,21 +59,16 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
 
   const week = Number(currentWeek || 1);
 
-  // Fetch weekly stats from /api/stats/week -> Map
+  // fetch weekly stats (serverless endpoint -> Map)
   useEffect(() => {
     let live = true;
     (async () => {
       try {
         const map = await fetchWeekStats({ leagueId, week });
-        if (live) {
-          setStatsMap(map || new Map());
-          // Debug: show a sample of keys so you can verify ID shape
-          const first5 = Array.from(map.keys()).slice(0, 5);
-          console.log("statsMap keys sample:", first5);
-        }
+        if (live) setStatsMap(map || new Map());
       } catch (e) {
         console.warn("fetchWeekStats failed:", e);
-        if (live) setStatsMap(new Map());
+        if (live) setStatsMap(new Map()); // fall back gracefully
       }
     })();
     return () => {
@@ -81,21 +76,23 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
     };
   }, [leagueId, week]);
 
-  // Compute totals with stats (actual overrides projection)
+  // compute totals with stats
   const points = useMemo(() => {
     if (!team) return { lines: [], total: 0 };
     return computeTeamPoints({
       roster: team?.roster || {},
       week,
       playersMap,
-      statsMap,
+      statsMap, // <- actuals override projections if available
     });
   }, [team, playersMap, statsMap, week]);
 
   const entryRequired = useMemo(() => !leagueIsFree(league), [league]);
   const alreadyPaid = useMemo(() => hasPaidEntry(league, username), [league, username]);
 
-  // Actions
+  const draftStatus = league?.draft?.status || "scheduled";
+  const draftDone = draftStatus === "done";
+
   async function handleMoveToStarter(pid, slot) {
     setActing(true);
     try {
@@ -107,6 +104,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
       setActing(false);
     }
   }
+
   async function handleMoveToBench(slot) {
     setActing(true);
     try {
@@ -118,6 +116,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
       setActing(false);
     }
   }
+
   async function handleRelease(pid) {
     if (!window.confirm("Release this player from your team?")) return;
     setActing(true);
@@ -149,13 +148,26 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   const benchIds = Array.isArray(team?.bench) ? team.bench : [];
   const roster = team?.roster || {};
 
-  // Payment CTA (hidden when paid)
+  // Payment CTA (in My Team, hidden when paid)
   const showPaymentCTA = entryRequired && !alreadyPaid;
   const amountPi = Number(league?.entry?.amountPi || 0);
-  const payHref = paymentCheckoutUrl({ leagueId, username });
+
+  // Try to build a payment URL from storage util; fallback to /payments
+  let payHref = "/payments";
+  try {
+    const url = paymentCheckoutUrl?.({ leagueId, username });
+    if (url) payHref = url;
+  } catch (_) {
+    // ignore
+  }
 
   return (
     <div>
+      {/* Debug marker */}
+      <div style={{padding:8, border:'2px solid #00aa88', borderRadius:6, marginBottom:8}}>
+        <b>MyTeam v3 marker:</b> if you can see this box, the latest MyTeam.js is LIVE.
+      </div>
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <h3 style={{ margin: 0 }}>{team?.name || username}</h3>
         <div style={{ color: "#666" }}>
@@ -163,7 +175,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
         </div>
       </div>
 
-      {/* Payment CTA */}
+      {/* Entry Payment CTA */}
       {showPaymentCTA && (
         <div
           style={{
@@ -211,11 +223,6 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
               const actual = line.actual || 0;
               const opp = p ? opponentForWeek(p, week) : "";
 
-              // Debug: if you see zeros, IDs likely don't match stats
-              if (p && actual === 0 && proj === 0) {
-                console.log("No stats/projection for:", p);
-              }
-
               return (
                 <tr key={slot} style={{ borderBottom: "1px solid #f6f6f6" }}>
                   <td><b>{slot}</b></td>
@@ -250,7 +257,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
       {/* Bench */}
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
         <h4 style={{ marginTop: 0 }}>Bench</h4>
-        {(!benchIds || benchIds.length === 0) ? (
+        {benchIds.length === 0 ? (
           <div style={{ color: "#999" }}>No one on the bench.</div>
         ) : (
           <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
@@ -301,6 +308,21 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
           </table>
         )}
       </div>
+
+      {/* After-draft reminder for payments still due */}
+      {draftDone && showPaymentCTA && (
+        <div
+          style={{
+            marginTop: 16,
+            padding: 12,
+            borderRadius: 8,
+            border: "1px dashed #e6b800",
+            background: "#fffbe6",
+          }}
+        >
+          The draft is complete—please complete your entry payment to keep your team eligible.
+        </div>
+      )}
     </div>
   );
 }
