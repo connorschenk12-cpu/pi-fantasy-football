@@ -1252,6 +1252,21 @@ export async function setMatchupResult({ leagueId, week, home, away, homePts, aw
   );
 }
 
+// --- League settings helpers (week & season end) ---
+export async function setCurrentWeek({ leagueId, week }) {
+  if (!leagueId) throw new Error("Missing leagueId");
+  const w = Math.max(1, Number(week || 1));
+  await updateDoc(doc(db, "leagues", leagueId), {
+    "settings.currentWeek": w,
+  });
+}
+
+export async function setSeasonEnded({ leagueId, ended }) {
+  if (!leagueId) throw new Error("Missing leagueId");
+  await updateDoc(doc(db, "leagues", leagueId), {
+    "settings.seasonEnded": !!ended,
+  });
+}
 /* =========================================================
    SMALL UTILITIES
    ========================================================= */
