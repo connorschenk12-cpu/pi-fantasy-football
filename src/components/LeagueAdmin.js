@@ -16,6 +16,7 @@ import {
   setCurrentWeek,
   setSeasonEnded,
 } from "../lib/storage.js";
+import EspnIdBackfill from "./admin/EspnIdBackfill";
 
 export default function LeagueAdmin({ leagueId, username }) {
   const [league, setLeague] = useState(null);
@@ -31,6 +32,10 @@ export default function LeagueAdmin({ leagueId, username }) {
 
   const isOwner = useMemo(() => !!league && league.owner === username, [league, username]);
 
+  {isOwner && (
+  <EspnIdBackfill leagueId={null} />
+)}
+  
   // Subscribe to league
   useEffect(() => {
     if (!leagueId) return;
