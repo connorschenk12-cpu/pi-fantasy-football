@@ -167,3 +167,21 @@ body{
   background: linear-gradient(180deg, rgba(255, 207, 92, .14), rgba(255, 207, 92, .06));
   border-radius: 12px; padding: 12px;
 }
+
+/* ---------- Table Fix: Player Name Column ---------- */
+td[data-label="Player"],
+th[data-label="Player"],
+.cell-player,
+.col-player {
+  min-width: 220px;   /* ensures enough width */
+  max-width: 360px;   /* prevents overflow */
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  font-size: 0.95rem; /* slightly smaller for readability */
+}
+
+/* If flexbox tables are used */
+.row .cell-player, .row .col-player {
+  flex: 2 1 260px; /* give player column more flex space */
+}
