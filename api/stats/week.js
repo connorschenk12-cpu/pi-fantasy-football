@@ -1,188 +1,173 @@
-// src/pages/api/stats/week.js
-// If you use the App Router, adapt to: export async function GET(req) { ... }
+// /api/stats/week.js
+// Returns live/week player stats collapsed by player (PPR computed).
+// Query: ?week=1&season=2025&seasontype=2
+// Default: seasontype=2 (regular). We auto-detect current season if not provided.
+
+const PPR = {
+  passYds: 0.04,
+  passTD: 4,
+  passInt: -2,
+  rushYds: 0.1,
+  rushTD: 6,
+  recYds: 0.1,
+  recTD: 6,
+  rec: 1,
+  fumbles: -2,
+};
+
+function n(v) { return v == null ? 0 : Number(v) || 0; }
+
+function computePoints(row) {
+  return Math.round((
+    n(row.passYds) * PPR.passYds +
+    n(row.passTD) * PPR.passTD +
+    n(row.passInt) * PPR.passInt +
+    n(row.rushYds) * PPR.rushYds +
+    n(row.rushTD) * PPR.rushTD +
+    n(row.recYds) * PPR.recYds +
+    n(row.recTD) * PPR.recTD +
+    n(row.rec)    * PPR.rec +
+    n(row.fumbles)* PPR.fumbles
+  ) * 10) / 10;
+}
+
+/**
+ * Normalize a single ESPN "boxscore player" into our compact stat row.
+ * We key by multiple ids client-side already; here we expose:
+ * - id: ESPN athlete id as string
+ * - nameTeamKey: "NAME|TEAM" for extra matching (uppercased)
+ */
+function normalizePlayerStat(p, teamAbbr) {
+  // ESPN offensive stats live under various aggregates; we unify the common ones.
+  const athlete = p?.athlete;
+  const id = athlete?.id != null ? String(athlete.id) : null;
+
+  // Basic name
+  const name = (athlete?.displayName || "").toUpperCase().trim();
+  const team = (teamAbbr || athlete?.team?.abbreviation || "").toUpperCase().trim();
+  const nameTeamKey = name && team ? `${name}|${team}` : null;
+
+  // Split stats are arrays like [{name:"Passing Yards", abbreviation:"YDS", value: 245}, ...]
+  // ESPN groups by categories (e.g., "passing", "rushing", "receiving", "fumbles")
+  const cats = Array.isArray(p?.statistics) ? p.statistics : [];
+
+  const grab = (groupName, abbr) => {
+    const g = cats.find(c => (c?.name || "").toLowerCase() === groupName);
+    if (!g || !Array.isArray(g?.stats)) return 0;
+    const s = g.stats.find(s => (s?.shortDisplayName === abbr) || (s?.abbreviation === abbr) || (s?.name === abbr));
+    return s?.value != null ? Number(s.value) : 0;
+  };
+
+  const passYds = grab("passing", "YDS");
+  const passTD  = grab("passing", "TD");
+  const passInt = grab("passing", "INT");
+
+  const rushYds = grab("rushing", "YDS");
+  const rushTD  = grab("rushing", "TD");
+
+  const recYds  = grab("receiving", "YDS");
+  const recTD   = grab("receiving", "TD");
+  const rec     = grab("receiving", "REC");
+
+  // fumbles are typically in "fumbles" group under "LOST"
+  const fumbles = grab("fumbles", "LOST");
+
+  const row = { passYds, passTD, passInt, rushYds, rushTD, recYds, recTD, rec, fumbles };
+  return { id, nameTeamKey, ...row, points: computePoints(row) };
+}
 
 export default async function handler(req, res) {
   try {
-    const { week } = req.query;
-    const weekNum = Number(week || 1);
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const weekParam = Number(url.searchParams.get("week"));
+    const season = Number(url.searchParams.get("season")) || new Date().getFullYear();
+    const seasontype = Number(url.searchParams.get("seasontype")) || 2; // 2=regular, 3=post
 
-    // Figure out the "season" (roughly Sep–Feb is NFL season crossing the new year)
-    const now = new Date();
-    const year = now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
-    // Regular season == seasontype=2; preseason=1; playoffs=3
-    const seasontype = 2;
-
-    // 1) Scoreboard => list of event (game) IDs for this week
-    const scoreboardUrl = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${year}&seasontype=${seasontype}&week=${weekNum}`;
-    const sc = await fetch(scoreboardUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!sc.ok) {
-      return res.status(200).json({ stats: {}, note: `scoreboard not ok ${sc.status}` });
+    if (!Number.isFinite(weekParam) || weekParam <= 0) {
+      return res.status(400).json({ error: "week is required (e.g., ?week=3)" });
     }
+
+    // 1) Get all games for the week
+    const scoreboard = `https://site.api.espn.com/apis/v2/sports/football/nfl/scoreboard?week=${weekParam}&seasontype=${seasontype}&season=${season}`;
+    const sc = await fetch(scoreboard, { headers: { "x-espn-site-app": "sports" } });
+    if (!sc.ok) return res.status(502).json({ error: "ESPN scoreboard fetch failed" });
     const scJson = await sc.json();
+
+    // 2) For each competition (game), pull boxscore
     const events = Array.isArray(scJson?.events) ? scJson.events : [];
-
-    // 2) For each event, grab live "summary" (includes box score / leaders / athletes)
-    //    Build a single { [athleteId]: statRow } map.
-    const statsMap = new Map();
-
-    // PPR scoring weights
-    const S = {
-      passYds: 0.04,  // 1 per 25
-      passTD: 4,
-      passInt: -2,
-      rushYds: 0.1,   // 1 per 10
-      rushTD: 6,
-      recYds: 0.1,    // 1 per 10
-      recTD: 6,
-      rec: 1,
-      fumbles: -2,
-    };
-    const n = (v) => (v == null ? 0 : Number(v) || 0);
-    const computePoints = (row) => {
-      const pts =
-        n(row.passYds) * S.passYds +
-        n(row.passTD) * S.passTD +
-        n(row.passInt) * S.passInt +
-        n(row.rushYds) * S.rushYds +
-        n(row.rushTD) * S.rushTD +
-        n(row.recYds) * S.recYds +
-        n(row.recTD) * S.recTD +
-        n(row.rec) * S.rec +
-        n(row.fumbles) * S.fumbles;
-      return Math.round(pts * 10) / 10;
-    };
-
-    // Helpers to normalize ESPN team/athlete shapes into our minimal row
-    const teamAbbrev = (team) =>
-      team?.abbreviation ||
-      team?.team?.abbreviation ||
-      team?.shortDisplayName ||
-      team?.displayName ||
-      '';
-
-    const addRow = (athlete, team, partial) => {
-      const espnId = String(athlete?.id || '');
-      if (!espnId) return;
-
-      const first = athlete?.firstName || '';
-      const last  = athlete?.lastName || '';
-      const full  = athlete?.displayName || [first, last].filter(Boolean).join(' ').trim() || '';
-      const pos   = (athlete?.position?.abbreviation || athlete?.position?.name || '').toUpperCase();
-      const teamAbbr = teamAbbrev(team);
-
-      const row = {
-        id: espnId,
-        espnId,
-        name: full,
-        firstName: first,
-        lastName: last,
-        position: pos,
-        team: teamAbbr,
-        ...partial,
-      };
-      row.points = computePoints(row);
-
-      // primary key: espnId
-      statsMap.set(espnId, row);
-      // secondary fuzzy key: name|team (uppercase, trimmed)
-      const fuzzyKey = `${full.toUpperCase()}|${teamAbbr.toUpperCase()}`.trim();
-      if (full && teamAbbr) statsMap.set(fuzzyKey, row);
-    };
-
-    // Pull summary per game
-    // ESPN "summary" path: /summary?event={eventId}
-    const summaries = await Promise.all(
-      events.map(async (ev) => {
-        const eventId = ev?.id || ev?.uid?.split('~').pop();
-        if (!eventId) return null;
-        const url = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${eventId}`;
-        try {
-          const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-          if (!r.ok) return null;
-          return await r.json();
-        } catch {
-          return null;
-        }
-      })
-    );
-
-    // 3) Extract box score / leaders into player stat rows
-    for (const sum of summaries) {
-      if (!sum) continue;
-
-      // Box score players are in sum.boxscore.players[].statistics (grouped by type)
-      const teams = Array.isArray(sum?.boxscore?.players) ? sum.boxscore.players : [];
-      for (const t of teams) {
-        const teamObj = t?.team || t?.teamData || null;
-        const athletes = Array.isArray(t?.statistics) ? t.statistics : [];
-        // statistics is an array of stat-groups (passing, rushing, receiving, fumbles, etc)
-        for (const group of athletes) {
-          const atts = Array.isArray(group?.athletes) ? group.athletes : [];
-          for (const a of atts) {
-            const athlete = a?.athlete || a; // sometimes nested
-            const statVals = a?.stats || a?.statistics || [];
-            const labels   = a?.labels || group?.labels || []; // e.g., ["CMP/ATT","YDS","TD","INT"]
-
-            // We’ll populate our neutral schema fields:
-            let passYds=0, passTD=0, passInt=0, rushYds=0, rushTD=0, recYds=0, recTD=0, rec=0, fumbles=0;
-
-            // ESPN’s stats are arrays of strings; we need to parse by label
-            // Try common groups: passing, rushing, receiving, fumbles (labels vary per group)
-            if (group?.type?.toLowerCase?.().includes('pass')) {
-              // Typical labels: ["CMP/ATT","YDS","TD","INT","QBR","RTG","SACKS"] — we want YDS, TD, INT
-              labels.forEach((lab, i) => {
-                const v = Number(String(statVals[i] || '0').replace(/[^\d.-]/g, '')) || 0;
-                const key = lab.toUpperCase();
-                if (key.includes('YDS')) passYds = v;
-                if (key === 'TD') passTD = v;
-                if (key === 'INT') passInt = v;
-              });
-            }
-            if (group?.type?.toLowerCase?.().includes('rush')) {
-              labels.forEach((lab, i) => {
-                const v = Number(String(statVals[i] || '0').replace(/[^\d.-]/g, '')) || 0;
-                const key = lab.toUpperCase();
-                if (key.includes('YDS')) rushYds = v;
-                if (key === 'TD') rushTD = v;
-              });
-            }
-            if (group?.type?.toLowerCase?.().includes('receiv')) {
-              labels.forEach((lab, i) => {
-                const v = Number(String(statVals[i] || '0').replace(/[^\d.-]/g, '')) || 0;
-                const key = lab.toUpperCase();
-                if (key === 'REC' || key.includes('RECEPTIONS')) rec = v;
-                if (key.includes('YDS')) recYds = v;
-                if (key === 'TD') recTD = v;
-              });
-            }
-            if (group?.type?.toLowerCase?.().includes('fumble')) {
-              labels.forEach((lab, i) => {
-                const key = lab.toUpperCase();
-                if (key.includes('LOST')) {
-                  const v = Number(String(statVals[i] || '0').replace(/[^\d.-]/g, '')) || 0;
-                  fumbles = v;
-                }
-              });
-            }
-
-            addRow(athlete, teamObj, {
-              passYds, passTD, passInt,
-              rushYds, rushTD,
-              recYds,  recTD,  rec,
-              fumbles,
-            });
-          }
-        }
+    const compIds = [];
+    for (const e of events) {
+      const comps = Array.isArray(e?.competitions) ? e.competitions : [];
+      for (const c of comps) {
+        if (c?.id) compIds.push(String(c.id));
       }
     }
 
-    // 4) Return a plain object (Next/Vercel can’t serialize Maps)
-    const out = {};
-    for (const [k, v] of statsMap.entries()) out[k] = v;
+    // If no games, return empty
+    if (compIds.length === 0) return res.status(200).json({ stats: {} });
 
-    res.status(200).json({ stats: out, source: 'espn-live', week: weekNum, year });
-  } catch (e) {
-    console.error('week handler error', e);
-    res.status(200).json({ stats: {}, error: String(e?.message || e) });
+    // 3) Fetch boxscore per competition and accumulate player rows
+    const statsById = new Map();
+    const statsByNameTeam = new Map();
+
+    await Promise.all(compIds.map(async (cid) => {
+      const boxUrl = `https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/competitions/${cid}/boxscore`;
+      const r = await fetch(boxUrl, { headers: { "x-espn-site-app": "sports" } });
+      if (!r.ok) return;
+
+      const json = await r.json();
+
+      // boxscore.teams: two entries, each has team.abbreviation and statistics.players
+      const teams = Array.isArray(json?.boxscore?.teams) ? json.boxscore.teams : [];
+      for (const t of teams) {
+        const teamAbbr = t?.team?.abbreviation || t?.team?.shortDisplayName;
+        const players = Array.isArray(t?.statistics?.players) ? t.statistics.players : [];
+
+        for (const player of players) {
+          const norm = normalizePlayerStat(player, teamAbbr);
+          if (!norm.id && !norm.nameTeamKey) continue;
+
+          // Merge (some players appear in multiple categories across the same game)
+          const applyMerge = (existing, add) => {
+            const merged = {
+              passYds: n(existing?.passYds) + n(add.passYds),
+              passTD:  n(existing?.passTD)  + n(add.passTD),
+              passInt: n(existing?.passInt) + n(add.passInt),
+              rushYds: n(existing?.rushYds) + n(add.rushYds),
+              rushTD:  n(existing?.rushTD)  + n(add.rushTD),
+              recYds:  n(existing?.recYds)  + n(add.recYds),
+              recTD:   n(existing?.recTD)   + n(add.recTD),
+              rec:     n(existing?.rec)     + n(add.rec),
+              fumbles: n(existing?.fumbles) + n(add.fumbles),
+            };
+            return { ...merged, points: computePoints(merged) };
+          };
+
+          if (norm.id) {
+            const prev = statsById.get(norm.id);
+            statsById.set(norm.id, applyMerge(prev, norm));
+          }
+          if (norm.nameTeamKey) {
+            const prev = statsByNameTeam.get(norm.nameTeamKey);
+            statsByNameTeam.set(norm.nameTeamKey, applyMerge(prev, norm));
+          }
+        }
+      }
+    }));
+
+    // 4) Ship a hybrid object:
+    //    - primary keys: ESPN athlete id
+    //    - also include NAME|TEAM keys for the looser matching you added
+    const out = {};
+    for (const [id, row] of statsById.entries()) out[id] = row;
+    for (const [key, row] of statsByNameTeam.entries()) {
+      // Avoid clobbering ids if key looks numeric
+      if (!out[key]) out[key] = row;
+    }
+
+    res.status(200).json({ stats: out });
+  } catch (err) {
+    console.error("week stats error:", err);
+    res.status(500).json({ error: "Internal error" });
   }
 }
