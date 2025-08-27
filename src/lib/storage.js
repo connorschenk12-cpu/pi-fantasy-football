@@ -28,7 +28,7 @@ export const BENCH_SIZE = 3;
 export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE; // 12
 export const PICK_CLOCK_MS = 5000; // 5s auto-pick clock
 
-// Owner rake (basis points). 200 bps = 2%.
+// Owner rake fixed at 2% (200 basis points) for paid leagues
 const OWNER_RAKE_BPS = 200;
 
 export function emptyRoster() {
@@ -95,9 +95,13 @@ export function allowedSlotsForPlayer(player) {
 export function listenLeague(leagueId, onChange) {
   if (!leagueId) return () => {};
   const ref = doc(db, "leagues", leagueId);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
-  }, (err) => console.warn("listenLeague onSnapshot error:", err));
+  return onSnapshot(
+    ref,
+    (snap) => {
+      onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
+    },
+    (err) => console.warn("listenLeague onSnapshot error:", err)
+  );
 }
 
 export async function getLeague(leagueId) {
@@ -128,17 +132,25 @@ export async function ensureTeam({ leagueId, username }) {
 export function listenTeam({ leagueId, username, onChange }) {
   if (!leagueId || !username) return () => {};
   const ref = doc(db, "leagues", leagueId, "teams", username);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
-  }, (err) => console.warn("listenTeam onSnapshot error:", err));
+  return onSnapshot(
+    ref,
+    (snap) => {
+      onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
+    },
+    (err) => console.warn("listenTeam onSnapshot error:", err)
+  );
 }
 
 export function listenTeamById(leagueId, teamId, onChange) {
   if (!leagueId || !teamId) return () => {};
   const ref = doc(db, "leagues", leagueId, "teams", teamId);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
-  }, (err) => console.warn("listenTeamById onSnapshot error:", err));
+  return onSnapshot(
+    ref,
+    (snap) => {
+      onChange(snap.exists() ? { id: snap.id, ...snap.data() } : null);
+    },
+    (err) => console.warn("listenTeamById onSnapshot error:", err)
+  );
 }
 
 export async function listTeams(leagueId) {
@@ -182,7 +194,7 @@ export async function createLeague({ name, owner, order }) {
     name,
     owner,
     createdAt: serverTimestamp(),
-    settings: { currentWeek: 1, lockAddDuringDraft: false },
+    settings: { currentWeek: 1, lockAddDuringDraft: false, seasonEnded: false },
     draft: {
       status: "scheduled",
       order: Array.isArray(order) && order.length ? order : [owner],
@@ -198,6 +210,7 @@ export async function createLeague({ name, owner, order }) {
     standings: {
       [owner]: { wins: 0, losses: 0, ties: 0, pointsFor: 0, pointsAgainst: 0 },
     },
+    // treasury is created lazily on first payment
   });
 
   await setDoc(doc(db, "leagues", ref.id, "members", owner), {
@@ -435,27 +448,43 @@ export function opponentForWeek(p, week) {
 /** Stats API (robust to multiple shapes) -> Map */
 export async function fetchWeekStats({ leagueId, week }) {
   try {
-    const res = await fetch(`/api/stats/week?week=${encodeURIComponent(week)}${leagueId ? `&league=${encodeURIComponent(leagueId)}` : ""}`);
+    const res = await fetch(
+      `/api/stats/week?week=${encodeURIComponent(week)}${
+        leagueId ? `&league=${encodeURIComponent(leagueId)}` : ""
+      }`
+    );
     if (!res.ok) return new Map();
 
     const data = await res.json();
     const out = new Map();
 
     // PPR scoring
-    const S = { passYds: 0.04, passTD: 4, passInt: -2, rushYds: 0.1, rushTD: 6, recYds: 0.1, recTD: 6, rec: 1, fumbles: -2 };
+    const S = {
+      passYds: 0.04,
+      passTD: 4,
+      passInt: -2,
+      rushYds: 0.1,
+      rushTD: 6,
+      recYds: 0.1,
+      recTD: 6,
+      rec: 1,
+      fumbles: -2,
+    };
     const n = (v) => (v == null ? 0 : Number(v) || 0);
     const computePoints = (row) =>
-      Math.round((
-        n(row.passYds) * S.passYds +
-        n(row.passTD)  * S.passTD  +
-        n(row.passInt) * S.passInt +
-        n(row.rushYds) * S.rushYds +
-        n(row.rushTD)  * S.rushTD  +
-        n(row.recYds)  * S.recYds  +
-        n(row.recTD)   * S.recTD   +
-        n(row.rec)     * S.rec     +
-        n(row.fumbles) * S.fumbles
-      ) * 10) / 10;
+      Math.round(
+        (
+          n(row.passYds) * S.passYds +
+          n(row.passTD) * S.passTD +
+          n(row.passInt) * S.passInt +
+          n(row.rushYds) * S.rushYds +
+          n(row.rushTD) * S.rushTD +
+          n(row.recYds) * S.recYds +
+          n(row.recTD) * S.recTD +
+          n(row.rec) * S.rec +
+          n(row.fumbles) * S.fumbles
+        ) * 10
+      ) / 10;
 
     if (Array.isArray(data)) {
       for (const row of data) {
@@ -472,15 +501,15 @@ export async function fetchWeekStats({ leagueId, week }) {
         const id = String(idRaw);
         const row = raw || {};
         const norm = {
-          passYds:  row.passYds  ?? row.pass_yd  ?? 0,
-          passTD:   row.passTD   ?? row.pass_td  ?? 0,
-          passInt:  row.passInt  ?? row.pass_int ?? 0,
-          rushYds:  row.rushYds  ?? row.rush_yd  ?? 0,
-          rushTD:   row.rushTD   ?? row.rush_td  ?? 0,
-          recYds:   row.recYds   ?? row.rec_yd   ?? 0,
-          recTD:    row.recTD    ?? row.rec_td   ?? 0,
-          rec:      row.rec      ?? 0,
-          fumbles:  row.fumbles  ?? row.fum_lost ?? 0,
+          passYds: row.passYds ?? row.pass_yd ?? 0,
+          passTD: row.passTD ?? row.pass_td ?? 0,
+          passInt: row.passInt ?? row.pass_int ?? 0,
+          rushYds: row.rushYds ?? row.rush_yd ?? 0,
+          rushTD: row.rushTD ?? row.rush_td ?? 0,
+          recYds: row.recYds ?? row.rec_yd ?? 0,
+          recTD: row.recTD ?? row.rec_td ?? 0,
+          rec: row.rec ?? 0,
+          fumbles: row.fumbles ?? row.fum_lost ?? 0,
         };
         const pts = row.points != null ? Number(row.points) || 0 : computePoints(norm);
         out.set(id, { ...norm, points: pts });
@@ -499,8 +528,17 @@ export async function fetchWeekStats({ leagueId, week }) {
 
 function candidateIdsForStats(p) {
   const ids = [
-    p?.id, p?.sleeperId, p?.player_id, p?.externalId, p?.pid, p?.espnId, p?.yahooId, p?.gsisId,
-  ].map(asId).filter(Boolean);
+    p?.id,
+    p?.sleeperId,
+    p?.player_id,
+    p?.externalId,
+    p?.pid,
+    p?.espnId,
+    p?.yahooId,
+    p?.gsisId,
+  ]
+    .map(asId)
+    .filter(Boolean);
   const plus = new Set(ids);
   for (const k of ids) {
     const n = Number(k);
@@ -561,11 +599,15 @@ export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
 export function listenLeagueClaims(leagueId, onChange) {
   if (!leagueId) return () => {};
   const ref = collection(db, "leagues", leagueId, "claims");
-  return onSnapshot(ref, (snap) => {
-    const m = new Map();
-    snap.forEach((d) => m.set(asId(d.id), d.data()));
-    onChange(m);
-  }, (err) => console.warn("listenLeagueClaims onSnapshot error:", err));
+  return onSnapshot(
+    ref,
+    (snap) => {
+      const m = new Map();
+      snap.forEach((d) => m.set(asId(d.id), d.data()));
+      onChange(m);
+    },
+    (err) => console.warn("listenLeagueClaims onSnapshot error:", err)
+  );
 }
 
 export async function getClaimsSet(leagueId) {
@@ -575,6 +617,32 @@ export async function getClaimsSet(leagueId) {
   const s = new Set();
   snap.forEach((d) => s.add(asId(d.id)));
   return s;
+}
+
+/* =========================================================
+   TREASURY HELPERS (shared by payments & settlement)
+   ========================================================= */
+
+// payouts format:
+// treasury = {
+//   poolPi: number,       // prize pool (net of rake)
+//   rakePi: number,       // accumulated rake
+//   txs: Array< {...} >,  // entry payment log [{kind:'entry', username, amountPi, rakePi, netPi, txId, at}]
+//   payouts: { pending: Array<...>, sent: Array<...> }
+// }
+
+function normalizeTreasury(league) {
+  const t = league?.treasury || {};
+  const payouts = t?.payouts || {};
+  return {
+    poolPi: Number(t?.poolPi || 0),
+    rakePi: Number(t?.rakePi || 0),
+    txs: Array.isArray(t?.txs) ? t.txs : [],
+    payouts: {
+      pending: Array.isArray(payouts?.pending) ? payouts.pending : [],
+      sent: Array.isArray(payouts?.sent) ? payouts.sent : [],
+    },
+  };
 }
 
 /* =========================================================
@@ -610,7 +678,12 @@ export function hasPaidEntry(league, username) {
  * Mark a successful entry payment and update treasury pool/rake.
  * Call this after a confirmed Pi payment (e.g. your /payments return step or webhook).
  */
-export async function recordSuccessfulEntryPayment({ leagueId, username, amountPi, paymentId = "sandbox" }) {
+export async function recordSuccessfulEntryPayment({
+  leagueId,
+  username,
+  amountPi,
+  paymentId = "sandbox",
+}) {
   if (!leagueId || !username) throw new Error("Missing args");
 
   const ref = doc(db, "leagues", leagueId);
@@ -618,26 +691,39 @@ export async function recordSuccessfulEntryPayment({ leagueId, username, amountP
   if (!snap.exists()) throw new Error("League not found");
   const L = snap.data();
 
-  const rakeBps = Number(L?.entry?.rakeBps || 0);
+  // determine rake bps: paid leagues use league.entry.rakeBps (default 2%), free => 0
+  const isFree = !L?.entry?.enabled || Number(L?.entry?.amountPi || 0) === 0;
+  const rakeBps = isFree ? 0 : Number(L?.entry?.rakeBps ?? OWNER_RAKE_BPS) || 0;
+
   const amt = Number(amountPi || 0);
   const rakePi = Math.round((amt * rakeBps / 10000) * 10000) / 10000;
   const netPi  = Math.round((amt - rakePi) * 10000) / 10000;
 
+  // mark member as paid
   const paid = { ...(L.entry?.paid || {}) };
   paid[username] = { paidAt: serverTimestamp(), txId: paymentId };
 
-  const t = L.treasury || {};
-  const next = {
-    poolPi: Number(t.poolPi || 0) + netPi,
-    rakePi: Number(t.rakePi || 0) + rakePi,
-    txs: {
-      ...(t.txs || {}),
-      [paymentId]: { user: username, amountPi: amt, rakePi, netPi, at: serverTimestamp() },
-    },
-    payouts: t.payouts || [],
-  };
+  // update treasury
+  const T = normalizeTreasury(L);
+  const newPool = Number((T.poolPi + netPi).toFixed(4));
+  const newRake = Number((T.rakePi + rakePi).toFixed(4));
+  const txs = [...T.txs, {
+    kind: "entry",
+    username,
+    amountPi: amt,
+    rakePi,
+    netPi,
+    txId: paymentId,
+    at: serverTimestamp(),
+  }];
 
-  await updateDoc(ref, { "entry.paid": paid, treasury: next });
+  await updateDoc(ref, {
+    "entry.paid": paid,
+    "treasury.poolPi": newPool,
+    "treasury.rakePi": newRake,
+    "treasury.txs": txs,
+  });
+
   return { netPi, rakePi };
 }
 
@@ -888,7 +974,13 @@ export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   const pick = available[0];
   if (!pick) return;
 
-  await draftPick({ leagueId, username, playerId: pick.id, playerPosition: pick.position, slot: null });
+  await draftPick({
+    leagueId,
+    username,
+    playerId: pick.id,
+    playerPosition: pick.position,
+    slot: null,
+  });
 }
 
 // auto-draft on clock expiry
@@ -1078,9 +1170,13 @@ export async function writeSchedule(leagueId, schedule) {
 export function listenScheduleWeek(leagueId, week, onChange) {
   if (!leagueId || !week) return () => {};
   const ref = doc(db, "leagues", leagueId, "schedule", `week-${week}`);
-  return onSnapshot(ref, (snap) => {
-    onChange(snap.exists() ? snap.data() : { week, matchups: [] });
-  }, (err) => console.warn("listenScheduleWeek onSnapshot error:", err));
+  return onSnapshot(
+    ref,
+    (snap) => {
+      onChange(snap.exists() ? snap.data() : { week, matchups: [] });
+    },
+    (err) => console.warn("listenScheduleWeek onSnapshot error:", err)
+  );
 }
 
 export async function getScheduleWeek(leagueId, week) {
@@ -1136,11 +1232,15 @@ export async function listMatchups(leagueId, week) {
 export function listenMatchups(leagueId, week, onChange) {
   const colRef = collection(db, "leagues", leagueId, "matchups");
   const qq = Number.isFinite(week) ? query(colRef, where("week", "==", Number(week))) : colRef;
-  return onSnapshot(qq, (snap) => {
-    const arr = [];
-    snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-    onChange(arr);
-  }, (err) => console.warn("listenMatchups onSnapshot error:", err));
+  return onSnapshot(
+    qq,
+    (snap) => {
+      const arr = [];
+      snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+      onChange(arr);
+    },
+    (err) => console.warn("listenMatchups onSnapshot error:", err)
+  );
 }
 
 export async function setMatchupResult({ leagueId, week, home, away, homePts, awayPts }) {
@@ -1167,71 +1267,17 @@ export function memberCanDraft(league, username) {
   if (league?.entry?.enabled && !hasPaidEntry(league, username)) return false;
   return true;
 }
+
 /* =========================================================
    TREASURY / AUTO-SETTLEMENT / PAYOUTS QUEUE
    ========================================================= */
 
 // --- constants you can tweak ---
-const DEFAULT_RAKE_BP = 200; // 2% in basis points. free leagues ignore rake
 const MAX_WINNERS = 1;       // simple: 1st place takes all
 const MIN_PAYOUT_PI = 0.01;  // ignore dust
 
-/** Ensure treasury shape exists on a league object */
-function normalizeTreasury(league) {
-  const t = league?.treasury || {};
-  return {
-    poolPi: Number(t.poolPi || 0),
-    rakePi: Number(t.rakePi || 0),
-    payouts: t.payouts || {
-      pending: [], // [{id, leagueId, username, amountPi, createdAt}]
-      sent: [],    // [{id, leagueId, username, amountPi, txId, sentAt}]
-    },
-    txs: Array.isArray(t.txs) ? t.txs : [], // entry payment log
-  };
-}
-
-/** Record an entry payment into the treasury (2% rake by default; free leagues ignore rake) */
-export async function recordSuccessfulEntryPayment({ leagueId, username, amountPi, txId = null, rakeBp = DEFAULT_RAKE_BP }) {
-  const lref = doc(db, "leagues", leagueId);
-  const snap = await getDoc(lref);
-  if (!snap.exists()) throw new Error("League not found");
-  const L = snap.data();
-
-  // mark paid
-  const entryPaid = { ...(L?.entry?.paid || {}) };
-  entryPaid[username] = { paidAt: serverTimestamp(), txId: txId || "pi-ok" };
-
-  // free league => 0 rake
-  const isFree = !L?.entry?.enabled || Number(L?.entry?.amountPi || 0) === 0;
-  const useRakeBp = isFree ? 0 : (Number(L?.entry?.rakeBp ?? rakeBp) || 0);
-
-  const rake = Math.round(Number(amountPi || 0) * useRakeBp) / 10000; // bp to fraction
-  const toPool = Math.max(0, Number(amountPi || 0) - rake);
-
-  const T = normalizeTreasury(L);
-  T.poolPi = Math.round((T.poolPi + toPool) * 100) / 100;
-  T.rakePi = Math.round((T.rakePi + rake) * 100) / 100;
-  T.txs.push({
-    kind: "entry",
-    username,
-    amountPi: Number(amountPi || 0),
-    rakePi: rake,
-    netPi: toPool,
-    txId: txId || "pi-ok",
-    at: serverTimestamp(),
-  });
-
-  await updateDoc(lref, {
-    "entry.paid": entryPaid,
-    "treasury.poolPi": T.poolPi,
-    "treasury.rakePi": T.rakePi,
-    "treasury.txs": T.txs
-  });
-}
-
 /** Find leagues that should be settled.
- *  Simple rule: draft done AND seasonEnd flag true (or currentWeek>18).
- *  Adjust to your season logic as you like. */
+ *  Simple rule: draft done AND seasonEnd flag true (or currentWeek>=18). */
 export async function listLeaguesNeedingSettlement() {
   const leaguesCol = collection(db, "leagues");
   const snap = await getDocs(leaguesCol);
@@ -1247,12 +1293,12 @@ export async function listLeaguesNeedingSettlement() {
 
 /** Compute winners + shares (very simple: 1st place takes all) */
 export async function computeSeasonWinners(league) {
-  // naive: pick highest pointsFor in standings
+  // naive: pick highest wins then pointsFor in standings
   const st = league?.standings || {};
   const entries = Object.entries(st).map(([u, row]) => ({
     username: u,
     pointsFor: Number(row?.pointsFor || 0),
-    wins: Number(row?.wins || 0)
+    wins: Number(row?.wins || 0),
   }));
   if (entries.length === 0) return [];
 
@@ -1268,7 +1314,7 @@ export async function computeSeasonWinners(league) {
   return [{ username: winner, sharePi: pot }]; // winner-take-all
 }
 
-/** Move pot → payouts.pending; zero the pool. Idempotent safe-ish. */
+/** Move pot → payouts.pending; zero the pool. Idempotent-ish. */
 export async function enqueueLeaguePayouts({ leagueId, winners }) {
   const lref = doc(db, "leagues", leagueId);
   const snap = await getDoc(lref);
@@ -1279,15 +1325,14 @@ export async function enqueueLeaguePayouts({ leagueId, winners }) {
   const total = Number(T.poolPi || 0);
   if (total < MIN_PAYOUT_PI) return { totalEnqueued: 0 };
 
-  // avoid duplicate enqueues: if there are already pending or sent entries for this league and season end, skip
-  const alreadyPending = (T.payouts.pending || []).some(p => p.amountPi && p.username);
+  // avoid duplicate enqueues: if there are already pending entries, skip
+  const alreadyPending = (T.payouts.pending || []).some((p) => p.amountPi && p.username);
   if (alreadyPending) return { totalEnqueued: 0 };
 
   const now = Date.now();
   const pending = [...(T.payouts.pending || [])];
 
-  let enq = 0;
-  for (const w of winners) {
+  for (const w of winners.slice(0, MAX_WINNERS)) {
     const amt = Number(w.sharePi || 0);
     if (amt < MIN_PAYOUT_PI) continue;
     pending.push({
@@ -1296,14 +1341,13 @@ export async function enqueueLeaguePayouts({ leagueId, winners }) {
       username: w.username,
       amountPi: Math.round(amt * 100) / 100,
       createdAt: serverTimestamp(),
-      status: "pending"
+      status: "pending",
     });
-    enq += amt;
   }
 
   await updateDoc(lref, {
     "treasury.payouts.pending": pending,
-    "treasury.poolPi": 0 // move all out of the pool; it now sits in the pending queue
+    "treasury.poolPi": 0, // move all out of the pool; it now sits in the pending queue
   });
 
   return { totalEnqueued: pending.length };
@@ -1318,7 +1362,7 @@ async function sendPiServerSide({ toUsername, amountPi }) {
   return { ok: true, txId: `sim-${Date.now()}` };
 }
 
-/** Try to send all pending payouts (best-effort; safe to call daily) */
+/** Try to send all pending payouts (best-effort; safe to call daily/cron) */
 export async function trySendPendingPayouts() {
   const leaguesCol = collection(db, "leagues");
   const snap = await getDocs(leaguesCol);
@@ -1341,7 +1385,7 @@ export async function trySendPendingPayouts() {
           ...p,
           txId: res.txId || "tx-ok",
           sentAt: serverTimestamp(),
-          status: "sent"
+          status: "sent",
         });
         sentCount += 1;
       } else {
@@ -1352,7 +1396,7 @@ export async function trySendPendingPayouts() {
 
     await updateDoc(doc(db, "leagues", L.id), {
       "treasury.payouts.pending": newPending,
-      "treasury.payouts.sent": sent
+      "treasury.payouts.sent": sent,
     });
   }
 
