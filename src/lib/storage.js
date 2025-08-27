@@ -195,7 +195,6 @@ export async function createLeague({ name, owner, order }) {
     standings: {
       [owner]: { wins: 0, losses: 0, ties: 0, pointsFor: 0, pointsAgainst: 0 },
     },
-    entry: { enabled: false, amountPi: 0, paid: {} },
   });
 
   await setDoc(doc(db, "leagues", ref.id, "members", owner), {
@@ -407,36 +406,6 @@ export async function setPlayerName({ leagueId, id, name }) {
    PROJECTED & ACTUAL POINTS
    ========================================================= */
 
-/** Half-PPR default scoring; extend as needed. */
-export function scoreLine(stat = {}, pos = "FLEX") {
-  const passYds = Number(stat.passYds || 0);
-  const passTD  = Number(stat.passTD  || 0);
-  const passInt = Number(stat.passInt || 0);
-  const rushYds = Number(stat.rushYds || 0);
-  const rushTD  = Number(stat.rushTD  || 0);
-  const recYds  = Number(stat.recYds  || 0);
-  const recTD   = Number(stat.recTD   || 0);
-  const rec     = Number(stat.rec     || 0);
-  const fum     = Number(stat.fumbles || 0);
-
-  let pts = 0;
-  pts += passYds / 25;
-  pts += passTD * 4;
-  pts += rushYds / 10;
-  pts += rushTD * 6;
-  pts += recYds / 10;
-  pts += recTD * 6;
-  pts += rec * 0.5;   // half-PPR
-  pts += passInt * -2;
-  pts += fum * -2;
-
-  if (pos === "K" || pos === "DEF") {
-    // If you bring in those stats, score here.
-    // For now, 0 so they don't break totals.
-  }
-  return Math.round(pts * 10) / 10;
-}
-
 export function projForWeek(p, week) {
   const w = String(week);
   if (p?.projections && p.projections[w] != null) return Number(p.projections[w]) || 0;
@@ -460,46 +429,96 @@ export function opponentForWeek(p, week) {
   return "";
 }
 
-/**
- * Fetch weekly raw stats from your /api/stats/week endpoint and return:
- *   Map<playerId, { points, ...raw }>
- */
+/** Stats API (robust to multiple shapes) -> Map */
 export async function fetchWeekStats({ leagueId, week }) {
   try {
-    const url = `/api/stats/week?week=${encodeURIComponent(week)}${leagueId ? `&league=${encodeURIComponent(leagueId)}` : ""}`;
-    const res = await fetch(url);
+    const res = await fetch(`/api/stats/week?week=${encodeURIComponent(week)}${leagueId ? `&league=${encodeURIComponent(leagueId)}` : ""}`);
     if (!res.ok) return new Map();
+
     const data = await res.json();
-    // data is expected to be: { ok, week, season, stats: { [playerId]: {...raw} } }
-    const map = new Map();
-    const stats = data?.stats || {};
-    for (const [pid, raw] of Object.entries(stats)) {
-      // We don't know position here; let the consumer add if they want.
-      const points = scoreLine(raw);
-      map.set(asId(pid), { ...raw, points });
+    const out = new Map();
+
+    // PPR scoring
+    const S = { passYds: 0.04, passTD: 4, passInt: -2, rushYds: 0.1, rushTD: 6, recYds: 0.1, recTD: 6, rec: 1, fumbles: -2 };
+    const n = (v) => (v == null ? 0 : Number(v) || 0);
+    const computePoints = (row) =>
+      Math.round((
+        n(row.passYds) * S.passYds +
+        n(row.passTD)  * S.passTD  +
+        n(row.passInt) * S.passInt +
+        n(row.rushYds) * S.rushYds +
+        n(row.rushTD)  * S.rushTD  +
+        n(row.recYds)  * S.recYds  +
+        n(row.recTD)   * S.recTD   +
+        n(row.rec)     * S.rec     +
+        n(row.fumbles) * S.fumbles
+      ) * 10) / 10;
+
+    if (Array.isArray(data)) {
+      for (const row of data) {
+        const id = row?.id != null ? String(row.id) : null;
+        if (!id) continue;
+        const pts = row.points != null ? Number(row.points) || 0 : computePoints(row);
+        out.set(id, { ...row, points: pts });
+      }
+      return out;
     }
-    return map;
+
+    if (data && data.stats && typeof data.stats === "object") {
+      for (const [idRaw, raw] of Object.entries(data.stats)) {
+        const id = String(idRaw);
+        const row = raw || {};
+        const norm = {
+          passYds:  row.passYds  ?? row.pass_yd  ?? 0,
+          passTD:   row.passTD   ?? row.pass_td  ?? 0,
+          passInt:  row.passInt  ?? row.pass_int ?? 0,
+          rushYds:  row.rushYds  ?? row.rush_yd  ?? 0,
+          rushTD:   row.rushTD   ?? row.rush_td  ?? 0,
+          recYds:   row.recYds   ?? row.rec_yd   ?? 0,
+          recTD:    row.recTD    ?? row.rec_td   ?? 0,
+          rec:      row.rec      ?? 0,
+          fumbles:  row.fumbles  ?? row.fum_lost ?? 0,
+        };
+        const pts = row.points != null ? Number(row.points) || 0 : computePoints(norm);
+        out.set(id, { ...norm, points: pts });
+      }
+      return out;
+    }
+
+    return new Map();
   } catch (e) {
     console.warn("fetchWeekStats failed:", e);
     return new Map();
   }
 }
 
-export function actualPointsForPlayer(p, week, statsMap) {
-  const id = asId(p?.id);
-  if (!id || !statsMap?.get) return 0;
-  const row = statsMap.get(id);
-  if (!row) return 0;
-  if (row.points != null) return Number(row.points) || 0;
+/* ---- Loose id matching for actual points ---- */
+
+function candidateIdsForStats(p) {
+  const ids = [
+    p?.id, p?.sleeperId, p?.player_id, p?.externalId, p?.pid, p?.espnId, p?.yahooId, p?.gsisId,
+  ].map(asId).filter(Boolean);
+  const plus = new Set(ids);
+  for (const k of ids) {
+    const n = Number(k);
+    if (Number.isFinite(n)) plus.add(String(n));
+  }
+  return Array.from(plus);
+}
+
+export function actualPointsForPlayerLoose(p, statsMap) {
+  if (!p || !statsMap?.get) return 0;
+  const canonical = asId(p.id);
+  const ids = [canonical, ...candidateIdsForStats(p).filter((x) => x !== canonical)];
+  for (const k of ids) {
+    if (!k) continue;
+    const row = statsMap.get(k);
+    if (row && row.points != null) return Number(row.points) || 0;
+  }
   return 0;
 }
 
-export function pointsForPlayer(p, week, statsMap = null) {
-  const actual = statsMap ? actualPointsForPlayer(p, week, statsMap) : 0;
-  const proj = projForWeek(p, week);
-  return actual || proj || 0;
-}
-
+/** Sum up team points using actual when present else projection */
 export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
   const lines = [];
   let total = 0;
@@ -507,19 +526,11 @@ export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
     const pidRaw = roster?.[slot] || null;
     const pid = asId(pidRaw);
     const p = pid ? playersMap.get(pid) : null;
-    let points = 0;
-    if (statsMap && p) {
-      const row = statsMap.get(pid);
-      if (row) {
-        // Recompute with position-aware scoring (if you tweak K/DEF later)
-        points = scoreLine(row, (p.position || "FLEX").toUpperCase());
-      }
-    }
-    if (!points && p) {
-      points = projForWeek(p, week);
-    }
+    const actual = p ? actualPointsForPlayerLoose(p, statsMap) : 0;
+    const projected = p ? projForWeek(p, week) : 0;
+    const points = actual || projected || 0;
     total += Number(points || 0);
-    lines.push({ slot, playerId: pid, player: p, points });
+    lines.push({ slot, playerId: pid, player: p, actual, projected, points });
   });
   return { lines, total: Math.round(total * 10) / 10 };
 }
@@ -548,7 +559,7 @@ export async function getClaimsSet(leagueId) {
 }
 
 /* =========================================================
-   ENTRY / PAYMENTS
+   ENTRY / PAYMENTS (flag only + helper)
    ========================================================= */
 
 export async function setEntrySettings({ leagueId, enabled, amountPi }) {
@@ -570,21 +581,6 @@ export function hasPaidEntry(league, username) {
   return !!(league?.entry?.paid && league.entry.paid[username]);
 }
 
-export function leagueIsFree(league) {
-  return !(league?.entry?.enabled) || Number(league?.entry?.amountPi || 0) === 0;
-}
-
-/** Simple helper to build a payments URL you can route to in the app */
-export function paymentCheckoutUrl({ leagueId, username }) {
-  // Customize to your actual payments page if different
-  const params = new URLSearchParams({ leagueId, username });
-  return `/payments?${params.toString()}`;
-}
-
-/**
- * Mark as paid server-side (used by your payment provider webhook).
- * For manual testing you can call it directly, but in prod keep it webhook-only.
- */
 export async function payEntry({ leagueId, username, txId = null }) {
   if (!leagueId || !username) throw new Error("Missing leagueId/username");
   const ref = doc(db, "leagues", leagueId);
@@ -606,6 +602,11 @@ export async function allMembersPaidOrFree(leagueId) {
   const members = await listMemberUsernames(leagueId);
   const paid = league.entry?.paid || {};
   return members.every((u) => !!paid[u]);
+}
+
+/** Link target for your payment page/flow (Pi) */
+export function paymentCheckoutUrl({ leagueId, username }) {
+  return `/payments?league=${encodeURIComponent(leagueId)}&user=${encodeURIComponent(username)}`;
 }
 
 /* =========================================================
@@ -1097,6 +1098,9 @@ export async function setMatchupResult({ leagueId, week, home, away, homePts, aw
 export function teamRecordLine(league, username) {
   const st = league?.standings?.[username] || { wins: 0, losses: 0, ties: 0 };
   return `${st.wins || 0}-${st.losses || 0}${st.ties ? `-${st.ties}` : ""}`;
+}
+export function leagueIsFree(league) {
+  return !(league?.entry?.enabled) || Number(league?.entry?.amountPi || 0) === 0;
 }
 export function memberCanDraft(league, username) {
   if (league?.entry?.enabled && !hasPaidEntry(league, username)) return false;
