@@ -517,12 +517,7 @@ export function actualPointsForPlayerLoose(p, statsMap) {
   }
   return 0;
 }
-// --- shim so older components that import `pointsForPlayer` keep working ---
-export function pointsForPlayer(p, week, statsMap = null) {
-  const actual = statsMap ? actualPointsForPlayer(p, week, statsMap) : 0;
-  const proj = projForWeek(p, week);
-  return actual || proj || 0;
-}
+
 // ---------- scoring helpers ----------
 export function actualPointsForPlayer(p, week, statsMap) {
   const id = asId(p?.id);
