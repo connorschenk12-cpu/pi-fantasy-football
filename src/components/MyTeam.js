@@ -35,6 +35,14 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
 
+  {/* Prize pool / rake info */}
+{!leagueIsFree(league) && (
+  <div style={{margin:"8px 0", color:"#555"}}>
+    Current prize pool: <b>{Number(league?.treasury?.poolPi || 0).toFixed(2)} Pi</b>
+    {" "}· Rake: <b>{((Number(league?.entry?.rakeBps || 0))/100).toFixed(2)}%</b>
+  </div>
+)}
+
   // subscribe league + my team
   useEffect(() => {
     if (!leagueId) return;
