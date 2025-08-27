@@ -502,7 +502,51 @@ export async function bulkSetHeadshots({ leagueId = null, mapping = {} }) {
 /* =========================================================
    PROJECTED & ACTUAL POINTS
    ========================================================= */
+/* =========================================================
+   PROJECTED & ACTUAL POINTS
+   ========================================================= */
 
+function nameTeamKey(p) {
+  const name = (p.name || p.displayName || "").toUpperCase().trim();
+  const team = (p.team || p.nflTeam || p.proTeam || "").toUpperCase().trim();
+  return name && team ? `${name}|${team}` : null;
+}
+
+// ---- Loose id matching for actual points ----
+function candidateIdsForStats(p) {
+  const ids = [
+    p?.id,
+    p?.sleeperId,
+    p?.player_id,
+    p?.externalId,
+    p?.pid,
+    p?.espnId,   // <- keep ESPN id in the mix
+    p?.yahooId,
+    p?.gsisId,
+  ]
+    .map(asId)
+    .filter(Boolean);
+  const plus = new Set(ids);
+  for (const k of ids) {
+    const n = Number(k);
+    if (Number.isFinite(n)) plus.add(String(n));
+  }
+  // NEW: also try "NAME|TEAM"
+  const nt = nameTeamKey(p);
+  if (nt) plus.add(nt);
+  return Array.from(plus);
+}
+
+export function actualPointsForPlayerLoose(p, statsMap) {
+  if (!p || !statsMap?.get) return 0;
+  const canonical = asId(p.id);
+  const ids = [canonical, ...candidateIdsForStats(p).filter((x) => x && x !== canonical)];
+  for (const k of ids) {
+    const row = statsMap.get ? statsMap.get(k) : statsMap[k];
+    if (row && row.points != null) return Number(row.points) || 0;
+  }
+  return 0;
+}
 export function projForWeek(p, week) {
   const w = String(week);
   if (p?.projections && p.projections[w] != null) return Number(p.projections[w]) || 0;
