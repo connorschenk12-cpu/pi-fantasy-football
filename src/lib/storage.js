@@ -418,6 +418,32 @@ export async function setPlayerName({ leagueId, id, name }) {
   await updateDoc(ref, { name, updatedAt: serverTimestamp() });
 }
 
+// --- ESPN mapping helpers ---
+export async function setPlayerEspnId({ leagueId = null, id, espnId }) {
+  if (!id) throw new Error("setPlayerEspnId: missing player id");
+  const pid = asId(id);
+  const ref = leagueId
+    ? doc(db, "leagues", leagueId, "players", pid)
+    : doc(db, "players", pid);
+  await updateDoc(ref, { espnId: String(espnId), updatedAt: serverTimestamp() });
+}
+
+/** Bulk update: mapping is { "<playerId>": <espnId>, ... } */
+export async function bulkSetEspnIds({ leagueId = null, mapping = {} }) {
+  const batch = writeBatch(db);
+  let count = 0;
+  Object.entries(mapping).forEach(([pidRaw, eid]) => {
+    const pid = asId(pidRaw);
+    if (!pid || eid == null || eid === "") return;
+    const ref = leagueId
+      ? doc(db, "leagues", leagueId, "players", pid)
+      : doc(db, "players", pid);
+    batch.set(ref, { espnId: String(eid), updatedAt: serverTimestamp() }, { merge: true });
+    count++;
+  });
+  if (count) await batch.commit();
+  return { updated: count };
+}
 /* =========================================================
    PROJECTED & ACTUAL POINTS
    ========================================================= */
