@@ -185,3 +185,35 @@ th[data-label="Player"],
 .row .cell-player, .row .col-player {
   flex: 2 1 260px; /* give player column more flex space */
 }
+/* ---------- Wide player-name column ---------- */
+/* Use .wide-names on any table where the first column is the player name */
+.table.wide-names th:first-child,
+.table.wide-names td:first-child{
+  min-width: 220px;          /* tweak as you like: 200–280 is common */
+  width: 1%;                 /* let other columns flex but keep min-width */
+  white-space: nowrap;       /* keep names on one line */
+}
+
+/* If your name column is NOT the first one, add className="col-player" to that <th>/<td> */
+.table .col-player{
+  min-width: 220px;
+  white-space: nowrap;
+}
+
+/* If you render headshot + name inside a cell, this helps spacing */
+.player-cell{
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.2;
+}
+
+/* Optional: slightly smaller font inside player cell to fit better on mobile */
+@media (max-width: 560px){
+  .table.wide-names th:first-child,
+  .table.wide-names td:first-child,
+  .table .col-player{
+    min-width: 180px;
+    font-size: 0.95em;
+  }
+}
