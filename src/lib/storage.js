@@ -264,10 +264,12 @@ export function playerDisplay(p) {
 
 /** GLOBAL-ONLY: return players from the root "players" collection and de-dupe */
 export async function listPlayers() {
+  // Load all from GLOBAL collection only
   const raw = [];
   const gSnap = await getDocs(collection(db, "players"));
-  gSnap.forEach((d) => raw.push({ id: d.id, ...d.data() }));
+  gSnap.forEach((d) => raw.push({ id: d.id, __leagueScoped: false, ...d.data() }));
 
+  // Normalize shapes
   const normalized = raw.map((p) => {
     const id = asId(p.id);
     const position = (p.position || p.pos || "").toString().toUpperCase() || null;
@@ -299,19 +301,52 @@ export async function listPlayers() {
     return { ...p, id, name, position, team, espnId, photo };
   });
 
-  const byId = new Map();
-  for (const p of normalized) {
-    if (!p.id) continue;
-    if (!byId.has(p.id)) byId.set(p.id, p);
+  // --- Stronger de-dupe (espnId > name|team|pos) ---
+  function identityFor(p) {
+    const eid = p.espnId ?? p.espn_id ?? null;
+    if (eid) return `espn:${String(eid)}`;
+    const k = `${(p.name || "").toLowerCase()}|${(p.team || "").toLowerCase()}|${(p.position || "").toLowerCase()}`;
+    return `ntp:${k}`;
   }
 
-  const byKey = new Map();
-  for (const p of byId.values()) {
-    const key = `${(p.name || "").toLowerCase()}|${(p.team || "").toLowerCase()}|${(p.position || "").toLowerCase()}`;
-    if (!byKey.has(key)) byKey.set(key, p);
+  // interpret updatedAt across shapes
+  function ts(p) {
+    const raw = p.updatedAt;
+    if (!raw) return 0;
+    try {
+      if (raw.toDate) return raw.toDate().getTime();      // Firestore Timestamp (client)
+      if (raw.seconds) return Number(raw.seconds) * 1000; // Firestore Timestamp (admin)
+      if (raw instanceof Date) return raw.getTime();      // Date
+      return Number(raw) || 0;                            // ms
+    } catch (_) {
+      return 0;
+    }
   }
 
-  return Array.from(byKey.values());
+  // prefer fresher updatedAt; if tie, prefer GLOBAL (here always global)
+  function better(a, b) {
+    const ta = ts(a);
+    const tb = ts(b);
+    if (ta !== tb) return ta > tb ? a : b;
+    const aIsGlobal = !a.__leagueScoped;
+    const bIsGlobal = !b.__leagueScoped;
+    if (aIsGlobal !== bIsGlobal) return aIsGlobal ? a : b;
+    return a;
+  }
+
+  // Mark scope before dedupe (global-only -> false)
+  const enriched = normalized.map((p) => ({ ...p, __leagueScoped: !!p.__leagueScoped }));
+
+  // Build identity map
+  const byIdent = new Map();
+  for (const p of enriched) {
+    const idKey = identityFor(p);
+    const cur = byIdent.get(idKey);
+    if (!cur) byIdent.set(idKey, p);
+    else byIdent.set(idKey, better(cur, p));
+  }
+
+  return Array.from(byIdent.values()).map(({ __leagueScoped, ...rest }) => rest);
 }
 
 /** Build keys that might reference this player (cross-provider ids) */
@@ -378,6 +413,7 @@ export async function seedPlayersToGlobal(players = []) {
         team: raw.team || raw.nflTeam || raw.proTeam || null,
         projections: raw.projections || null,
         matchups: raw.matchups || null,
+        // preserve espnId/photo if provided
         espnId:
           raw.espnId ??
           raw.espn_id ??
