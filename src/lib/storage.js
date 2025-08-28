@@ -397,7 +397,7 @@ export async function getPlayerById({ id }) {
   return null;
 }
 
-/* ---------- projection + matchup merge helpers ---------- */
+/* ---------- projection + matchup merge + identity helpers ---------- */
 const isNum = (v) => typeof v === "number" && Number.isFinite(v);
 const toNum = (v) => (v == null || v === "" ? null : Number(v));
 const gt0 = (v) => isNum(v) && v > 0;
@@ -421,7 +421,7 @@ function mergeProjections(existing = {}, incoming = {}) {
   for (const k of keys) {
     const va = a[k];
     const vb = b[k];
-    // prefer incoming if it's a positive number; else keep existing if defined
+    // prefer incoming if it's a positive number; else keep existing if defined; else keep incoming if numeric (incl 0)
     out[k] = gt0(vb) ? vb : (va != null ? va : (isNum(vb) ? vb : 0));
   }
   return out;
@@ -432,11 +432,7 @@ function normalizeMatchups(obj) {
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
     if (v && typeof v === "object") {
-      out[String(k)] = {
-        opp: v.opp ?? v.opponent ?? v.vs ?? v.against ?? "",
-        // retain any extra fields we might get
-        ...v,
-      };
+      out[String(k)] = { opp: v.opp ?? v.opponent ?? v.vs ?? v.against ?? "", ...v };
     }
   }
   return out;
@@ -450,79 +446,123 @@ function mergeMatchups(existing = {}, incoming = {}) {
   for (const k of keys) {
     const ea = a[k] || {};
     const eb = b[k] || {};
-    // prefer incoming if it has an opponent label
     out[k] = eb.opp ? { ...ea, ...eb } : { ...ea };
   }
   return out;
 }
 
-/** Seed/merge into GLOBAL players (preserves good projections & matchups) */
+function identityForWrite(p) {
+  const espnId =
+    p.espnId ?? p.espn_id ?? (p.espn && (p.espn.playerId || p.espn.id)) ?? null;
+  if (espnId) return `espn:${String(espnId)}`;
+  const name = (p.name || p.displayName || "").toLowerCase().trim();
+  const team = (p.team || p.nflTeam || p.proTeam || "").toLowerCase().trim();
+  const pos  = (p.position || p.pos || "").toString().toLowerCase().trim();
+  return `ntp:${name}|${team}|${pos}`;
+}
+
+function safeSlug(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
+/** Seed/merge into GLOBAL players (dedupe + batch rotation + projection/matchup merge) */
 export async function seedPlayersToGlobal(players = []) {
   if (!Array.isArray(players) || players.length === 0) return { written: 0 };
 
-  // We read each existing doc to safely merge projections/matchups
+  // Build an identity index of existing docs so we UPDATE instead of duplicating.
+  const existingSnap = await getDocs(collection(db, "players"));
+  const existingById = new Map();  // id -> data
+  const idByIdentity = new Map();  // identity -> id
+  existingSnap.forEach((d) => {
+    const row = { id: d.id, ...d.data() };
+    existingById.set(d.id, row);
+    idByIdentity.set(identityForWrite(row), d.id);
+  });
+
+  // Batch rotation helpers
+  const CHUNK = 400;
+  let batch = writeBatch(db);
+  let ops = 0;
+  const commitRotate = async () => {
+    if (ops > 0) {
+      await batch.commit();
+      batch = writeBatch(db);
+      ops = 0;
+    }
+  };
+
   let written = 0;
-  const batch = writeBatch(db);
-  const commits = [];
 
   for (const raw of players) {
-    const id = asId(raw.id);
-    if (!id) continue;
-
-    const ref = doc(db, "players", id);
-    const snap = await getDoc(ref);
-    const prev = snap.exists() ? snap.data() : {};
-
-    const nextProjections = mergeProjections(prev.projections, raw.projections);
-    const nextMatchups = mergeMatchups(prev.matchups, raw.matchups);
-
+    // Normalize incoming minimal fields
     const espnId =
       raw.espnId ??
       raw.espn_id ??
       (raw.espn && (raw.espn.playerId || raw.espn.id)) ??
-      prev.espnId ??
       null;
 
-    const photo =
-      raw.photo ||
-      raw.photoUrl ||
-      raw.headshot ||
-      raw.image ||
-      prev.photo ||
-      null;
+    const position = (raw.position || raw.pos || "").toString().toUpperCase() || null;
+    const team     = raw.team || raw.nflTeam || raw.proTeam || null;
+    const name     = playerDisplay(raw);
+    const photo    = raw.photo || raw.photoUrl || raw.headshot || raw.image || null;
+
+    const identity = identityForWrite({ ...raw, name, team, position, espnId });
+
+    // Pick target doc id: existing by identity if present; else deterministic new id
+    let docId = idByIdentity.get(identity);
+    if (!docId) {
+      docId = espnId
+        ? `espn-${String(espnId)}`
+        : `p-${safeSlug(name)}-${safeSlug(team || "fa")}-${safeSlug(position || "")}`;
+    }
+
+    const prev = existingById.get(docId) || {};
+    const nextProjections = mergeProjections(prev.projections, raw.projections);
+    const nextMatchups    = mergeMatchups(prev.matchups, raw.matchups);
 
     batch.set(
-      ref,
+      doc(db, "players", docId),
       {
-        id,
-        name: playerDisplay({ ...prev, ...raw }),
-        position: (raw.position || raw.pos || prev.position || "").toString().toUpperCase() || null,
-        team: raw.team || raw.nflTeam || raw.proTeam || prev.team || null,
+        id: docId,
+        name,
+        position,
+        team,
         projections: nextProjections,
         matchups: nextMatchups,
-        espnId,
-        photo,
+        espnId: espnId ?? prev.espnId ?? null,
+        photo: photo || prev.photo || null,
         updatedAt: serverTimestamp(),
       },
       { merge: true }
     );
 
+    // Keep in-memory indexes consistent so duplicates within this run also collapse
+    const merged = {
+      ...prev,
+      id: docId,
+      name,
+      position,
+      team,
+      projections: nextProjections,
+      matchups: nextMatchups,
+      espnId: espnId ?? prev.espnId ?? null,
+      photo: photo || prev.photo || null,
+    };
+    existingById.set(docId, merged);
+    idByIdentity.set(identity, docId);
+
+    ops += 1;
     written += 1;
-
-    // Commit in chunks to avoid huge batches
-    if (written % 400 === 0) {
-      commits.push(batch.commit());
-    }
+    if (ops >= CHUNK) await commitRotate();
   }
 
-  if (written % 400 !== 0) {
-    commits.push(batch.commit());
-  }
-  await Promise.all(commits);
-
+  await commitRotate();
   return { written };
 }
-
 /* =========================================================
    PROJECTED & ACTUAL POINTS
    ========================================================= */
