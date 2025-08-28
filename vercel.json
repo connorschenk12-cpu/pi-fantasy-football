@@ -2,5 +2,7 @@
   "crons": [
     { "path": "/api/cron/settle-season", "schedule": "0 3 * * *" },
     { "path": "/api/cron/backfill-headshots", "schedule": "0 7 * * *" }
+     {"path": "/api/cron/refresh-players-espn",
+      "schedule": "0 10 * * *"}
   ]
 }
