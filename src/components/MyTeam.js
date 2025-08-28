@@ -239,12 +239,11 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
       <div className="card mb12">
         <div className="card-title">Starters</div>
         <div className="table-wrap">
-          {/* wide-names makes first column roomy; we narrow Slot explicitly */}
-          <table className="table table-sm wide-names">
+          <table className="table lineup">
             <thead>
               <tr>
-                <th style={{ width: 72, minWidth: 64, whiteSpace: "nowrap" }}>Slot</th>
-                <th className="col-player">Player</th>
+                <th className="slot">Slot</th>
+                <th className="player">Player</th>
                 <th>Opp</th>
                 <th style={{ textAlign: "right" }}>Proj</th>
                 <th style={{ textAlign: "right" }}>Actual</th>
@@ -263,16 +262,15 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
 
                 return (
                   <tr key={slot}>
-                    <td><b>{slot}</b></td>
-                    <td className="col-player">
+                    <td className="slot"><b>{slot}</b></td>
+                    <td className="player">
                       {p ? (
-                        <div>
-                          <PlayerBadge player={p} />
-                          {/* subtitle under the name to avoid extra columns crowding */}
-                          <div className="dim" style={{ fontSize: "0.92em", marginTop: 2 }}>
-                            {p.team || "—"} · {p.position || "—"}
-                          </div>
-                        </div>
+                        <>
+                          <PlayerBadge player={p} right={opp ? `vs ${opp}` : ""} />
+                          <span className="player-sub">
+                            {(p.team || "-")}{p.position ? ` • ${p.position}` : ""}
+                          </span>
+                        </>
                       ) : (
                         <span className="muted">(empty)</span>
                       )}
@@ -304,10 +302,10 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
           <div className="muted">No one on the bench.</div>
         ) : (
           <div className="table-wrap">
-            <table className="table table-sm wide-names">
+            <table className="table lineup">
               <thead>
                 <tr>
-                  <th className="col-player">Player</th>
+                  <th className="player">Player</th>
                   <th>Allowed Slots</th>
                   <th>Actions</th>
                 </tr>
@@ -327,23 +325,32 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                   const allowed = allowedSlotsForPlayer(p);
                   return (
                     <tr key={pid}>
-                      <td className="col-player">
-                        <div>
-                          <PlayerBadge player={p} />
-                          <div className="dim" style={{ fontSize: "0.92em", marginTop: 2 }}>
-                            {p.team || "—"} · {p.position || "—"}
-                          </div>
-                        </div>
+                      <td className="player">
+                        <PlayerBadge player={p} />
+                        <span className="player-sub">
+                          {(p.team || "-")}{p.position ? ` • ${p.position}` : ""}
+                        </span>
                       </td>
                       <td>{allowed.length ? allowed.join(", ") : "—"}</td>
                       <td>
                         <div className="btnbar">
                           {allowed.map((slot) => (
-                            <button key={slot} className="btn btn-primary" disabled={acting} onClick={() => handleMoveToStarter(pid, slot)}>
+                            <button
+                              key={slot}
+                              className="btn btn-primary"
+                              disabled={acting}
+                              onClick={() => handleMoveToStarter(pid, slot)}
+                            >
                               Start at {slot}
                             </button>
                           ))}
-                          <button className="btn btn-danger" disabled={acting} onClick={() => handleRelease(pid)}>Release</button>
+                          <button
+                            className="btn btn-danger"
+                            disabled={acting}
+                            onClick={() => handleRelease(pid)}
+                          >
+                            Release
+                          </button>
                         </div>
                       </td>
                     </tr>
