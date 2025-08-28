@@ -120,10 +120,10 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
         </select>
       </div>
 
-      <table width="100%" cellPadding="6" style={{ borderCollapse: "collapse" }}>
+      <table className="table table-sm wide-names">
         <thead>
-          <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
-            <th>Name</th>
+          <tr>
+            <th className="col-player">Name</th>
             <th>Pos</th>
             <th>Team</th>
             <th>Opp</th>
@@ -135,8 +135,8 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
           {filtered.map((p) => {
             const claimedBy = claims.get(p.id)?.claimedBy || null;
             return (
-              <tr key={p.id} style={{ borderBottom: "1px solid #f1f1f1" }}>
-                <td>
+              <tr key={p.id}>
+                <td className="col-player">
                   <PlayerBadge
                     player={p}
                     right={p.team ? `· ${p.team} ${p.position || ""}` : p.position || ""}
