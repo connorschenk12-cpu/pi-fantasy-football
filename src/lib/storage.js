@@ -397,36 +397,129 @@ export async function getPlayerById({ id }) {
   return null;
 }
 
+/* ---------- projection + matchup merge helpers ---------- */
+const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+const toNum = (v) => (v == null || v === "" ? null : Number(v));
+const gt0 = (v) => isNum(v) && v > 0;
+
+function normalizeProj(obj) {
+  if (!obj || typeof obj !== "object") return {};
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const num = toNum(v);
+    if (num == null || Number.isNaN(num)) continue;
+    out[String(k)] = num;
+  }
+  return out;
+}
+
+function mergeProjections(existing = {}, incoming = {}) {
+  const a = normalizeProj(existing);
+  const b = normalizeProj(incoming);
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  const out = {};
+  for (const k of keys) {
+    const va = a[k];
+    const vb = b[k];
+    // prefer incoming if it's a positive number; else keep existing if defined
+    out[k] = gt0(vb) ? vb : (va != null ? va : (isNum(vb) ? vb : 0));
+  }
+  return out;
+}
+
+function normalizeMatchups(obj) {
+  if (!obj || typeof obj !== "object") return {};
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v && typeof v === "object") {
+      out[String(k)] = {
+        opp: v.opp ?? v.opponent ?? v.vs ?? v.against ?? "",
+        // retain any extra fields we might get
+        ...v,
+      };
+    }
+  }
+  return out;
+}
+
+function mergeMatchups(existing = {}, incoming = {}) {
+  const a = normalizeMatchups(existing);
+  const b = normalizeMatchups(incoming);
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  const out = {};
+  for (const k of keys) {
+    const ea = a[k] || {};
+    const eb = b[k] || {};
+    // prefer incoming if it has an opponent label
+    out[k] = eb.opp ? { ...ea, ...eb } : { ...ea };
+  }
+  return out;
+}
+
+/** Seed/merge into GLOBAL players (preserves good projections & matchups) */
 export async function seedPlayersToGlobal(players = []) {
   if (!Array.isArray(players) || players.length === 0) return { written: 0 };
-  const batch = writeBatch(db);
+
+  // We read each existing doc to safely merge projections/matchups
   let written = 0;
-  players.forEach((raw) => {
+  const batch = writeBatch(db);
+  const commits = [];
+
+  for (const raw of players) {
     const id = asId(raw.id);
-    if (!id) return;
+    if (!id) continue;
+
+    const ref = doc(db, "players", id);
+    const snap = await getDoc(ref);
+    const prev = snap.exists() ? snap.data() : {};
+
+    const nextProjections = mergeProjections(prev.projections, raw.projections);
+    const nextMatchups = mergeMatchups(prev.matchups, raw.matchups);
+
+    const espnId =
+      raw.espnId ??
+      raw.espn_id ??
+      (raw.espn && (raw.espn.playerId || raw.espn.id)) ??
+      prev.espnId ??
+      null;
+
+    const photo =
+      raw.photo ||
+      raw.photoUrl ||
+      raw.headshot ||
+      raw.image ||
+      prev.photo ||
+      null;
+
     batch.set(
-      doc(db, "players", id),
+      ref,
       {
         id,
-        name: playerDisplay(raw),
-        position: (raw.position || raw.pos || "").toString().toUpperCase(),
-        team: raw.team || raw.nflTeam || raw.proTeam || null,
-        projections: raw.projections || null,
-        matchups: raw.matchups || null,
-        // preserve espnId/photo if provided
-        espnId:
-          raw.espnId ??
-          raw.espn_id ??
-          (raw.espn && (raw.espn.playerId || raw.espn.id)) ??
-          null,
-        photo: raw.photo || raw.photoUrl || raw.headshot || raw.image || null,
+        name: playerDisplay({ ...prev, ...raw }),
+        position: (raw.position || raw.pos || prev.position || "").toString().toUpperCase() || null,
+        team: raw.team || raw.nflTeam || raw.proTeam || prev.team || null,
+        projections: nextProjections,
+        matchups: nextMatchups,
+        espnId,
+        photo,
         updatedAt: serverTimestamp(),
       },
       { merge: true }
     );
+
     written += 1;
-  });
-  await batch.commit();
+
+    // Commit in chunks to avoid huge batches
+    if (written % 400 === 0) {
+      commits.push(batch.commit());
+    }
+  }
+
+  if (written % 400 !== 0) {
+    commits.push(batch.commit());
+  }
+  await Promise.all(commits);
+
   return { written };
 }
 
