@@ -4,7 +4,6 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   listenLeague,
   listMemberUsernames,
-  configureDraft,
   initDraftOrder,
   startDraft,
   endDraft,
@@ -16,7 +15,6 @@ import {
   setCurrentWeek,
   setSeasonEnded,
 } from "../lib/storage.js";
-import EspnIdBackfill from "./admin/EspnIdBackfill";
 
 export default function LeagueAdmin({ leagueId, username }) {
   const [league, setLeague] = useState(null);
@@ -31,6 +29,9 @@ export default function LeagueAdmin({ leagueId, username }) {
   const [draftDateTime, setDraftDateTime] = useState("");
 
   const isOwner = useMemo(() => !!league && league.owner === username, [league, username]);
+  const draftStatus = league?.draft?.status || "scheduled";
+  const draftDone = draftStatus === "done";
+  const draftScheduled = draftStatus === "scheduled";
 
   // Subscribe to league
   useEffect(() => {
@@ -168,26 +169,34 @@ export default function LeagueAdmin({ leagueId, username }) {
     }
   }
 
-  // Manual “global players refresh” trigger (calls /api/cron/refresh-players-espn)
-  async function handleRefreshGlobalPlayers() {
+  // One-click: refresh global players (ESPN) + backfill headshots
+  async function handleRefreshPlayersAndHeadshots() {
     setSaving(true);
     try {
-      const res = await fetch("/api/cron/refresh-players-espn", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          // include secret header if exposed for browser usage
-          ...(process.env.NEXT_PUBLIC_CRON_SECRET
-            ? { "x-cron-secret": process.env.NEXT_PUBLIC_CRON_SECRET }
-            : {}),
-        },
+      const results = [];
+
+      // 1) Refresh global players from ESPN
+      const r1 = await fetch("/api/cron/refresh-players-espn", {
+        headers: process.env.REACT_APP_CRON_SECRET
+          ? { "x-cron-secret": process.env.REACT_APP_CRON_SECRET }
+          : {},
       });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j?.error || "Refresh failed");
-      alert(`Refreshed global players.\nWritten: ${j.written ?? "?"}`);
-    } catch (e) {
-      console.error("handleRefreshGlobalPlayers:", e);
-      alert(e?.message || String(e));
+      const j1 = await r1.json().catch(() => ({}));
+      results.push(`Players: ${r1.ok ? "ok" : "err"} (${JSON.stringify(j1)})`);
+
+      // 2) Backfill headshots (and ESPN IDs where possible)
+      const r2 = await fetch("/api/cron/backfill-headshots", {
+        headers: process.env.REACT_APP_CRON_SECRET
+          ? { "x-cron-secret": process.env.REACT_APP_CRON_SECRET }
+          : {},
+      });
+      const j2 = await r2.json().catch(() => ({}));
+      results.push(`Headshots: ${r2.ok ? "ok" : "err"} (${JSON.stringify(j2)})`);
+
+      alert(results.join("\n"));
+    } catch (err) {
+      console.error("Refresh+Headshots error:", err);
+      alert(err?.message || String(err));
     } finally {
       setSaving(false);
     }
@@ -221,113 +230,102 @@ export default function LeagueAdmin({ leagueId, username }) {
         </div>
       </div>
 
-      {/* Draft Controls */}
-      <div className="card mb12">
-        <div className="card-title">Draft Controls</div>
-        <div className="grid2 mb8">
-          <div><b>Status:</b> {league?.draft?.status || "scheduled"}</div>
-          <div><b>Scheduled for:</b> {schedStr}</div>
-          <div><b>Clock (ms):</b> {league?.draft?.clockMs || 5000}</div>
-          <div><b>Rounds:</b> {league?.draft?.roundsTotal || 12}</div>
-        </div>
-        <div className="btnbar">
-          <button className="btn btn-primary" disabled={saving} onClick={handleInitDraftOrder}>
-            Initialize Draft Order
-          </button>
-          <button className="btn btn-ghost" disabled={saving} onClick={handleWriteSchedule}>
-            Recreate Season Schedule
-          </button>
-          <button className="btn btn-primary" disabled={saving} onClick={handleStartDraftNow}>
-            Start Draft Now
-          </button>
-          <button className="btn btn-danger" disabled={saving} onClick={handleEndDraft}>
-            End Draft
-          </button>
-        </div>
-        <div className="mt12">
-          <label className="block mb4"><b>Schedule draft (local time)</b></label>
-          <input
-            className="input"
-            type="datetime-local"
-            value={draftDateTime}
-            onChange={(e) => setDraftDateTime(e.target.value)}
-          />
-          <div className="mt8">
-            <button className="btn" disabled={saving} onClick={handleScheduleDraft}>
-              Save Draft Schedule
+      {/* Draft Controls — hidden if draft is done */}
+      {!draftDone && (
+        <div className="card mb12">
+          <div className="card-title">Draft Controls</div>
+          <div className="grid2 mb8">
+            <div><b>Status:</b> {league?.draft?.status || "scheduled"}</div>
+            <div><b>Scheduled for:</b> {schedStr}</div>
+            <div><b>Clock (ms):</b> {league?.draft?.clockMs || 5000}</div>
+            <div><b>Rounds:</b> {league?.draft?.roundsTotal || 12}</div>
+          </div>
+          <div className="btnbar">
+            <button className="btn btn-primary" disabled={saving} onClick={handleInitDraftOrder}>
+              Initialize Draft Order
+            </button>
+            <button className="btn btn-ghost" disabled={saving} onClick={handleWriteSchedule}>
+              Recreate Season Schedule
+            </button>
+            <button className="btn btn-primary" disabled={saving} onClick={handleStartDraftNow}>
+              Start Draft Now
+            </button>
+            <button className="btn btn-danger" disabled={saving} onClick={handleEndDraft}>
+              End Draft
             </button>
           </div>
-          <div className="muted mt8">
-            When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code> and then <code>startDraft()</code>.
-          </div>
-        </div>
-      </div>
-
-      {/* Entry Settings */}
-      <div className="card mb12">
-        <div className="card-title">Entry Settings</div>
-        <div className="row wrap gap12 ai-center">
-          <label className="row ai-center gap8">
-            <input
-              type="checkbox"
-              checked={entryEnabled}
-              onChange={(e) => setEntryEnabled(e.target.checked)}
-            />
-            Require entry fee
-          </label>
-          <label className="row ai-center gap8">
-            Amount (Pi):
+          <div className="mt12">
+            <label className="block mb4"><b>Schedule draft (local time)</b></label>
             <input
               className="input"
-              type="number"
-              min="0"
-              step="0.01"
-              value={entryAmountPi}
-              onChange={(e) => setEntryAmountPi(e.target.value)}
-              style={{ width: 120 }}
-              disabled={!entryEnabled}
+              type="datetime-local"
+              value={draftDateTime}
+              onChange={(e) => setDraftDateTime(e.target.value)}
             />
-          </label>
-          <button className="btn btn-primary" disabled={saving} onClick={handleSaveEntry}>
-            Save
-          </button>
-        </div>
-        {!leagueIsFree(league) && (
-          <div className="muted mt8">
-            Payments are collected in the <b>My Team</b> tab via your provider flow.
+            <div className="mt8">
+              <button className="btn" disabled={saving} onClick={handleScheduleDraft}>
+                Save Draft Schedule
+              </button>
+            </div>
+            <div className="muted mt8">
+              When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code> and then <code>startDraft()</code>.
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* Data Maintenance */}
+      {/* Entry Settings — hidden once draft is not scheduled */}
+      {draftScheduled && (
+        <div className="card mb12">
+          <div className="card-title">Entry Settings</div>
+          <div className="row wrap gap12 ai-center">
+            <label className="row ai-center gap8">
+              <input
+                type="checkbox"
+                checked={entryEnabled}
+                onChange={(e) => setEntryEnabled(e.target.checked)}
+              />
+              Require entry fee
+            </label>
+            <label className="row ai-center gap8">
+              Amount (Pi):
+              <input
+                className="input"
+                type="number"
+                min="0"
+                step="0.01"
+                value={entryAmountPi}
+                onChange={(e) => setEntryAmountPi(e.target.value)}
+                style={{ width: 120 }}
+                disabled={!entryEnabled}
+              />
+            </label>
+            <button className="btn btn-primary" disabled={saving} onClick={handleSaveEntry}>
+              Save
+            </button>
+          </div>
+          {!leagueIsFree(league) && (
+            <div className="muted mt8">
+              Payments are collected in the <b>My Team</b> tab via your provider flow.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Data Maintenance — single unified button */}
       <div className="card mb12">
         <div className="card-title">Data Maintenance</div>
         <div className="row gap12 ai-center">
-          <button className="btn" onClick={handleRefreshGlobalPlayers} disabled={saving}>
-            Refresh Global Players (ESPN)
-          </button>
-          <button
-            className="btn"
-            onClick={async () => {
-              const r = await fetch("/api/cron/backfill-headshots", {
-                method: "POST",
-                headers: {
-                  "content-type": "application/json",
-                  ...(process.env.NEXT_PUBLIC_CRON_SECRET
-                    ? { "x-cron-secret": process.env.NEXT_PUBLIC_CRON_SECRET }
-                    : {}),
-                },
-              });
-              const j = await r.json().catch(() => ({}));
-              alert("Headshot backfill:\n" + JSON.stringify(j, null, 2));
-            }}
-            disabled={saving}
-          >
-            Run Headshot Backfill Now
+          <button className="btn btn-primary" disabled={saving} onClick={handleRefreshPlayersAndHeadshots}>
+            Refresh Players & Headshots (ESPN)
           </button>
           <div className="muted">
-            These run the same logic as your scheduled Cron Jobs, on-demand.
+            Updates global <code>players</code> from ESPN and backfills headshots/ESPN IDs.
           </div>
+        </div>
+        <div className="muted mt8" style={{ lineHeight: 1.5 }}>
+          • This runs the same logic your daily cron will execute.<br/>
+          • If you’ve just deployed changes, click once to refresh immediately.
         </div>
       </div>
 
@@ -401,17 +399,9 @@ export default function LeagueAdmin({ leagueId, username }) {
             onClick={async () => {
               try {
                 setSaving(true);
-                const r = await fetch("/api/cron/settle-season", {
-                  method: "POST",
-                  headers: {
-                    "content-type": "application/json",
-                    ...(process.env.NEXT_PUBLIC_CRON_SECRET
-                      ? { "x-cron-secret": process.env.NEXT_PUBLIC_CRON_SECRET }
-                      : {}),
-                  },
-                });
+                const r = await fetch("/api/cron/settle-season");
                 const j = await r.json().catch(() => ({}));
-                alert(`Settlement triggered.\n${JSON.stringify(j, null, 2)}`);
+                alert(`Settlement triggered.\n${JSON.stringify(j)}`);
               } catch (err) {
                 console.error(err);
                 alert(err?.message || String(err));
@@ -426,14 +416,8 @@ export default function LeagueAdmin({ leagueId, username }) {
         <div className="muted mt8" style={{ lineHeight: 1.5 }}>
           • When <b>Week ≥ 18</b> or <b>Season Ended = Yes</b>, the daily cron will settle the league.<br />
           • Ensure all entry payments are recorded and <code>treasury.poolPi</code> is funded.<br />
-          • The cron enqueues payouts and calls your server to send Pi (see <code>sendPiServerSide</code>).
+          • The cron enqueues payouts and calls your server to send Pi.
         </div>
-      </div>
-
-      {/* ESPN Backfill Tool */}
-      <div className="card mt12">
-        <div className="card-title">Data Tools</div>
-        <EspnIdBackfill leagueId={leagueId} />
       </div>
     </div>
   );
