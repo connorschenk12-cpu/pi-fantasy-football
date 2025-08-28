@@ -239,10 +239,11 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
       <div className="card mb12">
         <div className="card-title">Starters</div>
         <div className="table-wrap">
+          {/* wide-names makes first column roomy; we narrow Slot explicitly */}
           <table className="table table-sm wide-names">
             <thead>
               <tr>
-                <th>Slot</th>
+                <th style={{ width: 72, minWidth: 64, whiteSpace: "nowrap" }}>Slot</th>
                 <th className="col-player">Player</th>
                 <th>Opp</th>
                 <th style={{ textAlign: "right" }}>Proj</th>
@@ -264,7 +265,17 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                   <tr key={slot}>
                     <td><b>{slot}</b></td>
                     <td className="col-player">
-                      {p ? <PlayerBadge player={p} right={opp ? `vs ${opp}` : ""}/> : <span className="muted">(empty)</span>}
+                      {p ? (
+                        <div>
+                          <PlayerBadge player={p} />
+                          {/* subtitle under the name to avoid extra columns crowding */}
+                          <div className="dim" style={{ fontSize: "0.92em", marginTop: 2 }}>
+                            {p.team || "—"} · {p.position || "—"}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="muted">(empty)</span>
+                      )}
                     </td>
                     <td>{opp || "—"}</td>
                     <td style={{ textAlign: "right" }}>{proj.toFixed(1)}</td>
@@ -316,7 +327,14 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                   const allowed = allowedSlotsForPlayer(p);
                   return (
                     <tr key={pid}>
-                      <td className="col-player"><PlayerBadge player={p}/></td>
+                      <td className="col-player">
+                        <div>
+                          <PlayerBadge player={p} />
+                          <div className="dim" style={{ fontSize: "0.92em", marginTop: 2 }}>
+                            {p.team || "—"} · {p.position || "—"}
+                          </div>
+                        </div>
+                      </td>
                       <td>{allowed.length ? allowed.join(", ") : "—"}</td>
                       <td>
                         <div className="btnbar">
