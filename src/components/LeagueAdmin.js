@@ -175,27 +175,38 @@ export default function LeagueAdmin({ leagueId, username }) {
     try {
       const results = [];
 
+      // Helper to show status + body text for easier debugging
+      const show = async (label, resp) => {
+        const text = await resp.text().catch(() => "");
+        let json = {};
+        try {
+          json = JSON.parse(text);
+        } catch (_) {}
+        results.push(
+          `${label}: ${resp.ok ? "ok" : "err"} (status ${resp.status})\n` +
+            (text ? `body: ${text}` : JSON.stringify(json))
+        );
+      };
+
       // 1) Refresh global players from ESPN
       const r1 = await fetch("/api/cron/refresh-players-espn", {
-        method: "POST",
         headers: process.env.REACT_APP_CRON_SECRET
           ? { "x-cron-secret": process.env.REACT_APP_CRON_SECRET }
           : {},
+        cache: "no-store",
       });
-      const j1 = await r1.json().catch(() => ({}));
-      results.push(`Players: ${r1.ok ? "ok" : "err"} (${JSON.stringify(j1)})`);
+      await show("Players", r1);
 
       // 2) Backfill headshots (and ESPN IDs where possible)
       const r2 = await fetch("/api/cron/backfill-headshots", {
-        method: "POST",
         headers: process.env.REACT_APP_CRON_SECRET
           ? { "x-cron-secret": process.env.REACT_APP_CRON_SECRET }
           : {},
+        cache: "no-store",
       });
-      const j2 = await r2.json().catch(() => ({}));
-      results.push(`Headshots: ${r2.ok ? "ok" : "err"} (${JSON.stringify(j2)})`);
+      await show("Headshots", r2);
 
-      alert(results.join("\n"));
+      alert(results.join("\n\n"));
     } catch (err) {
       console.error("Refresh+Headshots error:", err);
       alert(err?.message || String(err));
@@ -226,9 +237,15 @@ export default function LeagueAdmin({ leagueId, username }) {
       <div className="card mb12">
         <div className="card-title">Overview</div>
         <div className="grid2">
-          <div><b>League:</b> {league?.name}</div>
-          <div><b>Owner:</b> {league?.owner}</div>
-          <div className="col-span-2"><b>Members:</b> {members.join(", ") || "—"}</div>
+          <div>
+            <b>League:</b> {league?.name}
+          </div>
+          <div>
+            <b>Owner:</b> {league?.owner}
+          </div>
+          <div className="col-span-2">
+            <b>Members:</b> {members.join(", ") || "—"}
+          </div>
         </div>
       </div>
 
@@ -237,10 +254,18 @@ export default function LeagueAdmin({ leagueId, username }) {
         <div className="card mb12">
           <div className="card-title">Draft Controls</div>
           <div className="grid2 mb8">
-            <div><b>Status:</b> {league?.draft?.status || "scheduled"}</div>
-            <div><b>Scheduled for:</b> {schedStr}</div>
-            <div><b>Clock (ms):</b> {league?.draft?.clockMs || 5000}</div>
-            <div><b>Rounds:</b> {league?.draft?.roundsTotal || 12}</div>
+            <div>
+              <b>Status:</b> {league?.draft?.status || "scheduled"}
+            </div>
+            <div>
+              <b>Scheduled for:</b> {schedStr}
+            </div>
+            <div>
+              <b>Clock (ms):</b> {league?.draft?.clockMs || 5000}
+            </div>
+            <div>
+              <b>Rounds:</b> {league?.draft?.roundsTotal || 12}
+            </div>
           </div>
           <div className="btnbar">
             <button className="btn btn-primary" disabled={saving} onClick={handleInitDraftOrder}>
@@ -257,7 +282,9 @@ export default function LeagueAdmin({ leagueId, username }) {
             </button>
           </div>
           <div className="mt12">
-            <label className="block mb4"><b>Schedule draft (local time)</b></label>
+            <label className="block mb4">
+              <b>Schedule draft (local time)</b>
+            </label>
             <input
               className="input"
               type="datetime-local"
@@ -270,13 +297,14 @@ export default function LeagueAdmin({ leagueId, username }) {
               </button>
             </div>
             <div className="muted mt8">
-              When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code> and then <code>startDraft()</code>.
+              When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code>{" "}
+              and then <code>startDraft()</code>.
             </div>
           </div>
         </div>
       )}
 
-      {/* Entry Settings — only while draft is scheduled (i.e., not started yet) */}
+      {/* Entry Settings — hidden once draft is not scheduled */}
       {draftScheduled && (
         <div className="card mb12">
           <div className="card-title">Entry Settings</div>
@@ -318,7 +346,11 @@ export default function LeagueAdmin({ leagueId, username }) {
       <div className="card mb12">
         <div className="card-title">Data Maintenance</div>
         <div className="row gap12 ai-center">
-          <button className="btn btn-primary" disabled={saving} onClick={handleRefreshPlayersAndHeadshots}>
+          <button
+            className="btn btn-primary"
+            disabled={saving}
+            onClick={handleRefreshPlayersAndHeadshots}
+          >
             Refresh Players & Headshots (ESPN)
           </button>
           <div className="muted">
@@ -326,7 +358,8 @@ export default function LeagueAdmin({ leagueId, username }) {
           </div>
         </div>
         <div className="muted mt8" style={{ lineHeight: 1.5 }}>
-          • This runs the same logic your daily cron will execute.<br/>
+          • This runs the same logic your daily cron will execute.
+          <br />
           • If you’ve just deployed changes, click once to refresh immediately.
         </div>
       </div>
@@ -401,7 +434,7 @@ export default function LeagueAdmin({ leagueId, username }) {
             onClick={async () => {
               try {
                 setSaving(true);
-                const r = await fetch("/api/cron/settle-season", { method: "POST" });
+                const r = await fetch("/api/cron/settle-season");
                 const j = await r.json().catch(() => ({}));
                 alert(`Settlement triggered.\n${JSON.stringify(j)}`);
               } catch (err) {
@@ -416,8 +449,10 @@ export default function LeagueAdmin({ leagueId, username }) {
           </button>
         </div>
         <div className="muted mt8" style={{ lineHeight: 1.5 }}>
-          • When <b>Week ≥ 18</b> or <b>Season Ended = Yes</b>, the daily cron will settle the league.<br />
-          • Ensure all entry payments are recorded and <code>treasury.poolPi</code> is funded.<br />
+          • When <b>Week ≥ 18</b> or <b>Season Ended = Yes</b>, the daily cron will settle the league.
+          <br />
+          • Ensure all entry payments are recorded and <code>treasury.poolPi</code> is funded.
+          <br />
           • The cron enqueues payouts and calls your server to send Pi.
         </div>
       </div>
