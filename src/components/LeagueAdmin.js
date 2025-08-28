@@ -15,9 +15,6 @@ import {
   // season controls
   setCurrentWeek,
   setSeasonEnded,
-  // ✅ add these two for ESPN import seeding
-  seedPlayersToGlobal,
-  seedPlayersToLeague,
 } from "../lib/storage.js";
 import EspnIdBackfill from "./admin/EspnIdBackfill";
 
@@ -171,6 +168,31 @@ export default function LeagueAdmin({ leagueId, username }) {
     }
   }
 
+  // Manual “global players refresh” trigger (calls /api/cron/refresh-players-espn)
+  async function handleRefreshGlobalPlayers() {
+    setSaving(true);
+    try {
+      const res = await fetch("/api/cron/refresh-players-espn", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          // include secret header if exposed for browser usage
+          ...(process.env.NEXT_PUBLIC_CRON_SECRET
+            ? { "x-cron-secret": process.env.NEXT_PUBLIC_CRON_SECRET }
+            : {}),
+        },
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || "Refresh failed");
+      alert(`Refreshed global players.\nWritten: ${j.written ?? "?"}`);
+    } catch (e) {
+      console.error("handleRefreshGlobalPlayers:", e);
+      alert(e?.message || String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const schedStr = (() => {
     const s = Number(league?.draft?.scheduledAt || 0);
     return s ? new Date(s).toLocaleString() : "—";
@@ -277,28 +299,34 @@ export default function LeagueAdmin({ leagueId, username }) {
         )}
       </div>
 
-      {/* ESPN Player Import */}
-      <div className="card mt12">
-        <div className="card-title">Import Players (ESPN)</div>
+      {/* Data Maintenance */}
+      <div className="card mb12">
+        <div className="card-title">Data Maintenance</div>
         <div className="row gap12 ai-center">
+          <button className="btn" onClick={handleRefreshGlobalPlayers} disabled={saving}>
+            Refresh Global Players (ESPN)
+          </button>
           <button
-            className="btn btn-primary"
+            className="btn"
             onClick={async () => {
-              try {
-                const r = await fetch("/api/players/espn");
-                const { players } = await r.json();
-                const result = await seedPlayersToGlobal(players);
-                alert(`Imported ${result.written} players into global DB.`);
-              } catch (err) {
-                console.error("ESPN import failed:", err);
-                alert("Error refreshing players from ESPN.");
-              }
+              const r = await fetch("/api/cron/backfill-headshots", {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  ...(process.env.NEXT_PUBLIC_CRON_SECRET
+                    ? { "x-cron-secret": process.env.NEXT_PUBLIC_CRON_SECRET }
+                    : {}),
+                },
+              });
+              const j = await r.json().catch(() => ({}));
+              alert("Headshot backfill:\n" + JSON.stringify(j, null, 2));
             }}
+            disabled={saving}
           >
-            Refresh Players from ESPN
+            Run Headshot Backfill Now
           </button>
           <div className="muted">
-            Pulls the latest roster, teams, and ESPN IDs into your <code>players</code> collection.
+            These run the same logic as your scheduled Cron Jobs, on-demand.
           </div>
         </div>
       </div>
@@ -373,9 +401,17 @@ export default function LeagueAdmin({ leagueId, username }) {
             onClick={async () => {
               try {
                 setSaving(true);
-                const r = await fetch("/api/cron/settle-season");
+                const r = await fetch("/api/cron/settle-season", {
+                  method: "POST",
+                  headers: {
+                    "content-type": "application/json",
+                    ...(process.env.NEXT_PUBLIC_CRON_SECRET
+                      ? { "x-cron-secret": process.env.NEXT_PUBLIC_CRON_SECRET }
+                      : {}),
+                  },
+                });
                 const j = await r.json().catch(() => ({}));
-                alert(`Settlement triggered.\n${JSON.stringify(j)}`);
+                alert(`Settlement triggered.\n${JSON.stringify(j, null, 2)}`);
               } catch (err) {
                 console.error(err);
                 alert(err?.message || String(err));
@@ -391,24 +427,6 @@ export default function LeagueAdmin({ leagueId, username }) {
           • When <b>Week ≥ 18</b> or <b>Season Ended = Yes</b>, the daily cron will settle the league.<br />
           • Ensure all entry payments are recorded and <code>treasury.poolPi</code> is funded.<br />
           • The cron enqueues payouts and calls your server to send Pi (see <code>sendPiServerSide</code>).
-        </div>
-      </div>
-
-      {/* Data Maintenance */}
-      <div className="card mb12">
-        <div className="card-title">Data Maintenance</div>
-        <div className="row gap12 ai-center">
-          <button
-            className="btn"
-            onClick={async () => {
-              const r = await fetch("/api/cron/backfill-headshots");
-              const j = await r.json().catch(() => ({}));
-              alert("Backfill complete:\n" + JSON.stringify(j, null, 2));
-            }}
-          >
-            Run Headshot Backfill Now
-          </button>
-          <div className="muted">This also captures ESPN IDs when available.</div>
         </div>
       </div>
 
