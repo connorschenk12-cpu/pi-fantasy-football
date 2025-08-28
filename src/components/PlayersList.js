@@ -124,8 +124,6 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
         <thead>
           <tr>
             <th className="col-player">Name</th>
-            <th>Pos</th>
-            <th>Team</th>
             <th>Opp</th>
             <th>Proj (W{week})</th>
             {username && <th>Manage</th>}
@@ -137,13 +135,13 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
             return (
               <tr key={p.id}>
                 <td className="col-player">
-                  <PlayerBadge
-                    player={p}
-                    right={p.team ? `· ${p.team} ${p.position || ""}` : p.position || ""}
-                  />
+                  <div>
+                    <PlayerBadge player={p} />
+                    <div className="dim" style={{ fontSize: "0.92em", marginTop: 2 }}>
+                      {p.team || "—"} · {p.position || "—"}
+                    </div>
+                  </div>
                 </td>
-                <td>{p.position || "-"}</td>
-                <td>{p.team || "-"}</td>
                 <td>{opponentForWeek(p, week) || "-"}</td>
                 <td>{projForWeek(p, week).toFixed(1)}</td>
                 {username && (
@@ -151,7 +149,7 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
                     {claimedBy ? (
                       <span style={{ color: "#999" }}>Owned by {claimedBy}</span>
                     ) : canManage ? (
-                      <button onClick={() => handleAdd(p.id)}>Add</button>
+                      <button className="btn" onClick={() => handleAdd(p.id)}>Add</button>
                     ) : (
                       <span style={{ color: "#999" }}>Locked (draft)</span>
                     )}
@@ -162,7 +160,7 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
           })}
           {filtered.length === 0 && (
             <tr>
-              <td colSpan={username ? 6 : 5} style={{ color: "#999", paddingTop: 12 }}>
+              <td colSpan={username ? 4 : 3} style={{ color: "#999", paddingTop: 12 }}>
                 No players match your filters. Add players to Firestore or clear filters.
               </td>
             </tr>
