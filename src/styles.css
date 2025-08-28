@@ -204,3 +204,39 @@ body{
   background: linear-gradient(180deg, rgba(255, 207, 92, .14), rgba(255, 207, 92, .06));
   border-radius: 12px; padding: 12px;
 }
+
+/* ==== Lineup table sizing (My Team) ==== */
+.table.lineup th.slot,
+.table.lineup td.slot{
+  width: 72px;            /* narrower slot column */
+  text-align: center;
+  white-space: nowrap;
+}
+
+.table.lineup th.player,
+.table.lineup td.player{
+  min-width: 280px;       /* wider player column */
+  max-width: 520px;
+  white-space: nowrap;
+}
+
+.player-cell .name,
+.player-badge .name{
+  font-size: 0.95rem;     /* slightly smaller so fewer truncations */
+}
+
+/* small subline under the name (team • pos) */
+.player-sub{
+  display:block;
+  margin-top: 2px;
+  font-size: 0.88rem;
+  line-height: 1.15;
+  color: var(--muted);
+}
+
+/* Make name column wide in lists where it's the first column */
+.table.wide-names th:first-child,
+.table.wide-names td:first-child{
+  min-width: 280px;
+  white-space: nowrap;
+}
