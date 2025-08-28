@@ -239,11 +239,11 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
       <div className="card mb12">
         <div className="card-title">Starters</div>
         <div className="table-wrap">
-          <table className="table table-sm">
+          <table className="table table-sm wide-names">
             <thead>
               <tr>
                 <th>Slot</th>
-                <th>Player</th>
+                <th className="col-player">Player</th>
                 <th>Opp</th>
                 <th style={{ textAlign: "right" }}>Proj</th>
                 <th style={{ textAlign: "right" }}>Actual</th>
@@ -263,7 +263,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                 return (
                   <tr key={slot}>
                     <td><b>{slot}</b></td>
-                    <td>
+                    <td className="col-player">
                       {p ? <PlayerBadge player={p} right={opp ? `vs ${opp}` : ""}/> : <span className="muted">(empty)</span>}
                     </td>
                     <td>{opp || "—"}</td>
@@ -293,10 +293,10 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
           <div className="muted">No one on the bench.</div>
         ) : (
           <div className="table-wrap">
-            <table className="table table-sm">
+            <table className="table table-sm wide-names">
               <thead>
                 <tr>
-                  <th>Player</th>
+                  <th className="col-player">Player</th>
                   <th>Allowed Slots</th>
                   <th>Actions</th>
                 </tr>
@@ -316,7 +316,7 @@ export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
                   const allowed = allowedSlotsForPlayer(p);
                   return (
                     <tr key={pid}>
-                      <td><PlayerBadge player={p}/></td>
+                      <td className="col-player"><PlayerBadge player={p}/></td>
                       <td>{allowed.length ? allowed.join(", ") : "—"}</td>
                       <td>
                         <div className="btnbar">
