@@ -1,6 +1,11 @@
 // pages/api/cron/refresh-players-espn.js
 /* eslint-disable no-console */
 import { seedPlayersToGlobal } from "@/src/lib/storage";
+import { runHeadshotBackfill } from "./backfill-headshots.js";
+
+export const config = {
+  maxDuration: 60, // safety for Vercel cron
+};
 
 export default async function handler(req, res) {
   try {
@@ -10,17 +15,26 @@ export default async function handler(req, res) {
       return res.status(401).json({ error: "unauthorized" });
     }
 
-    // Pull latest from your existing ESPN adapter
-    const r = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/players/espn`);
+    // 1) Pull latest from your ESPN adapter endpoint
+    const r = await fetch(
+      `${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/players/espn`
+    );
     if (!r.ok) {
       return res.status(502).json({ error: "ESPN upstream failed" });
     }
     const { players = [] } = await r.json();
 
-    // Normalize/win with ESPN fields if present (optional)
-    // seedPlayersToGlobal already keeps name/pos/team/espnId/photo/updatedAt
-    const result = await seedPlayersToGlobal(players);
-    return res.json({ ok: true, written: result.written });
+    // 2) Seed to GLOBAL collection
+    const seedResult = await seedPlayersToGlobal(players);
+
+    // 3) Immediately run headshot + ESPN ID backfill
+    const backfillResult = await runHeadshotBackfill();
+
+    return res.json({
+      ok: true,
+      written: seedResult.written,
+      backfill: backfillResult,
+    });
   } catch (e) {
     console.error("refresh-players-espn error:", e);
     return res.status(500).json({ error: String(e?.message || e) });
