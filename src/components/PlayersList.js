@@ -8,8 +8,6 @@ import {
   addDropPlayer,
   listenLeagueClaims,
 } from "../lib/storage";
-
-// NEW: pretty name + headshot
 import PlayerBadge from "./common/PlayerBadge";
 
 export default function PlayersList({ leagueId, league, username, currentWeek }) {
@@ -20,7 +18,6 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
   const [week, setWeek] = useState(Number(currentWeek || 1));
   const [claims, setClaims] = useState(new Map());
 
-  // Load players
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -31,27 +28,20 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
         console.error("listPlayers error:", e);
       }
     })();
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, [leagueId]);
 
-  // Claims map
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeagueClaims(leagueId, setClaims);
     return () => unsub && unsub();
   }, [leagueId]);
 
-  useEffect(() => {
-    setWeek(Number(currentWeek || 1));
-  }, [currentWeek]);
+  useEffect(() => setWeek(Number(currentWeek || 1)), [currentWeek]);
 
   const teams = useMemo(() => {
     const s = new Set();
-    (players || []).forEach((p) => {
-      if (p.team) s.add(p.team);
-    });
+    (players || []).forEach((p) => { if (p.team) s.add(p.team); });
     return ["ALL", ...Array.from(s).sort()];
   }, [players]);
 
@@ -69,7 +59,6 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
       .sort((a, b) => projForWeek(b, week) - projForWeek(a, week));
   }, [players, q, pos, teamFilter, week]);
 
-  // Can user add/drop? (disabled during draft if league.settings.lockAddDuringDraft is true)
   const canManage =
     !!username &&
     !!league &&
@@ -106,26 +95,22 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
         </select>
         <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}>
           {teams.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
+            <option key={t} value={t}>{t}</option>
           ))}
         </select>
         <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
           {Array.from({ length: 18 }).map((_, i) => (
-            <option key={i + 1} value={i + 1}>
-              Week {i + 1}
-            </option>
+            <option key={i + 1} value={i + 1}>Week {i + 1}</option>
           ))}
         </select>
       </div>
 
-      <table className="table table-sm wide-names">
+      <table className="table wide-names">
         <thead>
           <tr>
-            <th className="col-player">Name</th>
+            <th>Name</th>
             <th>Opp</th>
-            <th>Proj (W{week})</th>
+            <th className="num">Proj (W{week})</th>
             {username && <th>Manage</th>}
           </tr>
         </thead>
@@ -134,22 +119,20 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
             const claimedBy = claims.get(p.id)?.claimedBy || null;
             return (
               <tr key={p.id}>
-                <td className="col-player">
-                  <div>
-                    <PlayerBadge player={p} />
-                    <div className="dim" style={{ fontSize: "0.92em", marginTop: 2 }}>
-                      {p.team || "—"} · {p.position || "—"}
-                    </div>
-                  </div>
+                <td>
+                  <PlayerBadge player={p} />
+                  <span className="player-sub">
+                    {(p.position || "-")}{p.team ? ` • ${p.team}` : ""}
+                  </span>
                 </td>
                 <td>{opponentForWeek(p, week) || "-"}</td>
-                <td>{projForWeek(p, week).toFixed(1)}</td>
+                <td className="num">{projForWeek(p, week).toFixed(1)}</td>
                 {username && (
                   <td>
                     {claimedBy ? (
                       <span style={{ color: "#999" }}>Owned by {claimedBy}</span>
                     ) : canManage ? (
-                      <button className="btn" onClick={() => handleAdd(p.id)}>Add</button>
+                      <button className="btn btn-primary" onClick={() => handleAdd(p.id)}>Add</button>
                     ) : (
                       <span style={{ color: "#999" }}>Locked (draft)</span>
                     )}
