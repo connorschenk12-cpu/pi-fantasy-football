@@ -1,99 +1,127 @@
-// api/cron/backfill-headshots.js
 /* eslint-disable no-console */
-import { adminDb } from "../../src/lib/firebaseAdmin.js";
+// api/cron/backfill-headshots.js
+import { adminDb } from "@/src/lib/firebaseAdmin";
 
 const SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl";
-const norm = (s) => String(s || "").trim().toLowerCase();
-const displayName = (p) =>
-  p.name ||
-  p.full_name ||
-  p.fullName ||
-  `${p.first_name || ""} ${p.last_name || ""}`.trim() ||
-  String(p.id || "");
-const espnHeadshot = (espnId) =>
-  `https://a.espncdn.com/i/headshots/nfl/players/full/${espnId}.png`;
-const sleeperHeadshot = (playerId) =>
-  `https://sleepercdn.com/content/nfl/players/full/${playerId}.jpg`;
 
-export const config = { maxDuration: 60 };
+function norm(s) {
+  return String(s || "").trim().toLowerCase();
+}
+function displayName(p) {
+  return (
+    p.name ||
+    p.full_name ||
+    p.fullName ||
+    `${p.first_name || ""} ${p.last_name || ""}`.trim() ||
+    String(p.id || "")
+  );
+}
+function espnHeadshot(espnId) {
+  return `https://a.espncdn.com/i/headshots/nfl/players/full/${espnId}.png`;
+}
+function sleeperHeadshot(playerId) {
+  return `https://sleepercdn.com/content/nfl/players/full/${playerId}.jpg`;
+}
 
 export default async function handler(req, res) {
   try {
-    // Accept GET/POST from the browser (no secret check, for now)
+    // Optional: cron secret
+    const auth = req.headers["x-cron-secret"];
+    if (process.env.CRON_SECRET && auth !== process.env.CRON_SECRET) {
+      return res.status(401).json({ ok: false, error: "unauthorized" });
+    }
 
     // 1) Load Sleeper catalog
     const sleeperResp = await fetch(SLEEPER_PLAYERS_URL, { cache: "no-store" });
     if (!sleeperResp.ok) {
-      const txt = await sleeperResp.text().catch(() => "");
-      return res.status(502).json({ ok: false, error: "Sleeper fetch failed", status: sleeperResp.status, body: txt });
+      const body = await sleeperResp.text().catch(() => "");
+      return res
+        .status(502)
+        .json({ ok: false, error: `Sleeper fetch failed (${sleeperResp.status})`, body });
     }
-    const sleeperMap = await sleeperResp.json();
+    const sleeperMap = await sleeperResp.json(); // object keyed by player_id
 
+    // Build quick lookup by (name|team|pos)
     const byKey = new Map();
     for (const [pid, row] of Object.entries(sleeperMap || {})) {
-      const nm =
-        norm(
-          row.full_name ||
-            (row.first_name && row.last_name ? `${row.first_name} ${row.last_name}` : row.last_name || "")
-        );
+      const nm = norm(
+        row.full_name ||
+          (row.first_name && row.last_name ? `${row.first_name} ${row.last_name}` : row.last_name || "")
+      );
       const tm = norm(row.team);
       const ps = norm(row.position);
       const key = `${nm}|${tm}|${ps}`;
       if (!byKey.has(key)) byKey.set(key, { ...row, player_id: pid });
     }
 
-    const matchSleeper = (p) => {
+    function matchSleeper(p) {
       const nm = norm(displayName(p));
       const tm = norm(p.team);
       const ps = norm(p.position);
-      return (
-        byKey.get(`${nm}|${tm}|${ps}`) ||
-        byKey.get(`${nm}|${tm}|`) ||
-        [...byKey.entries()].find(([k]) => k.startsWith(`${nm}|`))?.[1] ||
-        null
-      );
-    };
+      const exact = byKey.get(`${nm}|${tm}|${ps}`);
+      if (exact) return exact;
 
-    // 2) Update GLOBAL players
+      // fallback: ignore position if needed
+      const loose = byKey.get(`${nm}|${tm}|`);
+      if (loose) return loose;
+
+      // last resort: name only
+      for (const [k, v] of byKey.entries()) {
+        if (k.startsWith(`${nm}|`)) return v;
+      }
+      return null;
+    }
+
+    // 2) Update GLOBAL players collection
     const globalSnap = await adminDb.collection("players").get();
-    let updated = 0, already = 0, total = globalSnap.size;
+    let updated = 0,
+      already = 0,
+      total = globalSnap.size;
 
     let batch = adminDb.batch();
     let ops = 0;
 
     for (const doc of globalSnap.docs) {
       const p = doc.data() || {};
-      // Prefer any existing explicit headshot fields you use
-      const existingUrl = p.headshotUrl || p.photo || p.imageUrl || p.photoUrl || null;
-      if (existingUrl) { already++; continue; }
+
+      // If any photo field already present, skip
+      const hasPhoto =
+        p.headshotUrl || p.photo || p.photoUrl || p.photoURL || p.imageUrl || p.image || p.headshot;
+      if (hasPhoto) {
+        already++;
+        continue;
+      }
 
       let espnId = p.espnId || p.espn_id;
-      let headshotUrl = existingUrl;
+      let headshotUrl = null;
 
-      if (!espnId || !headshotUrl) {
-        const match = matchSleeper(p);
-        if (match) {
-          if (!espnId && match.espn_id) espnId = String(match.espn_id);
-          if (!headshotUrl) {
-            headshotUrl = match.espn_id ? espnHeadshot(match.espn_id) : sleeperHeadshot(match.player_id);
-          }
-        }
+      // Try to resolve via Sleeper
+      const match = matchSleeper(p);
+      if (match) {
+        if (!espnId && match.espn_id) espnId = String(match.espn_id);
+        headshotUrl = match.espn_id ? espnHeadshot(match.espn_id) : sleeperHeadshot(match.player_id);
       }
 
-      if (headshotUrl || espnId) {
+      if (espnId || headshotUrl) {
         batch.update(doc.ref, {
           ...(espnId ? { espnId } : {}),
-          ...(headshotUrl ? { headshotUrl } : {}),
+          ...(headshotUrl ? { headshotUrl, photo: headshotUrl } : {}), // write to both common fields
           updatedAt: new Date(),
         });
-        ops++; updated++;
-      }
+        ops++;
+        updated++;
 
-      if (ops >= 400) { await batch.commit(); batch = adminDb.batch(); ops = 0; }
+        // Commit in chunks to stay under Firestore limits
+        if (ops >= 400) {
+          await batch.commit();
+          batch = adminDb.batch();
+          ops = 0;
+        }
+      }
     }
     if (ops > 0) await batch.commit();
 
-    // 3) League-scoped players (optional)
+    // 3) Also touch league-scoped players (optional; safe to keep)
     const leaguesSnap = await adminDb.collection("leagues").get();
     let leagueDocsTouched = 0;
 
@@ -106,33 +134,42 @@ export default async function handler(req, res) {
 
       for (const pd of lPlayers.docs) {
         const p = pd.data() || {};
-        const existingUrl = p.headshotUrl || p.photo || p.imageUrl || p.photoUrl || null;
-        if (existingUrl) continue;
+        const hasPhoto =
+          p.headshotUrl ||
+          p.photo ||
+          p.photoUrl ||
+          p.photoURL ||
+          p.imageUrl ||
+          p.image ||
+          p.headshot;
+        if (hasPhoto) continue;
 
         let espnId = p.espnId || p.espn_id;
-        let headshotUrl = existingUrl;
+        let headshotUrl = null;
 
-        if (!espnId || !headshotUrl) {
-          const match = matchSleeper(p);
-          if (match) {
-            if (!espnId && match.espn_id) espnId = String(match.espn_id);
-            if (!headshotUrl) {
-              headshotUrl = match.espn_id ? espnHeadshot(match.espn_id) : sleeperHeadshot(match.player_id);
-            }
-          }
+        const match = matchSleeper(p);
+        if (match) {
+          if (!espnId && match.espn_id) espnId = String(match.espn_id);
+          headshotUrl = match.espn_id ? espnHeadshot(match.espn_id) : sleeperHeadshot(match.player_id);
         }
 
         if (espnId || headshotUrl) {
           lbatch.update(pd.ref, {
             ...(espnId ? { espnId } : {}),
-            ...(headshotUrl ? { headshotUrl } : {}),
+            ...(headshotUrl ? { headshotUrl, photo: headshotUrl } : {}),
             updatedAt: new Date(),
           });
-          lops++; leagueDocsTouched++;
-        }
+          lops++;
+          leagueDocsTouched++;
 
-        if (lops >= 400) { await lbatch.commit(); lbatch = adminDb.batch(); lops = 0; }
+          if (lops >= 400) {
+            await lbatch.commit();
+            lbatch = adminDb.batch();
+            lops = 0;
+          }
+        }
       }
+
       if (lops > 0) await lbatch.commit();
     }
 
@@ -144,7 +181,7 @@ export default async function handler(req, res) {
       leagueDocsTouched,
     });
   } catch (err) {
-    console.error(err);
+    console.error("backfill-headshots error:", err);
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
