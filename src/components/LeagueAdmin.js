@@ -177,6 +177,7 @@ export default function LeagueAdmin({ leagueId, username }) {
 
       // 1) Refresh global players from ESPN
       const r1 = await fetch("/api/cron/refresh-players-espn", {
+        method: "POST",
         headers: process.env.REACT_APP_CRON_SECRET
           ? { "x-cron-secret": process.env.REACT_APP_CRON_SECRET }
           : {},
@@ -186,6 +187,7 @@ export default function LeagueAdmin({ leagueId, username }) {
 
       // 2) Backfill headshots (and ESPN IDs where possible)
       const r2 = await fetch("/api/cron/backfill-headshots", {
+        method: "POST",
         headers: process.env.REACT_APP_CRON_SECRET
           ? { "x-cron-secret": process.env.REACT_APP_CRON_SECRET }
           : {},
@@ -274,7 +276,7 @@ export default function LeagueAdmin({ leagueId, username }) {
         </div>
       )}
 
-      {/* Entry Settings — hidden once draft is not scheduled */}
+      {/* Entry Settings — only while draft is scheduled (i.e., not started yet) */}
       {draftScheduled && (
         <div className="card mb12">
           <div className="card-title">Entry Settings</div>
@@ -399,7 +401,7 @@ export default function LeagueAdmin({ leagueId, username }) {
             onClick={async () => {
               try {
                 setSaving(true);
-                const r = await fetch("/api/cron/settle-season");
+                const r = await fetch("/api/cron/settle-season", { method: "POST" });
                 const j = await r.json().catch(() => ({}));
                 alert(`Settlement triggered.\n${JSON.stringify(j)}`);
               } catch (err) {
