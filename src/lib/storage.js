@@ -469,7 +469,7 @@ function safeSlug(s) {
     .slice(0, 64);
 }
 
-/** Seed/merge into GLOBAL players (dedupe + batch rotation + projection/matchup merge) */
+/** Seed/merge into GLOBAL players (dedupe + *fresh* batch per chunk + projection/matchup merge) */
 export async function seedPlayersToGlobal(players = []) {
   if (!Array.isArray(players) || players.length === 0) return { written: 0 };
 
@@ -483,22 +483,9 @@ export async function seedPlayersToGlobal(players = []) {
     idByIdentity.set(identityForWrite(row), d.id);
   });
 
-  // Batch rotation helpers
-  const CHUNK = 400;
-  let batch = writeBatch(db);
-  let ops = 0;
-  const commitRotate = async () => {
-    if (ops > 0) {
-      await batch.commit();
-      batch = writeBatch(db);
-      ops = 0;
-    }
-  };
-
-  let written = 0;
-
+  // Build all intended writes first (no batch yet)
+  const writes = [];
   for (const raw of players) {
-    // Normalize incoming minimal fields
     const espnId =
       raw.espnId ??
       raw.espn_id ??
@@ -512,7 +499,7 @@ export async function seedPlayersToGlobal(players = []) {
 
     const identity = identityForWrite({ ...raw, name, team, position, espnId });
 
-    // Pick target doc id: existing by identity if present; else deterministic new id
+    // Choose doc id: existing by identity if present; else deterministic new id
     let docId = idByIdentity.get(identity);
     if (!docId) {
       docId = espnId
@@ -524,9 +511,9 @@ export async function seedPlayersToGlobal(players = []) {
     const nextProjections = mergeProjections(prev.projections, raw.projections);
     const nextMatchups    = mergeMatchups(prev.matchups, raw.matchups);
 
-    batch.set(
-      doc(db, "players", docId),
-      {
+    writes.push({
+      docId,
+      data: {
         id: docId,
         name,
         position,
@@ -537,10 +524,9 @@ export async function seedPlayersToGlobal(players = []) {
         photo: photo || prev.photo || null,
         updatedAt: serverTimestamp(),
       },
-      { merge: true }
-    );
+    });
 
-    // Keep in-memory indexes consistent so duplicates within this run also collapse
+    // keep in-memory indexes consistent to collapse duplicates within this same import
     const merged = {
       ...prev,
       id: docId,
@@ -554,14 +540,19 @@ export async function seedPlayersToGlobal(players = []) {
     };
     existingById.set(docId, merged);
     idByIdentity.set(identity, docId);
-
-    ops += 1;
-    written += 1;
-    if (ops >= CHUNK) await commitRotate();
   }
 
-  await commitRotate();
-  return { written };
+  // Commit in fresh batches per chunk (no reuse-after-commit)
+  const CHUNK = 400;
+  for (let i = 0; i < writes.length; i += CHUNK) {
+    const batch = writeBatch(db);
+    for (const w of writes.slice(i, i + CHUNK)) {
+      batch.set(doc(db, "players", w.docId), w.data, { merge: true });
+    }
+    await batch.commit();
+  }
+
+  return { written: writes.length };
 }
 /* =========================================================
    PROJECTED & ACTUAL POINTS
