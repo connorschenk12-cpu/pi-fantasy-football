@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 // api/cron/backfill-headshots.js
-import { adminDb } from "@/src/lib/firebaseAdmin";
+import { adminDb } from "../../src/lib/firebaseAdmin.js";
 
 const SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl";
 
@@ -32,14 +32,30 @@ export default async function handler(req, res) {
     }
 
     // 1) Load Sleeper catalog
-    const sleeperResp = await fetch(SLEEPER_PLAYERS_URL, { cache: "no-store" });
+    let sleeperResp;
+    try {
+      sleeperResp = await fetch(SLEEPER_PLAYERS_URL, { cache: "no-store" });
+    } catch (err) {
+      console.error("backfill-headshots: Sleeper fetch failed:", err);
+      return res
+        .status(502)
+        .json({ ok: false, error: "Sleeper fetch failed", details: String(err) });
+    }
+
     if (!sleeperResp.ok) {
       const body = await sleeperResp.text().catch(() => "");
       return res
         .status(502)
-        .json({ ok: false, error: `Sleeper fetch failed (${sleeperResp.status})`, body });
+        .json({ ok: false, error: `Sleeper fetch ${sleeperResp.status}`, body });
     }
-    const sleeperMap = await sleeperResp.json(); // object keyed by player_id
+
+    let sleeperMap;
+    try {
+      sleeperMap = await sleeperResp.json();
+    } catch (err) {
+      console.error("backfill-headshots: invalid JSON from Sleeper:", err);
+      return res.status(502).json({ ok: false, error: "invalid Sleeper JSON" });
+    }
 
     // Build quick lookup by (name|team|pos)
     const byKey = new Map();
@@ -60,12 +76,8 @@ export default async function handler(req, res) {
       const ps = norm(p.position);
       const exact = byKey.get(`${nm}|${tm}|${ps}`);
       if (exact) return exact;
-
-      // fallback: ignore position if needed
       const loose = byKey.get(`${nm}|${tm}|`);
       if (loose) return loose;
-
-      // last resort: name only
       for (const [k, v] of byKey.entries()) {
         if (k.startsWith(`${nm}|`)) return v;
       }
@@ -74,9 +86,9 @@ export default async function handler(req, res) {
 
     // 2) Update GLOBAL players collection
     const globalSnap = await adminDb.collection("players").get();
-    let updated = 0,
-      already = 0,
-      total = globalSnap.size;
+    let updated = 0;
+    let already = 0;
+    const total = globalSnap.size;
 
     let batch = adminDb.batch();
     let ops = 0;
@@ -84,7 +96,6 @@ export default async function handler(req, res) {
     for (const doc of globalSnap.docs) {
       const p = doc.data() || {};
 
-      // If any photo field already present, skip
       const hasPhoto =
         p.headshotUrl || p.photo || p.photoUrl || p.photoURL || p.imageUrl || p.image || p.headshot;
       if (hasPhoto) {
@@ -95,7 +106,6 @@ export default async function handler(req, res) {
       let espnId = p.espnId || p.espn_id;
       let headshotUrl = null;
 
-      // Try to resolve via Sleeper
       const match = matchSleeper(p);
       if (match) {
         if (!espnId && match.espn_id) espnId = String(match.espn_id);
@@ -105,13 +115,12 @@ export default async function handler(req, res) {
       if (espnId || headshotUrl) {
         batch.update(doc.ref, {
           ...(espnId ? { espnId } : {}),
-          ...(headshotUrl ? { headshotUrl, photo: headshotUrl } : {}), // write to both common fields
+          ...(headshotUrl ? { headshotUrl, photo: headshotUrl } : {}),
           updatedAt: new Date(),
         });
         ops++;
         updated++;
 
-        // Commit in chunks to stay under Firestore limits
         if (ops >= 400) {
           await batch.commit();
           batch = adminDb.batch();
@@ -121,7 +130,7 @@ export default async function handler(req, res) {
     }
     if (ops > 0) await batch.commit();
 
-    // 3) Also touch league-scoped players (optional; safe to keep)
+    // 3) Also touch league-scoped players (optional)
     const leaguesSnap = await adminDb.collection("leagues").get();
     let leagueDocsTouched = 0;
 
@@ -181,7 +190,7 @@ export default async function handler(req, res) {
       leagueDocsTouched,
     });
   } catch (err) {
-    console.error("backfill-headshots error:", err);
+    console.error("backfill-headshots top-level error:", err);
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
