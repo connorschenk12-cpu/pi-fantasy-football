@@ -2,362 +2,258 @@
 // src/components/MyTeam.js
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  ROSTER_SLOTS,
+  emptyRoster,
   listenLeague,
   listenTeam,
   listPlayersMap,
-  computeTeamPoints,
-  projForWeek,
-  opponentForWeek,
-  fetchWeekStats,
+  headshotUrlFor,
+  asId,
+  allowedSlotsForPlayer,
   moveToStarter,
   moveToBench,
   releasePlayerAndClearSlot,
-  allowedSlotsForPlayer,
-  ROSTER_SLOTS,
-  hasPaidEntry,
-  leagueIsFree,
-  payEntry, // sandbox flagging after Pi payment
+  fetchWeekStats,
+  computeTeamPoints,
+  projForWeek,
+  opponentForWeek,
 } from "../lib/storage.js";
 
-// NEW: pretty badge with headshot
-import PlayerBadge from "./common/PlayerBadge";
-
-// Pi helper
-function getPi() {
-  if (typeof window !== "undefined" && window.Pi && typeof window.Pi.init === "function") {
-    return window.Pi;
-  }
-  return null;
-}
-
-export default function MyTeam({ leagueId, username, currentWeek = 1 }) {
+export default function MyTeam({ leagueId, username }) {
   const [league, setLeague] = useState(null);
-  const [team, setTeam] = useState(null);
+  const [team, setTeam] = useState({ roster: emptyRoster(), bench: [] });
   const [playersMap, setPlayersMap] = useState(new Map());
   const [statsMap, setStatsMap] = useState(new Map());
-  const [loading, setLoading] = useState(true);
-  const [acting, setActing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [week, setWeek] = useState(1);
 
-  // subscribe league + my team
+  // load league (for currentWeek)
   useEffect(() => {
     if (!leagueId) return;
-    const unsubLeague = listenLeague(leagueId, (L) => setLeague(L));
-    const unsubTeam = listenTeam({ leagueId, username, onChange: setTeam });
-    return () => {
-      unsubLeague && unsubLeague();
-      unsubTeam && unsubTeam();
-    };
-  }, [leagueId, username]);
-
-  // load players map
-  useEffect(() => {
-    let live = true;
-    (async () => {
-      try {
-        const map = await listPlayersMap({ leagueId });
-        if (live) setPlayersMap(map || new Map());
-      } catch (e) {
-        console.error("listPlayersMap:", e);
-      } finally {
-        if (live) setLoading(false);
-      }
-    })();
-    return () => {
-      live = false;
-    };
+    return listenLeague(leagueId, (L) => {
+      setLeague(L);
+      const w = Number(L?.settings?.currentWeek || 1);
+      setWeek(w);
+    });
   }, [leagueId]);
 
-  const week = Number(currentWeek || 1);
-
-  // fetch weekly stats (serverless endpoint -> Map)
+  // load my team
   useEffect(() => {
-    let live = true;
+    if (!leagueId || !username) return;
+    return listenTeam({ leagueId, username, onChange: (T) => setTeam(T || { roster: emptyRoster(), bench: [] }) });
+  }, [leagueId, username]);
+
+  // load global players map
+  useEffect(() => {
+    let mounted = true;
     (async () => {
       try {
-        const map = await fetchWeekStats({ leagueId, week });
-        if (live) setStatsMap(map || new Map());
+        const map = await listPlayersMap();
+        if (mounted) setPlayersMap(map);
       } catch (e) {
-        console.warn("fetchWeekStats failed:", e);
-        if (live) setStatsMap(new Map()); // fall back gracefully
+        console.error("listPlayersMap failed:", e);
       }
     })();
-    return () => {
-      live = false;
-    };
+    return () => { mounted = false; };
+  }, []);
+
+  // fetch live stats for week (optional; safe if empty)
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const sm = await fetchWeekStats({ leagueId, week });
+        if (mounted) setStatsMap(sm);
+      } catch (e) {
+        console.warn("fetchWeekStats:", e);
+      }
+    })();
+    return () => { mounted = false; };
   }, [leagueId, week]);
 
-  // compute totals with stats
-  const points = useMemo(() => {
-    if (!team) return { lines: [], total: 0 };
-    return computeTeamPoints({
-      roster: team?.roster || {},
-      week,
-      playersMap,
-      statsMap,
+  const roster = team?.roster || emptyRoster();
+  const bench = Array.isArray(team?.bench) ? team.bench : [];
+
+  const lineup = useMemo(() => {
+    return ROSTER_SLOTS.map((slot) => {
+      const pid = asId(roster[slot]);
+      const p = pid ? playersMap.get(pid) : null;
+      const photo = p ? headshotUrlFor(p) : null;
+      const projected = p ? projForWeek(p, week) : 0;
+      const opp = p ? opponentForWeek(p, week) : "";
+      return { slot, pid, p, photo, projected, opp };
     });
-  }, [team, playersMap, statsMap, week]);
+  }, [roster, playersMap, week]);
 
-  const entryRequired = useMemo(() => !leagueIsFree(league), [league]);
-  const alreadyPaid = useMemo(() => hasPaidEntry(league, username), [league, username]);
+  const benchRows = useMemo(() => {
+    return bench.map((pid) => {
+      const p = playersMap.get(asId(pid));
+      const photo = p ? headshotUrlFor(p) : null;
+      const projected = p ? projForWeek(p, week) : 0;
+      const opp = p ? opponentForWeek(p, week) : "";
+      return { pid: asId(pid), p, photo, projected, opp };
+    });
+  }, [bench, playersMap, week]);
 
-  const draftStatus = league?.draft?.status || "scheduled";
-  const draftDone = draftStatus === "done";
+  const totals = useMemo(() => {
+    return computeTeamPoints({ roster, week, playersMap, statsMap });
+  }, [roster, week, playersMap, statsMap]);
 
-  async function handleMoveToStarter(pid, slot) {
-    setActing(true);
+  async function toStarter(pid, slot) {
+    if (!leagueId || !username || !pid || !slot) return;
+    setSaving(true);
     try {
-      await moveToStarter({ leagueId, username, playerId: pid, slot });
+      const p = playersMap.get(asId(pid));
+      await moveToStarter({ leagueId, username, playerId: pid, slot, playerPosition: p?.position });
     } catch (e) {
       console.error(e);
       alert(e?.message || String(e));
     } finally {
-      setActing(false);
+      setSaving(false);
     }
   }
 
-  async function handleMoveToBench(slot) {
-    setActing(true);
+  async function toBench(slot) {
+    if (!leagueId || !username || !slot) return;
+    setSaving(true);
     try {
       await moveToBench({ leagueId, username, slot });
     } catch (e) {
       console.error(e);
       alert(e?.message || String(e));
     } finally {
-      setActing(false);
+      setSaving(false);
     }
   }
 
-  async function handleRelease(pid) {
-    if (!window.confirm("Release this player from your team?")) return;
-    setActing(true);
+  async function release(pid) {
+    if (!leagueId || !username || !pid) return;
+    if (!confirm("Release this player?")) return;
+    setSaving(true);
     try {
       await releasePlayerAndClearSlot({ leagueId, username, playerId: pid });
     } catch (e) {
       console.error(e);
       alert(e?.message || String(e));
     } finally {
-      setActing(false);
+      setSaving(false);
     }
   }
-
-  // 🔑 Pay league dues via Pi
-  async function handlePayDues() {
-    try {
-      const Pi = getPi();
-      if (!Pi) {
-        alert("Pi SDK not found. Open this app in Pi Browser (sandbox).");
-        return;
-      }
-      try {
-        await Pi.authenticate(["username", "payments"], (payment) =>
-          console.log("incompletePayment", payment)
-        );
-      } catch (e) {
-        console.warn("Re-auth for payments scope failed:", e);
-        alert("We need the Pi payments permission to continue.");
-        return;
-      }
-      const amount = Number(league?.entry?.amountPi || 0);
-      if (!amount) {
-        alert("No league dues amount set.");
-        return;
-      }
-      const memo = `League ${leagueId} entry for @${username}`;
-      await Pi.createPayment(
-        { amount, memo, metadata: { leagueId, username } },
-        {
-          onReadyForServerApproval: (paymentId) => console.log("onReadyForServerApproval", paymentId),
-          onReadyForServerCompletion: (paymentId, txId) =>
-            console.log("onReadyForServerCompletion", paymentId, txId),
-          onCancel: (paymentId) => console.log("Payment cancelled", paymentId),
-          onError: (error, paymentId) => {
-            console.error("Payment error", paymentId, error);
-            alert(error?.message || String(error));
-          },
-        }
-      );
-      await payEntry({ leagueId, username, txId: "pi-sandbox" });
-      alert("Payment recorded (sandbox). Thanks!");
-    } catch (e) {
-      console.error("handlePayDues error:", e);
-      alert(e?.message || String(e));
-    }
-  }
-
-  function lineFor(slot) {
-    return points.lines.find((l) => l.slot === slot) || {
-      slot,
-      playerId: null,
-      player: null,
-      actual: 0,
-      projected: 0,
-      points: 0,
-    };
-  }
-
-  if (loading || !league || !team) {
-    return <div className="container">Loading your team…</div>;
-  }
-
-  const benchIds = Array.isArray(team?.bench) ? team.bench : [];
-  const roster = team?.roster || {};
-  const showPaymentCTA = entryRequired && !alreadyPaid;
-  const amountPi = Number(league?.entry?.amountPi || 0);
 
   return (
     <div className="container">
-      {/* Debug marker */}
-      <div className="ribbon ribbon-info mb12">
-        <b>MyTeam v3 marker:</b> if you can see this box, the latest MyTeam.js is LIVE.
-      </div>
-
       <div className="header">
-        <h3 className="m0">{team?.name || username}</h3>
-        <div className="badge">Week {week} • Total {points.total.toFixed(1)}</div>
+        <h3 className="m0">My Team</h3>
+        <div className="row gap8 ai-center">
+          <span className="badge">Week {week}</span>
+          <span className="badge">Projected Total: {totals.total}</span>
+        </div>
       </div>
-
-      {!leagueIsFree(league) && (
-        <div className="muted mb12">
-          Current prize pool:{" "}
-          <b>{Number(league?.treasury?.poolPi || 0).toFixed(2)} Pi</b>{" "}
-          · Rake:{" "}
-          <b>{((Number(league?.entry?.rakeBps || 0)) / 100).toFixed(2)}%</b>
-        </div>
-      )}
-
-      {showPaymentCTA && (
-        <div className="ribbon ribbon-warn mb12">
-          <div className="ribbon-title">Entry Fee Due</div>
-          <div className="ribbon-body">
-            <div className="mb8"><b>Amount:</b> {amountPi.toFixed(2)} Pi</div>
-            <button className="btn btn-primary" onClick={handlePayDues}>Pay League Dues</button>
-          </div>
-        </div>
-      )}
 
       {/* Starters */}
       <div className="card mb12">
         <div className="card-title">Starters</div>
-        <div className="table-wrap">
-          <table className="table lineup">
-            <thead>
-              <tr>
-                <th className="slot">Slot</th>
-                <th className="player">Player</th>
-                <th>Opp</th>
-                <th style={{ textAlign: "right" }}>Proj</th>
-                <th style={{ textAlign: "right" }}>Actual</th>
-                <th style={{ textAlign: "right" }}>Pts</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ROSTER_SLOTS.map((slot) => {
-                const pid = roster[slot] || null;
-                const p = pid ? playersMap.get(String(pid)) : null;
-                const line = lineFor(slot);
-                const proj = p ? projForWeek(p, week) : 0;
-                const actual = line.actual || 0;
-                const opp = p ? opponentForWeek(p, week) : "";
-
-                return (
-                  <tr key={slot}>
-                    <td className="slot"><b>{slot}</b></td>
-                    <td className="player">
-                      {p ? (
-                        <>
-                          <PlayerBadge player={p} right={opp ? `vs ${opp}` : ""} />
-                          <span className="player-sub">
-                            {(p.team || "-")}{p.position ? ` • ${p.position}` : ""}
-                          </span>
-                        </>
-                      ) : (
-                        <span className="muted">(empty)</span>
-                      )}
-                    </td>
-                    <td>{opp || "—"}</td>
-                    <td style={{ textAlign: "right" }}>{proj.toFixed(1)}</td>
-                    <td style={{ textAlign: "right" }}>{actual ? actual.toFixed(1) : "—"}</td>
-                    <td style={{ textAlign: "right" }}>{Number(line.points || 0).toFixed(1)}</td>
-                    <td>
-                      {p ? (
-                        <div className="btnbar">
-                          <button className="btn btn-ghost" disabled={acting} onClick={() => handleMoveToBench(slot)}>Bench</button>
-                          <button className="btn btn-danger" disabled={acting} onClick={() => handleRelease(pid)}>Release</button>
-                        </div>
-                      ) : <span className="muted">—</span>}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="list">
+          {lineup.map(({ slot, pid, p, photo, projected, opp }) => (
+            <div key={slot} className="row ai-center gap12 py8 bb">
+              <div style={{ width: 44 }} className="badge">{slot}</div>
+              {p ? (
+                <>
+                  <img
+                    src={photo || "/avatar.png"}
+                    alt={p.name}
+                    width={44}
+                    height={44}
+                    style={{ borderRadius: 6, objectFit: "cover", background: "#f2f2f2" }}
+                  />
+                  <div className="col grow">
+                    <div className="row gap8 wrap">
+                      <b>{p.name}</b>
+                      <span className="badge">{p.position}</span>
+                      <span className="badge">{p.team}</span>
+                      {!!opp && <span className="badge">vs {opp}</span>}
+                    </div>
+                  </div>
+                  <div className="row gap12 ai-center">
+                    <div className="muted">Proj: <b>{projected}</b></div>
+                    <button
+                      className="btn"
+                      disabled={saving}
+                      onClick={() => toBench(slot)}
+                    >
+                      Bench
+                    </button>
+                    <button
+                      className="btn btn-danger"
+                      disabled={saving}
+                      onClick={() => release(pid)}
+                    >
+                      Release
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="col grow muted">— empty —</div>
+              )}
+            </div>
+          ))}
         </div>
       </div>
 
       {/* Bench */}
       <div className="card">
         <div className="card-title">Bench</div>
-        {benchIds.length === 0 ? (
-          <div className="muted">No one on the bench.</div>
+        {benchRows.length === 0 ? (
+          <div className="muted">No bench players yet.</div>
         ) : (
-          <div className="table-wrap">
-            <table className="table lineup">
-              <thead>
-                <tr>
-                  <th className="player">Player</th>
-                  <th>Allowed Slots</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {benchIds.map((pid) => {
-                  const p = playersMap.get(String(pid));
-                  if (!p) {
-                    return (
-                      <tr key={pid}>
-                        <td colSpan={3} style={{ color: "crimson" }}>
-                          Unknown player id on bench: {String(pid)}
-                        </td>
-                      </tr>
-                    );
-                  }
-                  const allowed = allowedSlotsForPlayer(p);
-                  return (
-                    <tr key={pid}>
-                      <td className="player">
-                        <PlayerBadge player={p} />
-                        <span className="player-sub">
-                          {(p.team || "-")}{p.position ? ` • ${p.position}` : ""}
-                        </span>
-                      </td>
-                      <td>{allowed.length ? allowed.join(", ") : "—"}</td>
-                      <td>
-                        <div className="btnbar">
-                          {allowed.map((slot) => (
-                            <button
-                              key={slot}
-                              className="btn btn-primary"
-                              disabled={acting}
-                              onClick={() => handleMoveToStarter(pid, slot)}
-                            >
-                              Start at {slot}
-                            </button>
-                          ))}
-                          <button
-                            className="btn btn-danger"
-                            disabled={acting}
-                            onClick={() => handleRelease(pid)}
-                          >
-                            Release
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="list">
+            {benchRows.map(({ pid, p, photo, projected, opp }) => {
+              if (!p) return null;
+              const legalSlots = allowedSlotsForPlayer(p);
+              return (
+                <div key={pid} className="row ai-center gap12 py8 bb">
+                  <img
+                    src={photo || "/avatar.png"}
+                    alt={p.name}
+                    width={44}
+                    height={44}
+                    style={{ borderRadius: 6, objectFit: "cover", background: "#f2f2f2" }}
+                  />
+                  <div className="col grow">
+                    <div className="row gap8 wrap">
+                      <b>{p.name}</b>
+                      <span className="badge">{p.position}</span>
+                      <span className="badge">{p.team}</span>
+                      {!!opp && <span className="badge">vs {opp}</span>}
+                    </div>
+                  </div>
+                  <div className="row gap8 ai-center">
+                    <div className="muted">Proj: <b>{projected}</b></div>
+                    <select
+                      className="input"
+                      disabled={saving}
+                      defaultValue=""
+                      onChange={(e) => {
+                        const slot = e.target.value;
+                        if (slot) toStarter(pid, slot);
+                      }}
+                    >
+                      <option value="">Start in…</option>
+                      {legalSlots.map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                    <button
+                      className="btn btn-danger"
+                      disabled={saving}
+                      onClick={() => release(pid)}
+                    >
+                      Release
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
