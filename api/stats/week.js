@@ -1,7 +1,10 @@
 // /api/stats/week.js
 // Returns live/week player stats collapsed by player (PPR computed).
-// Query: ?week=1&season=2025&seasontype=2
-// Default: seasontype=2 (regular). We auto-detect current season if not provided.
+// Query: ?week=1&season=2025&seasontype=2 (defaults: season=current year, seasontype=2 regular)
+
+export const config = {
+  maxDuration: 60, // give the function enough time on Vercel
+};
 
 const PPR = {
   passYds: 0.04,
@@ -15,7 +18,7 @@ const PPR = {
   fumbles: -2,
 };
 
-function n(v) { return v == null ? 0 : Number(v) || 0; }
+const n = (v) => (v == null ? 0 : Number(v) || 0);
 
 function computePoints(row) {
   return Math.round((
@@ -31,30 +34,51 @@ function computePoints(row) {
   ) * 10) / 10;
 }
 
+/** Tiny retry helper for flaky ESPN calls */
+async function fetchJson(url, where, tries = 2) {
+  let lastErr;
+  for (let i = 0; i < Math.max(1, tries); i++) {
+    try {
+      const r = await fetch(url, {
+        cache: "no-store",
+        headers: { "x-espn-site-app": "sports" },
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => "");
+        throw new Error(`fetch ${where} ${r.status}: ${t.slice(0, 200)}`);
+      }
+      return await r.json();
+    } catch (e) {
+      lastErr = e;
+      // brief jittered backoff
+      if (i < tries - 1) await new Promise((res) => setTimeout(res, 150 + Math.random() * 250));
+    }
+  }
+  throw lastErr || new Error(`fetch failed @ ${where}`);
+}
+
 /**
  * Normalize a single ESPN "boxscore player" into our compact stat row.
- * We key by multiple ids client-side already; here we expose:
- * - id: ESPN athlete id as string
- * - nameTeamKey: "NAME|TEAM" for extra matching (uppercased)
+ * Emits:
+ *  - id: ESPN athlete id (string)
+ *  - nameTeamKey: "NAME|TEAM" (uppercased) for loose matching
  */
 function normalizePlayerStat(p, teamAbbr) {
-  // ESPN offensive stats live under various aggregates; we unify the common ones.
   const athlete = p?.athlete;
   const id = athlete?.id != null ? String(athlete.id) : null;
 
-  // Basic name
   const name = (athlete?.displayName || "").toUpperCase().trim();
   const team = (teamAbbr || athlete?.team?.abbreviation || "").toUpperCase().trim();
   const nameTeamKey = name && team ? `${name}|${team}` : null;
 
-  // Split stats are arrays like [{name:"Passing Yards", abbreviation:"YDS", value: 245}, ...]
-  // ESPN groups by categories (e.g., "passing", "rushing", "receiving", "fumbles")
   const cats = Array.isArray(p?.statistics) ? p.statistics : [];
 
   const grab = (groupName, abbr) => {
     const g = cats.find(c => (c?.name || "").toLowerCase() === groupName);
     if (!g || !Array.isArray(g?.stats)) return 0;
-    const s = g.stats.find(s => (s?.shortDisplayName === abbr) || (s?.abbreviation === abbr) || (s?.name === abbr));
+    const s = g.stats.find(s =>
+      s?.shortDisplayName === abbr || s?.abbreviation === abbr || s?.name === abbr
+    );
     return s?.value != null ? Number(s.value) : 0;
   };
 
@@ -69,7 +93,6 @@ function normalizePlayerStat(p, teamAbbr) {
   const recTD   = grab("receiving", "TD");
   const rec     = grab("receiving", "REC");
 
-  // fumbles are typically in "fumbles" group under "LOST"
   const fumbles = grab("fumbles", "LOST");
 
   const row = { passYds, passTD, passInt, rushYds, rushTD, recYds, recTD, rec, fumbles };
@@ -78,46 +101,59 @@ function normalizePlayerStat(p, teamAbbr) {
 
 export default async function handler(req, res) {
   try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    const base = `http://${req.headers.host}`;
+    const url = new URL(req.url, base);
+
     const weekParam = Number(url.searchParams.get("week"));
     const season = Number(url.searchParams.get("season")) || new Date().getFullYear();
-    const seasontype = Number(url.searchParams.get("seasontype")) || 2; // 2=regular, 3=post
+    let seasontype = Number(url.searchParams.get("seasontype"));
+    seasontype = [1, 2, 3].includes(seasontype) ? seasontype : 2; // 1=pre, 2=reg, 3=post
 
     if (!Number.isFinite(weekParam) || weekParam <= 0) {
       return res.status(400).json({ error: "week is required (e.g., ?week=3)" });
     }
 
-    // 1) Get all games for the week
-    const scoreboard = `https://site.api.espn.com/apis/v2/sports/football/nfl/scoreboard?week=${weekParam}&seasontype=${seasontype}&season=${season}`;
-    const sc = await fetch(scoreboard, { headers: { "x-espn-site-app": "sports" } });
-    if (!sc.ok) return res.status(502).json({ error: "ESPN scoreboard fetch failed" });
-    const scJson = await sc.json();
+    // 1) Scoreboard for the requested week
+    const sbUrl = `https://site.api.espn.com/apis/v2/sports/football/nfl/scoreboard?week=${weekParam}&seasontype=${seasontype}&season=${season}`;
+    const scJson = await fetchJson(sbUrl, "scoreboard");
 
-    // 2) For each competition (game), pull boxscore
     const events = Array.isArray(scJson?.events) ? scJson.events : [];
     const compIds = [];
     for (const e of events) {
       const comps = Array.isArray(e?.competitions) ? e.competitions : [];
-      for (const c of comps) {
-        if (c?.id) compIds.push(String(c.id));
-      }
+      for (const c of comps) if (c?.id) compIds.push(String(c.id));
     }
 
-    // If no games, return empty
     if (compIds.length === 0) return res.status(200).json({ stats: {} });
 
-    // 3) Fetch boxscore per competition and accumulate player rows
+    // 2) Fetch boxscore per game and accumulate rows
     const statsById = new Map();
     const statsByNameTeam = new Map();
 
+    const applyMerge = (existing, add) => {
+      const merged = {
+        passYds: n(existing?.passYds) + n(add.passYds),
+        passTD:  n(existing?.passTD)  + n(add.passTD),
+        passInt: n(existing?.passInt) + n(add.passInt),
+        rushYds: n(existing?.rushYds) + n(add.rushYds),
+        rushTD:  n(existing?.rushTD)  + n(add.rushTD),
+        recYds:  n(existing?.recYds)  + n(add.recYds),
+        recTD:   n(existing?.recTD)   + n(add.recTD),
+        rec:     n(existing?.rec)     + n(add.rec),
+        fumbles: n(existing?.fumbles) + n(add.fumbles),
+      };
+      return { ...merged, points: computePoints(merged) };
+    };
+
     await Promise.all(compIds.map(async (cid) => {
       const boxUrl = `https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/competitions/${cid}/boxscore`;
-      const r = await fetch(boxUrl, { headers: { "x-espn-site-app": "sports" } });
-      if (!r.ok) return;
+      let json;
+      try {
+        json = await fetchJson(boxUrl, `boxscore:${cid}`);
+      } catch {
+        return; // skip game if boxscore fails
+      }
 
-      const json = await r.json();
-
-      // boxscore.teams: two entries, each has team.abbreviation and statistics.players
       const teams = Array.isArray(json?.boxscore?.teams) ? json.boxscore.teams : [];
       for (const t of teams) {
         const teamAbbr = t?.team?.abbreviation || t?.team?.shortDisplayName;
@@ -126,22 +162,6 @@ export default async function handler(req, res) {
         for (const player of players) {
           const norm = normalizePlayerStat(player, teamAbbr);
           if (!norm.id && !norm.nameTeamKey) continue;
-
-          // Merge (some players appear in multiple categories across the same game)
-          const applyMerge = (existing, add) => {
-            const merged = {
-              passYds: n(existing?.passYds) + n(add.passYds),
-              passTD:  n(existing?.passTD)  + n(add.passTD),
-              passInt: n(existing?.passInt) + n(add.passInt),
-              rushYds: n(existing?.rushYds) + n(add.rushYds),
-              rushTD:  n(existing?.rushTD)  + n(add.rushTD),
-              recYds:  n(existing?.recYds)  + n(add.recYds),
-              recTD:   n(existing?.recTD)   + n(add.recTD),
-              rec:     n(existing?.rec)     + n(add.rec),
-              fumbles: n(existing?.fumbles) + n(add.fumbles),
-            };
-            return { ...merged, points: computePoints(merged) };
-          };
 
           if (norm.id) {
             const prev = statsById.get(norm.id);
@@ -155,14 +175,11 @@ export default async function handler(req, res) {
       }
     }));
 
-    // 4) Ship a hybrid object:
-    //    - primary keys: ESPN athlete id
-    //    - also include NAME|TEAM keys for the looser matching you added
+    // 3) Output: primary by ESPN athlete id, plus NAME|TEAM keys for looser matching
     const out = {};
     for (const [id, row] of statsById.entries()) out[id] = row;
     for (const [key, row] of statsByNameTeam.entries()) {
-      // Avoid clobbering ids if key looks numeric
-      if (!out[key]) out[key] = row;
+      if (!(key in out)) out[key] = row; // don't overwrite numeric ids
     }
 
     res.status(200).json({ stats: out });
