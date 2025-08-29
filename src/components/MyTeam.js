@@ -21,16 +21,16 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   const [playersMap, setPlayersMap] = useState(new Map());
   const week = Number(currentWeek || 1);
 
+  // live team
   useEffect(() => {
     if (!leagueId || !username) return;
-    const unsub = listenTeam({
-      leagueId,
-      username,
-      onChange: (t) => setTeam(t || { roster: emptyRoster(), bench: [] }),
-    });
+    const unsub = listenTeam({ leagueId, username, onChange: (t) => {
+      setTeam(t || { roster: emptyRoster(), bench: [] });
+    }});
     return () => unsub && unsub();
   }, [leagueId, username]);
 
+  // players map
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -41,9 +41,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         console.error("listPlayersMap error:", e);
       }
     })();
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, []);
 
   const pById = (pid) => (pid ? playersMap.get(asId(pid)) : null);
@@ -82,7 +80,9 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   }
 
   async function doRelease(playerId) {
-    const ok = typeof window !== "undefined" ? window.confirm("Release this player?") : true;
+    const ok = typeof window !== "undefined"
+      ? window.confirm("Release this player?")
+      : true;
     if (!ok) return;
     try {
       await releasePlayerAndClearSlot({ leagueId, username, playerId });
@@ -114,25 +114,18 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
                   <>
                     <PlayerBadge player={player} />
                     <span className="player-sub">
-                      {(player.position || "-")}
-                      {player.team ? ` • ${player.team}` : ""}
+                      {(player.position || "-")}{player.team ? ` • ${player.team}` : ""}
                     </span>
                   </>
-                ) : (
-                  <span style={{ color: "#888" }}>— empty —</span>
-                )}
+                ) : <span style={{ color: "#888" }}>— empty —</span>}
               </td>
               <td>{opp || "-"}</td>
               <td className="num">{projected ? projected.toFixed(1) : "0.0"}</td>
               <td>
                 {player ? (
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button className="btn" onClick={() => doBench(slot)}>
-                      Bench
-                    </button>
-                    <button className="btn btn-danger" onClick={() => doRelease(pid)}>
-                      Release
-                    </button>
+                    <button className="btn" onClick={() => doBench(slot)}>Bench</button>
+                    <button className="btn btn-danger" onClick={() => doRelease(pid)}>Release</button>
                   </div>
                 ) : (
                   <span style={{ color: "#999" }}>—</span>
@@ -155,37 +148,32 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </thead>
         <tbody>
           {benchPlayers.map((bp) => {
+            // normalize PK → K
             const posRaw = String(bp?.position || "").toUpperCase();
-            const pos = posRaw === "PK" ? "K" : posRaw; // treat PK as K
+            const pos = posRaw === "PK" ? "K" : posRaw;
 
             const slotOptions = (() => {
               switch (pos) {
-                case "QB":
-                  return ["QB"];
-                case "RB":
-                  return ["RB1", "RB2", "FLEX"];
-                case "WR":
-                  return ["WR1", "WR2", "FLEX"];
-                case "TE":
-                  return ["TE", "FLEX"];
-                case "K":
-                  return ["K"];
-                case "DEF":
-                  return ["DEF"];
-                default:
-                  return ["FLEX"];
+                case "QB":  return ["QB"];
+                case "RB":  return ["RB1", "RB2", "FLEX"];
+                case "WR":  return ["WR1", "WR2", "FLEX"];
+                case "TE":  return ["TE", "FLEX"];
+                case "K":   return ["K"];
+                case "DEF": return ["DEF"];
+                default:    return ["FLEX"];
               }
             })();
 
             const legalTargets = slotOptions.filter((slot) => {
-              if (slot === "QB") return pos === "QB";
-              if (slot === "RB1" || slot === "RB2") return pos === "RB";
-              if (slot === "WR1" || slot === "WR2") return pos === "WR";
-              if (slot === "TE") return pos === "TE";
-              if (slot === "K") return pos === "K"; // PK handled earlier
-              if (slot === "DEF") return pos === "DEF";
-              if (slot === "FLEX") return pos === "RB" || pos === "WR" || pos === "TE";
-              return false;
+              if (slot.startsWith("RB")) return pos === "RB";
+              if (slot.startsWith("WR")) return pos === "WR";
+              return (
+                (slot === "QB"   && pos === "QB") ||
+                (slot === "TE"   && pos === "TE") ||
+                (slot === "K"    && pos === "K")  ||
+                (slot === "DEF"  && pos === "DEF")||
+                (slot === "FLEX" && (pos === "RB" || pos === "WR" || pos === "TE"))
+              );
             });
 
             return (
@@ -193,8 +181,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
                 <td>
                   <PlayerBadge player={bp} />
                   <span className="player-sub">
-                    {(bp.position || "-")}
-                    {bp.team ? ` • ${bp.team}` : ""}
+                    {(pos === "K" ? "K" : bp.position || "-")}{bp.team ? ` • ${bp.team}` : ""}
                   </span>
                 </td>
                 <td>{opponentForWeek(bp, week) || "-"}</td>
