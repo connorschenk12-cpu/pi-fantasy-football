@@ -16,6 +16,13 @@ import {
 } from "../lib/storage";
 import PlayerBadge from "./common/PlayerBadge";
 
+function normPos(p) {
+  const x = String(p || "").toUpperCase();
+  if (x === "PK") return "K";
+  if (x === "DST" || x === "D/ST" || x === "D-ST") return "DEF";
+  return x;
+}
+
 export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState({ roster: emptyRoster(), bench: [] });
   const [playersMap, setPlayersMap] = useState(new Map());
@@ -24,9 +31,13 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   // live team
   useEffect(() => {
     if (!leagueId || !username) return;
-    const unsub = listenTeam({ leagueId, username, onChange: (t) => {
-      setTeam(t || { roster: emptyRoster(), bench: [] });
-    }});
+    const unsub = listenTeam({
+      leagueId,
+      username,
+      onChange: (t) => {
+        setTeam(t || { roster: emptyRoster(), bench: [] });
+      },
+    });
     return () => unsub && unsub();
   }, [leagueId, username]);
 
@@ -41,7 +52,9 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         console.error("listPlayersMap error:", e);
       }
     })();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const pById = (pid) => (pid ? playersMap.get(asId(pid)) : null);
@@ -52,7 +65,8 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
       const player = pById(pid);
       const projected = player ? projForWeek(player, week) : 0;
       const opp = player ? opponentForWeek(player, week) : "";
-      return { slot, pid, player, projected, opp };
+      const pos = player ? normPos(player.position) : "-";
+      return { slot, pid, player, projected, opp, pos };
     });
   }, [team, playersMap, week]);
 
@@ -80,9 +94,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   }
 
   async function doRelease(playerId) {
-    const ok = typeof window !== "undefined"
-      ? window.confirm("Release this player?")
-      : true;
+    const ok = typeof window !== "undefined" ? window.confirm("Release this player?") : true;
     if (!ok) return;
     try {
       await releasePlayerAndClearSlot({ leagueId, username, playerId });
@@ -98,7 +110,8 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
       <table className="table wide-names">
         <thead>
           <tr>
-            <th style={{ width: 80 }}>Slot</th>
+            {/* make Slot column a bit narrower so names have room */}
+            <th style={{ width: 60 }}>Slot</th>
             <th>Player</th>
             <th>Opp</th>
             <th className="num">Proj (W{week})</th>
@@ -106,7 +119,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           </tr>
         </thead>
         <tbody>
-          {rosterLines.map(({ slot, pid, player, projected, opp }) => (
+          {rosterLines.map(({ slot, pid, player, projected, opp, pos }) => (
             <tr key={slot}>
               <td>{slot}</td>
               <td>
@@ -114,18 +127,24 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
                   <>
                     <PlayerBadge player={player} />
                     <span className="player-sub">
-                      {(player.position || "-")}{player.team ? ` • ${player.team}` : ""}
+                      {pos}{player.team ? ` • ${player.team}` : ""}
                     </span>
                   </>
-                ) : <span style={{ color: "#888" }}>— empty —</span>}
+                ) : (
+                  <span style={{ color: "#888" }}>— empty —</span>
+                )}
               </td>
               <td>{opp || "-"}</td>
               <td className="num">{projected ? projected.toFixed(1) : "0.0"}</td>
               <td>
                 {player ? (
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button className="btn" onClick={() => doBench(slot)}>Bench</button>
-                    <button className="btn btn-danger" onClick={() => doRelease(pid)}>Release</button>
+                    <button className="btn" onClick={() => doBench(slot)}>
+                      Bench
+                    </button>
+                    <button className="btn btn-danger" onClick={() => doRelease(pid)}>
+                      Release
+                    </button>
                   </div>
                 ) : (
                   <span style={{ color: "#999" }}>—</span>
@@ -148,19 +167,24 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </thead>
         <tbody>
           {benchPlayers.map((bp) => {
-            // normalize PK → K
-            const posRaw = String(bp?.position || "").toUpperCase();
-            const pos = posRaw === "PK" ? "K" : posRaw;
+            const pos = normPos(bp?.position);
 
             const slotOptions = (() => {
               switch (pos) {
-                case "QB":  return ["QB"];
-                case "RB":  return ["RB1", "RB2", "FLEX"];
-                case "WR":  return ["WR1", "WR2", "FLEX"];
-                case "TE":  return ["TE", "FLEX"];
-                case "K":   return ["K"];
-                case "DEF": return ["DEF"];
-                default:    return ["FLEX"];
+                case "QB":
+                  return ["QB"];
+                case "RB":
+                  return ["RB1", "RB2", "FLEX"];
+                case "WR":
+                  return ["WR1", "WR2", "FLEX"];
+                case "TE":
+                  return ["TE", "FLEX"];
+                case "K":
+                  return ["K"];
+                case "DEF":
+                  return ["DEF"];
+                default:
+                  return ["FLEX"];
               }
             })();
 
@@ -168,10 +192,10 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
               if (slot.startsWith("RB")) return pos === "RB";
               if (slot.startsWith("WR")) return pos === "WR";
               return (
-                (slot === "QB"   && pos === "QB") ||
-                (slot === "TE"   && pos === "TE") ||
-                (slot === "K"    && pos === "K")  ||
-                (slot === "DEF"  && pos === "DEF")||
+                (slot === "QB" && pos === "QB") ||
+                (slot === "TE" && pos === "TE") ||
+                (slot === "K" && pos === "K") ||
+                (slot === "DEF" && pos === "DEF") ||
                 (slot === "FLEX" && (pos === "RB" || pos === "WR" || pos === "TE"))
               );
             });
@@ -181,7 +205,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
                 <td>
                   <PlayerBadge player={bp} />
                   <span className="player-sub">
-                    {(pos === "K" ? "K" : bp.position || "-")}{bp.team ? ` • ${bp.team}` : ""}
+                    {pos}{bp.team ? ` • ${bp.team}` : ""}
                   </span>
                 </td>
                 <td>{opponentForWeek(bp, week) || "-"}</td>
