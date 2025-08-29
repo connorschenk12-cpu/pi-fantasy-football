@@ -1,15 +1,37 @@
 /* eslint-disable no-console */
 // src/server/cron/seedWeekProjections.js
-// Cursor-based, quota-safe projection filler. Call repeatedly with ?cursor=... until done.
+// Quota-safe, cursorable projection seeder. Call repeatedly until done.
+//
+// Usage:
+//   /api/cron?task=projections&week=1               (defaults: limit=80)
+//   /api/cron?task=projections&week=1&cursor=abc    (continue)
+//   /api/cron?task=projections&week=1&limit=50      (even slower)
 
 import { FieldPath } from "firebase-admin/firestore";
 
-const WRITE_BATCH_SIZE = 100;   // keep small to avoid write bursts
-const QUERY_LIMIT = 300;        // max docs per page (override via ?limit=)
-const SLEEP_BETWEEN_COMMITS_MS = 200;
-const MAX_RETRIES = 5;
+const DEFAULT_LIMIT = 80;              // small page to avoid spikes
+const MIN_LIMIT = 20;
+const MAX_LIMIT = 200;
+
+const SLEEP_READ_MS = 150;             // pause after each read page
+const SLEEP_AFTER_COMMIT_MS = 250;     // pause after each commit batch
+
+const MAX_RETRIES = 5;                 // backoff retries on RESOURCE_EXHAUSTED
+const BASE_BACKOFF_MS = 300;           // 300 -> 600 -> 1200 -> 2400 -> 4800 (+ jitter)
+
+const BASE = { QB: 15, RB: 12, WR: 11, TE: 8, K: 7, DEF: 6 };
+const posKey = (p) =>
+  String(p?.position || p?.pos || "").toUpperCase() || "WR";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const isQuotaErr = (e) => {
+  const msg = String(e?.message || e || "");
+  return (
+    e?.code === 8 ||                       // grpc RESOURCE_EXHAUSTED
+    msg.includes("RESOURCE_EXHAUSTED") ||
+    msg.toLowerCase().includes("quota")
+  );
+};
 
 async function withBackoff(fn, label = "op") {
   let attempt = 0;
@@ -18,97 +40,91 @@ async function withBackoff(fn, label = "op") {
     try {
       return await fn();
     } catch (e) {
-      const msg = String(e?.message || e);
-      const quota =
-        msg.includes("RESOURCE_EXHAUSTED") ||
-        msg.toLowerCase().includes("quota");
-      if (!quota || attempt >= MAX_RETRIES) throw e;
-      const delay = 250 * Math.pow(2, attempt); // 250, 500, 1000, 2000, 4000
-      console.warn(
-        `${label}: quota hit, retrying in ${delay}ms (attempt ${
-          attempt + 1
-        }/${MAX_RETRIES})`
-      );
+      if (!isQuotaErr(e) || attempt >= MAX_RETRIES) throw e;
+      const jitter = Math.floor(Math.random() * 100);
+      const delay = BASE_BACKOFF_MS * Math.pow(2, attempt) + jitter;
+      console.warn(`${label}: quota hit; retry in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
       await sleep(delay);
       attempt += 1;
     }
   }
 }
 
-const BASE = { QB: 15, RB: 12, WR: 11, TE: 8, K: 7, DEF: 6 };
-const posKey = (p) =>
-  String(p?.position || p?.pos || "").toUpperCase() || "WR";
+export async function seedWeekProjections({ adminDb, week, limit, cursor } = {}) {
+  if (!adminDb) throw new Error("adminDb required");
+  const w = Number(week);
+  if (!Number.isFinite(w) || w <= 0) {
+    return { ok: false, error: "week is required (?week=1..18)" };
+  }
 
-/**
- * Seed/patch projections for a given week:
- * - Only fills missing/zero values (won't clobber real numbers)
- * - Paginates by document ID using a cursor
- * - Throttles commits and retries on quota
- */
-export async function seedWeekProjections({
-  adminDb,
-  week,
-  limit,
-  cursor,
-} = {}) {
-    if (!adminDb) throw new Error("adminDb required");
-    const w = Number(week);
-    if (!Number.isFinite(w) || w <= 0)
-      return { ok: false, error: "week is required (?week=1..18)" };
+  const pageSize = Math.min(Math.max(Number(limit) || DEFAULT_LIMIT, MIN_LIMIT), MAX_LIMIT);
+  const field = String(w);
 
-    const pageSize = Math.min(Math.max(Number(limit) || QUERY_LIMIT, 50), 500);
+  // Build query (paged by documentId)
+  let q = adminDb
+    .collection("players")
+    .orderBy(FieldPath.documentId())
+    .limit(pageSize)
+    .select("position", "projections");
 
-    // Build paged query by document ID so we can resume via cursor
-    let q = adminDb
-      .collection("players")
-      .orderBy(FieldPath.documentId())
-      .limit(pageSize)
-      .select("position", "projections");
-    if (cursor) q = q.startAfter(String(cursor));
+  if (cursor) q = q.startAfter(String(cursor));
 
-    // Read one page
-    const snap = await withBackoff(() => q.get(), "projections-read");
-    const docs = snap.docs || [];
-    if (docs.length === 0) {
-      return { ok: true, week: w, updated: 0, done: true };
+  // Read one page (with backoff)
+  const snap = await withBackoff(() => q.get(), "projections.read");
+  const docs = snap.docs || [];
+  if (docs.length === 0) {
+    return { ok: true, week: w, updated: 0, page: 0, done: true };
+  }
+
+  // Decide which docs need a fill (only if missing/zero)
+  const patches = [];
+  for (const d of docs) {
+    const data = d.data() || {};
+    const existing =
+      (data.projections && data.projections[field]) ??
+      (data.projections && data.projections[w]);
+
+    if (existing != null && Number(existing) > 0) continue; // keep positive values
+
+    const base = BASE[posKey(data)] ?? BASE.WR;
+    patches.push({ ref: d.ref, patch: { [`projections.${field}`]: base } });
+  }
+
+  // Use BulkWriter for automatic throttled retries
+  const writer = adminDb.bulkWriter();
+  let updated = 0;
+  writer.onWriteError((err) => {
+    if (isQuotaErr(err)) {
+      const attempt = err.failedAttempts || 0;
+      const jitter = Math.floor(Math.random() * 100);
+      const delay = BASE_BACKOFF_MS * Math.pow(2, attempt) + jitter;
+      console.warn(`bulkWriter quota: retry in ${delay}ms (attempt ${attempt + 1})`);
+      return true; // let BulkWriter retry with its own backoff
     }
+    return false; // do not retry other errors
+  });
 
-    // Prepare patches (only fill missing/zero)
-    const field = String(w);
-    const toPatch = [];
-    for (const d of docs) {
-      const data = d.data() || {};
-      const existing =
-        (data.projections && data.projections[field]) ??
-        (data.projections && data.projections[w]);
-      if (existing != null && Number(existing) > 0) continue; // keep positive values
-      const base = BASE[posKey(data)] ?? BASE.WR;
-      toPatch.push({ ref: d.ref, patch: { [`projections.${field}`]: base } });
-    }
+  // Schedule writes
+  for (const { ref, patch } of patches) {
+    writer.set(ref, patch, { merge: true });
+  }
 
-    // Apply in very small commits
-    let updated = 0;
-    for (let i = 0; i < toPatch.length; i += WRITE_BATCH_SIZE) {
-      const chunk = toPatch.slice(i, i + WRITE_BATCH_SIZE);
-      if (chunk.length === 0) break;
-      const batch = adminDb.batch();
-      for (const { ref, patch } of chunk) {
-        batch.set(ref, patch, { merge: true });
-      }
-      await withBackoff(() => batch.commit(), "projections-write");
-      updated += chunk.length;
-      await sleep(SLEEP_BETWEEN_COMMITS_MS);
-    }
+  await withBackoff(() => writer.close(), "projections.write"); // flush all
+  updated = patches.length;
 
-    const lastDoc = docs[docs.length - 1];
-    const nextCursor = lastDoc?.id || null;
+  // Gentle sleeps to smooth traffic
+  await sleep(SLEEP_AFTER_COMMIT_MS);
+  await sleep(SLEEP_READ_MS);
 
-    return {
-      ok: true,
-      week: w,
-      updated,
-      page: docs.length,
-      nextCursor,
-      done: !nextCursor,
-    };
+  const lastDoc = docs[docs.length - 1];
+  const nextCursor = lastDoc?.id || null;
+
+  return {
+    ok: true,
+    week: w,
+    updated,
+    page: docs.length,
+    nextCursor,
+    done: !nextCursor,
+  };
 }
