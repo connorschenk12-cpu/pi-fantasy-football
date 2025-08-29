@@ -1,7 +1,5 @@
 // /api/stats/week.js
-// Returns live/week player stats collapsed by player (PPR computed).
-// Query: ?week=1&season=2025&seasontype=2
-// Default: seasontype=2 (regular). We auto-detect current season if not provided.
+/* eslint-disable no-console */
 
 const PPR = {
   passYds: 0.04,
@@ -16,40 +14,27 @@ const PPR = {
 };
 
 const n = (v) => (v == null ? 0 : Number(v) || 0);
+const points = (row) => Math.round((
+  n(row.passYds) * PPR.passYds +
+  n(row.passTD) * PPR.passTD +
+  n(row.passInt) * PPR.passInt +
+  n(row.rushYds) * PPR.rushYds +
+  n(row.rushTD) * PPR.rushTD +
+  n(row.recYds)  * PPR.recYds +
+  n(row.recTD)   * PPR.recTD +
+  n(row.rec)     * PPR.rec +
+  n(row.fumbles) * PPR.fumbles
+) * 10) / 10;
 
-function computePoints(row) {
-  return Math.round(
-    (
-      n(row.passYds) * PPR.passYds +
-      n(row.passTD) * PPR.passTD +
-      n(row.passInt) * PPR.passInt +
-      n(row.rushYds) * PPR.rushYds +
-      n(row.rushTD) * PPR.rushTD +
-      n(row.recYds) * PPR.recYds +
-      n(row.recTD) * PPR.recTD +
-      n(row.rec)    * PPR.rec +
-      n(row.fumbles)* PPR.fumbles
-    ) * 10
-  ) / 10;
-}
-
-// Safe fetch that returns null on 404/empty instead of throwing
-async function fetchJson(url, where) {
+async function fetchJson(url, label) {
   const r = await fetch(url, { headers: { "x-espn-site-app": "sports" }, cache: "no-store" });
-  if (r.status === 404) return null;
   if (!r.ok) {
-    const body = await r.text().catch(() => "");
-    throw new Error(`fetch ${where} ${r.status}: ${body.slice(0, 200)}`);
+    const t = await r.text().catch(() => "");
+    throw new Error(`${label} ${r.status}: ${t.slice(0,200)}`);
   }
   return r.json();
 }
 
-/**
- * Normalize a single ESPN "boxscore player" into our compact stat row.
- * We key by:
- *  - id: ESPN athlete id as string
- *  - nameTeamKey: "NAME|TEAM" for looser matching
- */
 function normalizePlayerStat(p, teamAbbr) {
   const athlete = p?.athlete || {};
   const id = athlete?.id != null ? String(athlete.id) : null;
@@ -58,123 +43,103 @@ function normalizePlayerStat(p, teamAbbr) {
   const team = (teamAbbr || athlete?.team?.abbreviation || "").toUpperCase().trim();
   const nameTeamKey = name && team ? `${name}|${team}` : null;
 
-  // stats groups come like: statistics: [{ name:'passing', stats:[{shortDisplayName:'YDS', value:...}, ...] }, ...]
   const cats = Array.isArray(p?.statistics) ? p.statistics : [];
-  const grab = (groupName, abbr) => {
-    const g = cats.find((c) => (c?.name || "").toLowerCase() === groupName);
+  const grab = (groupName, pred) => {
+    const g = cats.find(c => (c?.name || "").toLowerCase() === groupName);
     if (!g || !Array.isArray(g?.stats)) return 0;
-    const s = g.stats.find(
-      (s) =>
-        s?.shortDisplayName === abbr ||
-        s?.abbreviation === abbr ||
-        s?.name === abbr
+    const s = g.stats.find(s =>
+      pred(s?.shortDisplayName) || pred(s?.abbreviation) || pred(s?.name)
     );
     return s?.value != null ? Number(s.value) : 0;
   };
 
-  const passYds = grab("passing", "YDS");
-  const passTD  = grab("passing", "TD");
-  const passInt = grab("passing", "INT");
+  const passYds = grab("passing", v => v === "YDS");
+  const passTD  = grab("passing", v => v === "TD");
+  const passInt = grab("passing", v => v === "INT");
 
-  const rushYds = grab("rushing", "YDS");
-  const rushTD  = grab("rushing", "TD");
+  const rushYds = grab("rushing", v => v === "YDS");
+  const rushTD  = grab("rushing", v => v === "TD");
 
-  const recYds  = grab("receiving", "YDS");
-  const recTD   = grab("receiving", "TD");
-  const rec     = grab("receiving", "REC");
+  const recYds  = grab("receiving", v => v === "YDS");
+  const recTD   = grab("receiving", v => v === "TD");
+  const rec     = grab("receiving", v => v === "REC");
 
-  const fumbles = grab("fumbles", "LOST");
+  const fumbles = grab("fumbles", v => v === "LOST");
 
   const row = { passYds, passTD, passInt, rushYds, rushTD, recYds, recTD, rec, fumbles };
-  return { id, nameTeamKey, ...row, points: computePoints(row) };
+  return { id, nameTeamKey, ...row, points: points(row) };
 }
 
 export default async function handler(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const weekParam = Number(url.searchParams.get("week"));
+    const week = url.searchParams.get("week");
     const season = Number(url.searchParams.get("season")) || new Date().getFullYear();
-    const seasontype = Number(url.searchParams.get("seasontype")) || 2; // 2=regular, 3=post
+    const seasontype = Number(url.searchParams.get("seasontype")) || 2; // 2=regular
 
-    if (!Number.isFinite(weekParam) || weekParam <= 0) {
-      // For safety, return 200 with empty stats rather than 400 to avoid breaking clients
-      return res.status(200).json({ stats: {} });
-    }
+    // If week not provided, let ESPN pick the "current" week by omitting &week=
+    const sbUrl = week
+      ? `https://site.api.espn.com/apis/v2/sports/football/nfl/scoreboard?week=${encodeURIComponent(week)}&seasontype=${seasontype}&season=${season}`
+      : `https://site.api.espn.com/apis/v2/sports/football/nfl/scoreboard?seasontype=${seasontype}&season=${season}`;
 
-    // Correct endpoint: /apis/site/v2/...
-    const scoreboardUrl = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?week=${weekParam}&seasontype=${seasontype}&season=${season}`;
-    const scJson = await fetchJson(scoreboardUrl, "scoreboard");
-
-    // Off weeks or preseason gaps can 404 or return no events
-    const events = Array.isArray(scJson?.events) ? scJson.events : [];
-    if (!events.length) {
-      return res.status(200).json({ stats: {} });
-    }
+    const sb = await fetchJson(sbUrl, "scoreboard");
+    const events = Array.isArray(sb?.events) ? sb.events : [];
 
     const compIds = [];
     for (const e of events) {
       const comps = Array.isArray(e?.competitions) ? e.competitions : [];
       for (const c of comps) if (c?.id) compIds.push(String(c.id));
     }
-    if (!compIds.length) return res.status(200).json({ stats: {} });
+    if (compIds.length === 0) return res.status(200).json({ stats: {} });
 
     const statsById = new Map();
     const statsByNameTeam = new Map();
 
-    // helper to merge category fragments
-    const mergeRows = (a = {}, b = {}) => {
-      const merged = {
-        passYds: n(a.passYds) + n(b.passYds),
-        passTD:  n(a.passTD)  + n(b.passTD),
-        passInt: n(a.passInt) + n(b.passInt),
-        rushYds: n(a.rushYds) + n(b.rushYds),
-        rushTD:  n(a.rushTD)  + n(b.rushTD),
-        recYds:  n(a.recYds)  + n(b.recYds),
-        recTD:   n(a.recTD)   + n(b.recTD),
-        rec:     n(a.rec)     + n(b.rec),
-        fumbles: n(a.fumbles) + n(b.fumbles),
+    const merge = (a, b) => {
+      const m = {
+        passYds: n(a?.passYds) + n(b.passYds),
+        passTD:  n(a?.passTD)  + n(b.passTD),
+        passInt: n(a?.passInt) + n(b.passInt),
+        rushYds: n(a?.rushYds) + n(b.rushYds),
+        rushTD:  n(a?.rushTD)  + n(b.rushTD),
+        recYds:  n(a?.recYds)  + n(b.recYds),
+        recTD:   n(a?.recTD)   + n(b.recTD),
+        rec:     n(a?.rec)     + n(b.rec),
+        fumbles: n(a?.fumbles) + n(b.fumbles),
       };
-      return { ...merged, points: computePoints(merged) };
+      return { ...m, points: points(m) };
     };
 
-    await Promise.all(
-      compIds.map(async (cid) => {
-        const boxUrl = `https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/competitions/${cid}/boxscore`;
-        const json = await fetchJson(boxUrl, `boxscore:${cid}`);
-        if (!json) return;
+    await Promise.all(compIds.map(async (cid) => {
+      const boxUrl = `https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/competitions/${cid}/boxscore`;
+      const j = await fetchJson(boxUrl, "boxscore");
+      const teams = Array.isArray(j?.boxscore?.teams) ? j.boxscore.teams : [];
+      for (const t of teams) {
+        const teamAbbr = t?.team?.abbreviation || t?.team?.shortDisplayName;
+        const players = Array.isArray(t?.statistics?.players) ? t.statistics.players : [];
+        for (const player of players) {
+          const norm = normalizePlayerStat(player, teamAbbr);
+          if (!norm.id && !norm.nameTeamKey) continue;
 
-        const teams = Array.isArray(json?.boxscore?.teams) ? json.boxscore.teams : [];
-        for (const t of teams) {
-          const teamAbbr = t?.team?.abbreviation || t?.team?.shortDisplayName || "";
-          const players = Array.isArray(t?.statistics?.players) ? t.statistics.players : [];
-          for (const player of players) {
-            const norm = normalizePlayerStat(player, teamAbbr);
-            if (!norm.id && !norm.nameTeamKey) continue;
-
-            if (norm.id) {
-              const prev = statsById.get(norm.id);
-              statsById.set(norm.id, mergeRows(prev, norm));
-            }
-            if (norm.nameTeamKey) {
-              const prev = statsByNameTeam.get(norm.nameTeamKey);
-              statsByNameTeam.set(norm.nameTeamKey, mergeRows(prev, norm));
-            }
+          if (norm.id) {
+            const prev = statsById.get(norm.id);
+            statsById.set(norm.id, prev ? merge(prev, norm) : norm);
+          }
+          if (norm.nameTeamKey) {
+            const prev = statsByNameTeam.get(norm.nameTeamKey);
+            statsByNameTeam.set(norm.nameTeamKey, prev ? merge(prev, norm) : norm);
           }
         }
-      })
-    );
+      }
+    }));
 
     const out = {};
     for (const [id, row] of statsById.entries()) out[id] = row;
-    for (const [key, row] of statsByNameTeam.entries()) {
-      // Avoid clobbering if numeric
-      if (!out[key]) out[key] = row;
-    }
+    for (const [key, row] of statsByNameTeam.entries()) if (!out[key]) out[key] = row;
 
     res.status(200).json({ stats: out });
   } catch (err) {
-    // Don’t 500 your app if ESPN is flaky — log and return empty.
     console.error("week stats error:", err);
-    res.status(200).json({ stats: {} });
+    res.status(500).json({ error: "Internal error" });
   }
 }
