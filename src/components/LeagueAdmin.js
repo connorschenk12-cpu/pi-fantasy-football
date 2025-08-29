@@ -39,7 +39,7 @@ export default function LeagueAdmin({ leagueId, username }) {
     return listenLeague(leagueId, (L) => setLeague(L));
   }, [leagueId]);
 
-  // Load members list
+  // Load members
   useEffect(() => {
     if (!leagueId) return;
     (async () => {
@@ -51,7 +51,7 @@ export default function LeagueAdmin({ leagueId, username }) {
     })();
   }, [leagueId]);
 
-  // Seed form defaults when league loads/updates
+  // Seed form defaults
   useEffect(() => {
     if (!league) return;
     setEntryEnabled(!!league?.entry?.enabled);
@@ -70,9 +70,7 @@ export default function LeagueAdmin({ leagueId, username }) {
     }
   }, [league]);
 
-  if (!league) {
-    return <div className="container">Loading league settings…</div>;
-  }
+  if (!league) return <div className="container">Loading league settings…</div>;
 
   if (!isOwner) {
     return (
@@ -169,50 +167,28 @@ export default function LeagueAdmin({ leagueId, username }) {
     }
   }
 
-  // One-click: refresh global players (ESPN) + backfill headshots + dedupe
-  async function handleRefreshPlayersHeadshotsAndDedupe() {
+  // ONE BUTTON: truncate players, then re-seed from ESPN team rosters
+  async function handleTruncateAndRefresh() {
     setSaving(true);
-    const lines = [];
-    const write = (s) => lines.push(s);
+    try {
+      const headers =
+        process.env.REACT_APP_CRON_SECRET
+          ? { "x-cron-secret": process.env.REACT_APP_CRON_SECRET }
+          : {};
 
-    async function step(label, url, opts) {
-      try {
-        const r = await fetch(url, opts || {});
-        let bodyText = "";
-        try { bodyText = await r.text(); } catch (_) {}
-        write(`${label}: ${r.ok ? "ok" : "err"} (status ${r.status})${bodyText ? `\nbody: ${bodyText}` : ""}`);
-      } catch (e) {
-        write(`${label}: err (network)\n${String(e?.message || e)}`);
+      const r = await fetch("/api/cron/truncate-and-refresh", { headers });
+      const body = await r.json().catch(() => ({}));
+
+      if (!r.ok) {
+        alert(`Refresh failed (status ${r.status})\n${body?.error || ""}`);
+      } else {
+        alert(
+          `Refresh complete.\nDeleted: ${body.deleted ?? "?"}\nWritten: ${body.written ?? "?"}`
+        );
       }
-    }
-
-    try {
-      const authHeader = process.env.REACT_APP_CRON_SECRET
-        ? { "x-cron-secret": process.env.REACT_APP_CRON_SECRET }
-        : undefined;
-
-      await step("Players", "/api/cron/refresh-players-espn", authHeader ? { headers: authHeader } : undefined);
-      await step("Headshots", "/api/cron/backfill-headshots", authHeader ? { headers: authHeader } : undefined);
-      await step("Dedupe", "/api/tools/dedupe-players?apply=1");
-
-      const pre = document.getElementById("admin-data-maint-log");
-      if (pre) pre.textContent = lines.join("\n\n");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // Dedupe only
-  async function handleDedupeOnly() {
-    setSaving(true);
-    try {
-      const r = await fetch("/api/tools/dedupe-players?apply=1");
-      const t = await r.text();
-      const pre = document.getElementById("admin-data-maint-log");
-      if (pre) pre.textContent = `Dedupe only: ${r.ok ? "ok" : "err"} (status ${r.status})\n\n${t}`;
-    } catch (e) {
-      const pre = document.getElementById("admin-data-maint-log");
-      if (pre) pre.textContent = `Dedupe only: err\n${String(e?.message || e)}`;
+    } catch (err) {
+      console.error("truncate-and-refresh error:", err);
+      alert(err?.message || String(err));
     } finally {
       setSaving(false);
     }
@@ -236,7 +212,7 @@ export default function LeagueAdmin({ leagueId, username }) {
         </div>
       </div>
 
-      {/* League summary */}
+      {/* Overview */}
       <div className="card mb12">
         <div className="card-title">Overview</div>
         <div className="grid2">
@@ -283,14 +259,11 @@ export default function LeagueAdmin({ leagueId, username }) {
                 Save Draft Schedule
               </button>
             </div>
-            <div className="muted mt8">
-              When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code> and then <code>startDraft()</code>.
-            </div>
           </div>
         </div>
       )}
 
-      {/* Entry Settings — only visible while draft is still scheduled */}
+      {/* Entry Settings — only while draft is still scheduled */}
       {draftScheduled && (
         <div className="card mb12">
           <div className="card-title">Entry Settings</div>
@@ -328,42 +301,20 @@ export default function LeagueAdmin({ leagueId, username }) {
         </div>
       )}
 
-      {/* Data Maintenance — unified actions with live status */}
+      {/* Data Maintenance — single unified button */}
       <div className="card mb12">
         <div className="card-title">Data Maintenance</div>
-
         <div className="row gap12 ai-center">
-          <button
-            className="btn btn-primary"
-            disabled={saving}
-            onClick={handleRefreshPlayersHeadshotsAndDedupe}
-          >
-            Refresh Players + Headshots + Dedupe
+          <button className="btn btn-primary" disabled={saving} onClick={handleTruncateAndRefresh}>
+            Reset & Refresh Players (ESPN only)
           </button>
-
-          <button className="btn" disabled={saving} onClick={handleDedupeOnly}>
-            Dedupe Only
-          </button>
+          <div className="muted">
+            Clears <code>players</code> then reseeds from ESPN team rosters (includes headshots).
+          </div>
         </div>
-
-        <pre
-          id="admin-data-maint-log"
-          style={{
-            marginTop: 12,
-            background: "#0b1020",
-            color: "#d9e1ff",
-            padding: 12,
-            borderRadius: 6,
-            maxHeight: 240,
-            overflow: "auto",
-            whiteSpace: "pre-wrap",
-          }}
-        />
-
         <div className="muted mt8" style={{ lineHeight: 1.5 }}>
-          • Refresh pulls ESPN players (preserves good projections).<br />
-          • Headshots fills ESPN/Sleeper images and missing ESPN IDs.<br />
-          • Dedupe merges dupes (ESPN ID first; else name|team|pos) and deletes extras.
+          • One-time cleanup to remove duplicates and unify IDs.<br/>
+          • After this, keep your daily job pointed at ESPN-only refresh.
         </div>
       </div>
 
@@ -450,11 +401,6 @@ export default function LeagueAdmin({ leagueId, username }) {
           >
             Run Payout Settlement
           </button>
-        </div>
-        <div className="muted mt8" style={{ lineHeight: 1.5 }}>
-          • When <b>Week ≥ 18</b> or <b>Season Ended = Yes</b>, the daily cron will settle the league.<br />
-          • Ensure all entry payments are recorded and <code>treasury.poolPi</code> is funded.<br />
-          • The cron enqueues payouts and calls your server to send Pi.
         </div>
       </div>
     </div>
