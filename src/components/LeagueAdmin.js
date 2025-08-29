@@ -169,38 +169,61 @@ export default function LeagueAdmin({ leagueId, username }) {
     }
   }
 
-  // ONE BUTTON: truncate existing players and seed from ESPN (teams + rosters)
-  async function handleTruncateAndRefresh() {
+  // ---------- NEW: unified cron endpoints ----------
+  async function callCron(task, qs = "") {
+    const url = `/api/cron?task=${encodeURIComponent(task)}${qs ? `&${qs}` : ""}`;
+    const r = await fetch(url, { method: "POST" }); // POST to avoid caches; GET would also work
+    const text = await r.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = text; }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async function handleRefreshPlayers() {
     setSaving(true);
     try {
-      const r = await fetch("/api/cron/truncate-and-refresh", { method: "POST" });
-      const text = await r.text();
-      let body;
-      try { body = JSON.parse(text); } catch { body = text; }
-
-      if (!r.ok) {
-        alert(
-          [
-            "Refresh failed",
-            `status ${r.status}`,
-            typeof body === "string" ? body : JSON.stringify(body)
-          ].join("\n")
-        );
-        return;
+      const { ok, status, body } = await callCron("refresh");
+      if (!ok) {
+        alert(`Refresh failed (status ${status})\n${typeof body === "string" ? body : JSON.stringify(body)}`);
+      } else {
+        alert(`Refresh complete!\n${JSON.stringify(body)}`);
       }
-
-      // Expecting shape { ok, deleted, written, countReceived, source }
-      alert(
-        [
-          "Refresh complete!",
-          `Deleted: ${body.deleted ?? "?"}`,
-          `Written: ${body.written ?? "?"}`,
-          `Received: ${body.countReceived ?? "?"}`,
-          `Source: ${body.source ?? "espn"}`
-        ].join("\n")
-      );
     } catch (err) {
-      console.error("truncate-and-refresh error:", err);
+      console.error("refresh error:", err);
+      alert(err?.message || String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleBackfillHeadshots() {
+    setSaving(true);
+    try {
+      const { ok, status, body } = await callCron("headshots");
+      if (!ok) {
+        alert(`Headshots failed (status ${status})\n${typeof body === "string" ? body : JSON.stringify(body)}`);
+      } else {
+        alert(`Headshots complete!\n${JSON.stringify(body)}`);
+      }
+    } catch (err) {
+      console.error("headshots error:", err);
+      alert(err?.message || String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDedupePlayers() {
+    setSaving(true);
+    try {
+      const { ok, status, body } = await callCron("dedupe");
+      if (!ok) {
+        alert(`Dedupe failed (status ${status})\n${typeof body === "string" ? body : JSON.stringify(body)}`);
+      } else {
+        alert(`Dedupe complete!\n${JSON.stringify(body)}`);
+      }
+    } catch (err) {
+      console.error("dedupe error:", err);
       alert(err?.message || String(err));
     } finally {
       setSaving(false);
@@ -273,7 +296,7 @@ export default function LeagueAdmin({ leagueId, username }) {
               </button>
             </div>
             <div className="muted mt8">
-              When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code> and then <code>startDraft()</code>.
+              When the timestamp is reached, your cron should call <code>?task=refresh</code> etc., and for draft start use <code>findDueDrafts()</code> + <code>startDraft()</code>.
             </div>
           </div>
         </div>
@@ -317,25 +340,23 @@ export default function LeagueAdmin({ leagueId, username }) {
         </div>
       )}
 
-      {/* Data Maintenance — single unified button */}
+      {/* Data Maintenance */}
       <div className="card mb12">
         <div className="card-title">Data Maintenance</div>
-        <div className="row gap12 ai-center">
-          <button
-            className="btn btn-primary"
-            disabled={saving}
-            onClick={handleTruncateAndRefresh}
-            title="Deletes existing global players and re-seeds from ESPN (teams + rosters)."
-          >
-            Refresh Players from ESPN (truncate + seed)
+        <div className="row gap12 ai-center" style={{ marginBottom: 8 }}>
+          <button className="btn btn-primary" disabled={saving} onClick={handleRefreshPlayers}>
+            Refresh Players (ESPN)
           </button>
-          <div className="muted">
-            Pulls only from ESPN teams/rosters to avoid duplicates.
-          </div>
+          <button className="btn" disabled={saving} onClick={handleBackfillHeadshots}>
+            Backfill Headshots
+          </button>
+          <button className="btn" disabled={saving} onClick={handleDedupePlayers}>
+            Dedupe Players
+          </button>
         </div>
-        <div className="muted mt8" style={{ lineHeight: 1.5 }}>
-          • This runs the same logic your daily cron can execute.<br/>
-          • It replaces your global <code>players</code> collection with a clean ESPN-only set.
+        <div className="muted" style={{ lineHeight: 1.5 }}>
+          • These call <code>/api/cron?task=…</code> on your server.<br/>
+          • If you used a <code>CRON_SECRET</code>, make sure you’re passing it in your server code (we’re not sending one here).
         </div>
       </div>
 
@@ -404,12 +425,12 @@ export default function LeagueAdmin({ leagueId, username }) {
           </button>
           <button
             className="btn"
-            title="Calls the daily cron endpoint immediately to compute winners and enqueue payouts."
+            title="Calls the settlement cron endpoint immediately."
             disabled={saving}
             onClick={async () => {
               try {
                 setSaving(true);
-                const r = await fetch("/api/cron/settle-season");
+                const r = await fetch("/api/cron?task=settle", { method: "POST" });
                 const j = await r.json().catch(() => ({}));
                 alert(`Settlement triggered.\n${JSON.stringify(j)}`);
               } catch (err) {
