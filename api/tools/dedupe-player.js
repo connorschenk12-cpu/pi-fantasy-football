@@ -1,51 +1,54 @@
-/* eslint-disable no-console */
 // api/tools/dedupe-players.js
+/* eslint-disable no-console */
+
 import { adminDb } from "../../src/lib/firebaseAdmin.js";
 
-function norm(s) {
-  return String(s || "").trim().toLowerCase();
-}
-function asId(x) {
-  if (x == null) return null;
-  if (typeof x === "object" && x.id != null) return String(x.id).trim();
-  return String(x).trim();
-}
-function playerDisplay(p) {
-  const firstLast =
-    (p.firstName || p.firstname || p.fname || "") +
-    (p.lastName || p.lastname || p.lname ? " " + (p.lastName || p.lastname || p.lname) : "");
-  return (
+// ---------- helpers ----------
+const norm = (s) => String(s || "").trim().toLowerCase();
+
+function identityFor(p) {
+  const eid =
+    p.espnId ??
+    p.espn_id ??
+    (p.espn && (p.espn.playerId || p.espn.id)) ??
+    null;
+  if (eid) return `espn:${String(eid)}`;
+  const name =
     p.name ||
     p.displayName ||
     p.fullName ||
     p.playerName ||
-    (firstLast.trim() || null) ||
-    (p.nickname || null) ||
-    (p.player || null) ||
-    (p.player_id_name || null) ||
-    (p.PlayerName || null) ||
-    (p.Player || null) ||
-    (p.Name || null) ||
-    (p.n || null) ||
-    (p.title || null) ||
-    (p.label || null) ||
-    (p.text || null) ||
-    (p.id != null ? String(p.id) : "(unknown)")
-  );
+    (p.firstName && p.lastName ? `${p.firstName} ${p.lastName}` : null) ||
+    "";
+  const team = p.team || p.nflTeam || p.proTeam || "";
+  const pos = (p.position || p.pos || "").toString().toUpperCase();
+  return `ntp:${norm(name)}|${norm(team)}|${norm(pos)}`;
 }
 
-// ---------- projections/matchups merge ----------
+function ts(p) {
+  const raw = p.updatedAt;
+  if (!raw) return 0;
+  try {
+    if (raw.toDate) return raw.toDate().getTime();      // Firestore Timestamp (client-like)
+    if (raw.seconds) return Number(raw.seconds) * 1000; // Firestore Timestamp (admin)
+    if (raw instanceof Date) return raw.getTime();
+    return Number(raw) || 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
 const isNum = (v) => typeof v === "number" && Number.isFinite(v);
-const toNum = (v) => (v == null || v === "" ? null : Number(v));
+const toNumOrNull = (v) => (v == null || v === "" ? null : Number(v));
 const gt0 = (v) => isNum(v) && v > 0;
 
 function normalizeProj(obj) {
   if (!obj || typeof obj !== "object") return {};
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
-    const num = toNum(v);
-    if (num == null || Number.isNaN(num)) continue;
-    out[String(k)] = num;
+    const n = toNumOrNull(v);
+    if (n == null || Number.isNaN(n)) continue;
+    out[String(k)] = n;
   }
   return out;
 }
@@ -55,18 +58,23 @@ function mergeProjections(a = {}, b = {}) {
   const keys = new Set([...Object.keys(A), ...Object.keys(B)]);
   const out = {};
   for (const k of keys) {
-    const va = A[k];
-    const vb = B[k];
-    out[k] = gt0(vb) ? vb : (va != null ? va : (isNum(vb) ? vb : 0));
+    const av = A[k];
+    const bv = B[k];
+    // prefer incoming if positive; else keep existing if defined; else take numeric bv (incl 0) or 0
+    out[k] = gt0(bv) ? bv : (av != null ? av : (isNum(bv) ? bv : 0));
   }
   return out;
 }
+
 function normalizeMatchups(obj) {
   if (!obj || typeof obj !== "object") return {};
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
     if (v && typeof v === "object") {
-      out[String(k)] = { opp: v.opp ?? v.opponent ?? v.vs ?? v.against ?? "", ...v };
+      out[String(k)] = {
+        opp: v.opp ?? v.opponent ?? v.vs ?? v.against ?? "",
+        ...v,
+      };
     }
   }
   return out;
@@ -84,175 +92,173 @@ function mergeMatchups(a = {}, b = {}) {
   return out;
 }
 
-// ---------- identity & tie-breakers ----------
-function espnIdOf(p) {
-  return (
-    p.espnId ??
-    p.espn_id ??
-    (p.espn && (p.espn.playerId || p.espn.id)) ??
-    null
-  );
-}
-function identityFor(p) {
-  const eid = espnIdOf(p);
-  if (eid) return `espn:${String(eid)}`;
-  const name = norm(playerDisplay(p));
-  const team = norm(p.team || p.nflTeam || p.proTeam);
-  const pos  = norm(p.position || p.pos);
-  return `ntp:${name}|${team}|${pos}`;
-}
-function ts(p) {
-  const raw = p.updatedAt;
-  if (!raw) return 0;
-  try {
-    if (raw.toDate) return raw.toDate().getTime();     // client Timestamp
-    if (raw.seconds) return Number(raw.seconds) * 1000;// admin Timestamp
-    if (raw instanceof Date) return raw.getTime();
-    return Number(raw) || 0;
-  } catch (_) { return 0; }
-}
-function hasPhoto(p) {
-  return !!(p.photo || p.photoUrl || p.photoURL || p.headshot || p.headshotUrl || p.image || p.imageUrl || p.img || p.avatar);
-}
-// Return preferred doc between a and b
-function better(a, b) {
-  const ta = ts(a), tb = ts(b);
+function pickBest(a, b) {
+  // Prefer doc with fresher updatedAt; tie-breaker: the one with more projections keys
+  const ta = ts(a);
+  const tb = ts(b);
   if (ta !== tb) return ta > tb ? a : b;
-  const aHasEspn = !!espnIdOf(a), bHasEspn = !!espnIdOf(b);
-  if (aHasEspn !== bHasEspn) return aHasEspn ? a : b;
-  const aPhoto = hasPhoto(a), bPhoto = hasPhoto(b);
-  if (aPhoto !== bPhoto) return aPhoto ? a : b;
-  return a; // stable
+
+  const pa = a?.projections ? Object.keys(a.projections).length : 0;
+  const pb = b?.projections ? Object.keys(b.projections).length : 0;
+  if (pa !== pb) return pa > pb ? a : b;
+
+  // Final fallback: keep a
+  return a;
 }
 
-function chooseDocId(base) {
-  const eid = espnIdOf(base);
-  if (eid) return `espn-${String(eid)}`;
-  const name = norm(playerDisplay(base)).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
-  const team = norm(base.team || base.nflTeam || base.proTeam).replace(/[^a-z0-9]+/g, "-").slice(0, 16);
-  const pos  = norm(base.position || base.pos).replace(/[^a-z0-9]+/g, "-").slice(0, 8);
-  return `p-${name}-${team}-${pos}`;
+function httpish(u) {
+  if (!u || typeof u !== "string") return false;
+  return /^https?:\/\//i.test(u);
+}
+
+function choosePhoto(a, b) {
+  const ca =
+    a.photo || a.photoUrl || a.photoURL || a.headshot || a.headshotUrl || a.image || a.imageUrl || a.img || a.avatar || null;
+  const cb =
+    b.photo || b.photoUrl || b.photoURL || b.headshot || b.headshotUrl || b.image || b.imageUrl || b.img || b.avatar || null;
+  // prefer ESPN if either has espnId
+  const eida =
+    a.espnId ?? a.espn_id ?? (a.espn && (a.espn.playerId || a.espn.id)) ?? null;
+  const eidb =
+    b.espnId ?? b.espn_id ?? (b.espn && (b.espn.playerId || b.espn.id)) ?? null;
+  const eid = eida || eidb;
+  if (eid) {
+    const idStr = String(eid).replace(/[^\d]/g, "");
+    if (idStr) return `https://a.espncdn.com/i/headshots/nfl/players/full/${idStr}.png`;
+  }
+  if (httpish(cb)) return cb;
+  if (httpish(ca)) return ca;
+  return null;
 }
 
 export const config = { maxDuration: 60 };
 
 export default async function handler(req, res) {
   try {
-    // Require a header secret if you like (optional)
-    const apply = req.query.apply === "1" || req.query.apply === "true";
+    const apply = /(^|\b)(apply=1|apply=true)(\b|$)/i.test(req.url || "");
 
+    // 1) read all global players
     const snap = await adminDb.collection("players").get();
-    if (snap.empty) return res.json({ ok: true, total: 0, groups: 0, merged: 0, deleted: 0, applied: apply });
+    const all = snap.docs.map((d) => ({ id: d.id, ...d.data(), __ref: d.ref }));
 
-    // Group docs by identity
-    const groups = new Map(); // identity -> array of {id, data}
-    snap.forEach((doc) => {
-      const data = doc.data() || {};
-      const ident = identityFor({ id: doc.id, ...data });
-      if (!groups.has(ident)) groups.set(ident, []);
-      groups.get(ident).push({ id: doc.id, data });
-    });
+    // 2) group by identity
+    const groups = new Map();
+    for (const p of all) {
+      const key = identityFor(p);
+      const arr = groups.get(key);
+      if (arr) arr.push(p);
+      else groups.set(key, [p]);
+    }
 
-    let merged = 0, deleted = 0;
-    const plans = []; // list of {keepId, keepData, deleteIds[]}
+    // 3) figure out merges/deletions
+    const mergePlans = [];
+    const deletes = [];
 
-    for (const [ident, arr] of groups.entries()) {
-      if (arr.length === 1) continue; // no dupes
-      // pick the best doc to keep
-      let winner = { id: arr[0].id, ...arr[0].data };
+    for (const [_, arr] of groups.entries()) {
+      if (arr.length <= 1) continue;
+
+      // pick canonical
+      let canonical = arr[0];
       for (let i = 1; i < arr.length; i++) {
-        const cand = { id: arr[i].id, ...arr[i].data };
-        winner = better(winner, cand);
+        canonical = pickBest(canonical, arr[i]);
       }
 
-      // merge everything into winner
-      let mergedProjections = {};
-      let mergedMatchups = {};
-      let photo = winner.photo || winner.photoUrl || winner.headshot || winner.image || null;
-      let team  = winner.team || winner.nflTeam || winner.proTeam || null;
-      let pos   = (winner.position || winner.pos || "").toString().toUpperCase() || null;
-      let name  = playerDisplay(winner);
-      let eid   = espnIdOf(winner);
+      // compute “super” doc by merging fields from others into canonical
+      let merged = { ...canonical };
+      for (const p of arr) {
+        if (p.id === canonical.id) continue;
 
-      for (const r of arr) {
-        mergedProjections = mergeProjections(mergedProjections, r.data.projections || r.data.projByWeek || {});
-        mergedMatchups    = mergeMatchups(mergedMatchups, r.data.matchups || {});
-        if (!photo) photo = r.data.photo || r.data.photoUrl || r.data.headshot || r.data.image || null;
-        if (!team)  team  = r.data.team || r.data.nflTeam || r.data.proTeam || team;
-        if (!pos)   pos   = (r.data.position || r.data.pos || pos || "").toString().toUpperCase() || null;
-        if (!eid)   eid   = espnIdOf(r.data) || eid;
-        if (!name || name === "(unknown)") name = playerDisplay(r.data);
+        // strengthen projections & matchups
+        merged.projections = mergeProjections(merged.projections, p.projections);
+        merged.matchups = mergeMatchups(merged.matchups, p.matchups);
+
+        // prefer filled team/position/name if missing
+        merged.team = merged.team || p.team || p.nflTeam || p.proTeam || null;
+        merged.position = (merged.position || p.position || p.pos || "").toString().toUpperCase() || null;
+
+        // prefer having espnId
+        const eidMerged =
+          merged.espnId ??
+          merged.espn_id ??
+          (merged.espn && (merged.espn.playerId || merged.espn.id)) ??
+          null;
+        const eidP =
+          p.espnId ??
+          p.espn_id ??
+          (p.espn && (p.espn.playerId || p.espn.id)) ??
+          null;
+        if (!eidMerged && eidP) merged.espnId = String(eidP);
+
+        // photo
+        merged.photo = choosePhoto(merged, p);
       }
 
-      // Decide keep doc id: if winner already matches espn, prefer espn-<id>
-      let keepId = winner.id;
-      const desiredId = eid ? `espn-${String(eid)}` : keepId;
-      if (desiredId && desiredId !== keepId) keepId = desiredId;
+      // ensure name is set
+      merged.name =
+        merged.name ||
+        merged.displayName ||
+        merged.fullName ||
+        merged.playerName ||
+        (merged.firstName && merged.lastName ? `${merged.firstName} ${merged.lastName}` : null) ||
+        canonical.name ||
+        canonical.id;
 
-      const keepData = {
-        id: keepId,
-        name,
-        position: pos,
-        team,
-        projections: mergedProjections,
-        matchups: mergedMatchups,
-        espnId: eid ?? null,
-        photo: photo || null,
-        updatedAt: new Date(),
-      };
+      mergePlans.push({ id: canonical.id, ref: canonical.__ref, data: merged });
 
-      const deleteIds = arr.map((r) => r.id).filter((id) => id !== keepId);
-
-      // If the "winner" had a non-espn id but we want espn-<id>, we will upsert keepId and delete all others (including previous winner.id)
-      plans.push({ keepId, keepData, deleteIds });
-      merged += 1;
-      deleted += deleteIds.length;
+      // all non-canonical become deletes
+      for (const p of arr) if (p.id !== canonical.id) deletes.push(p.__ref);
     }
 
-    if (!apply) {
-      return res.json({
-        ok: true,
-        total: snap.size,
-        groups: groups.size,
-        mergedCandidates: merged,
-        deleteCandidates: deleted,
-        applied: false,
-        hint: "Run with ?apply=1 to perform the merge+delete.",
-      });
-    }
+    // 4) apply if requested
+    let updated = 0;
+    let deleted = 0;
 
-    // Apply in chunks
-    const CHUNK = 400;
-    // 1) Upserts (ensure keep docs exist with merged data)
-    for (let i = 0; i < plans.length; i += CHUNK) {
-      const batch = adminDb.batch();
-      for (const p of plans.slice(i, i + CHUNK)) {
-        const ref = adminDb.collection("players").doc(p.keepId);
-        batch.set(ref, p.keepData, { merge: true });
+    if (apply) {
+      // write merges in chunks
+      for (let i = 0; i < mergePlans.length; i += 400) {
+        const batch = adminDb.batch();
+        const chunk = mergePlans.slice(i, i + 400);
+        for (const m of chunk) {
+          batch.set(m.ref, {
+            id: m.id,
+            name: m.data.name || m.id,
+            position: (m.data.position || "").toString().toUpperCase() || null,
+            team: m.data.team || null,
+            projections: m.data.projections || {},
+            matchups: m.data.matchups || {},
+            espnId:
+              m.data.espnId ??
+              m.data.espn_id ??
+              (m.data.espn && (m.data.espn.playerId || m.data.espn.id)) ??
+              null,
+            photo: m.data.photo || null,
+            updatedAt: new Date(),
+          }, { merge: true });
+        }
+        await batch.commit();
+        updated += chunk.length;
       }
-      await batch.commit();
-    }
 
-    // 2) Deletes
-    const allDeleteIds = plans.flatMap((p) => p.deleteIds);
-    for (let i = 0; i < allDeleteIds.length; i += CHUNK) {
-      const batch = adminDb.batch();
-      for (const id of allDeleteIds.slice(i, i + CHUNK)) {
-        batch.delete(adminDb.collection("players").doc(id));
+      // delete duplicates in chunks
+      for (let i = 0; i < deletes.length; i += 400) {
+        const batch = adminDb.batch();
+        const chunk = deletes.slice(i, i + 400);
+        for (const ref of chunk) batch.delete(ref);
+        await batch.commit();
+        deleted += chunk.length;
       }
-      await batch.commit();
     }
 
-    return res.json({
+    return res.status(200).json({
       ok: true,
-      total: snap.size,
-      groups: groups.size,
-      merged: merged,
-      deleted: deleted,
-      applied: true,
+      applied: !!apply,
+      mergedCandidates: mergePlans.length,
+      deleteCandidates: deletes.length,
+      updated,
+      deleted,
     });
-  } catch (err) {
-    console.error("dedupe-players error:", err);
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  } catch (e) {
+    console.error("dedupe-players error:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
