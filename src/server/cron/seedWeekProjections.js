@@ -1,83 +1,84 @@
-// src/server/cron/seedWeekProjections.js
 /* eslint-disable no-console */
+// src/server/cron/seedWeekProjections.js
+// Seeds per-week projections. This version is quota-safe and idempotent.
+// NOTE: Replace `computeProjection(p)` with your actual model/source.
 
-// Pacing for Firestore writes
-const WRITE_CHUNK = 250;
-const PAUSE_MS    = 250;
+const SLEEP_MS = 120;
+const BATCH_SIZE = 150;
+const MAX_RETRIES = 4;
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// Simple “fallback” baselines so we don't write 0s.
-// Used only when a player has no projection for the target week.
-const BASELINE = {
-  QB: 14.0,
-  RB: 9.0,
-  WR: 8.0,
-  TE: 6.0,
-  K:  7.0,
-  DEF: 6.0,
-};
-
-function normPos(p) {
-  return String(p || "").toUpperCase();
+function validInt(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
-/**
- * chooseProjection(existingValue, position)
- * - If an existing value is a finite number, keep it.
- * - Otherwise provide a modest baseline by position (not 0).
- */
-function chooseProjection(prev, pos) {
-  if (prev != null && Number.isFinite(Number(prev))) {
-    return Number(prev);
+function currentSeasonDefault() {
+  const now = new Date();
+  return now.getUTCFullYear();
+}
+
+async function withBackoff(fn, label = "op") {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (e) {
+      const msg = String(e?.message || e);
+      const isQuota = msg.includes("RESOURCE_EXHAUSTED") || msg.includes("quota");
+      if (!isQuota || attempt >= MAX_RETRIES) throw e;
+      const delay = (220 + 220 * attempt);
+      console.warn(`${label}: quota hit; retrying in ${delay}ms (attempt ${attempt + 1})`);
+      await sleep(delay);
+      attempt += 1;
+    }
   }
-  const key = normPos(pos);
-  if (BASELINE[key] != null) return BASELINE[key];
-  // FLEX/unknown
-  return 6.0;
 }
 
-/**
- * Seeds/merges projections for a given week.
- * - Does NOT erase other weeks.
- * - If a player already has a number for this week, we leave it alone.
- * - Otherwise a small baseline is filled so lists can sort sanely.
- *
- * If you later add a real projection source, replace the chooseProjection()
- * call with your model/ingest result.
- */
-export async function seedWeekProjections({ adminDb, week, season }) {
-  const W = Number(week || 1);       // season unused here, but kept for symmetry
-  const snap = await adminDb.collection("players").get();
-  const players = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+/** TODO: plug in your real projection source here. */
+function computeProjection(p, { week, season }) {
+  // placeholder: light baseline by position so your UI isn’t all zeros
+  const pos = String(p.position || "").toUpperCase();
+  const base =
+    pos === "QB" ? 16 :
+    pos === "RB" ? 12 :
+    pos === "WR" ? 11 :
+    pos === "TE" ? 8 :
+    pos === "K"  ? 7 :
+    pos === "DEF"? 6 : 5;
+  return base;
+}
 
+export async function seedWeekProjections({ adminDb, week, season } = {}) {
+  const wk = validInt(week);
+  if (!wk) throw new Error("week is required for projections seeding");
+  const ssn = validInt(season) || currentSeasonDefault();
+
+  // 1) read players in pages (Firestore admin .get() returns all; throttle our writes)
+  const snap = await withBackoff(() => adminDb.collection("players").get(), "players-read");
+  const docs = snap.docs;
+
+  // 2) write in chunks
   let updated = 0;
-  let idx = 0;
-
-  while (idx < players.length) {
-    const chunk = players.slice(idx, idx + WRITE_CHUNK);
+  for (let i = 0; i < docs.length; i += BATCH_SIZE) {
     const batch = adminDb.batch();
+    const chunk = docs.slice(i, i + BATCH_SIZE);
 
-    for (const p of chunk) {
-      const pos = normPos(p.position || p.pos);
-      const existing = (p.projections && typeof p.projections === "object") ? p.projections : {};
-      const has = existing[String(W)];
-
-      const nextVal = chooseProjection(has, pos);
-
-      // Only write if we're actually changing something
-      if (has == null || Number(has) !== Number(nextVal)) {
-        const next = { ...existing, [String(W)]: Number(nextVal) };
-        const ref = adminDb.collection("players").doc(String(p.id));
-        batch.set(ref, { projections: next, updatedAt: new Date() }, { merge: true });
+    for (const d of chunk) {
+      const p = d.data() || {};
+      const projections = { ...(p.projections || {}) };
+      // Only set if missing — keeps any better numbers you may seed later.
+      if (projections[String(wk)] == null) {
+        projections[String(wk)] = computeProjection(p, { week: wk, season: ssn });
+        batch.set(d.ref, { projections }, { merge: true });
         updated += 1;
       }
     }
 
-    await batch.commit();
-    idx += chunk.length;
-    await sleep(PAUSE_MS);
+    await withBackoff(() => batch.commit(), "projections-write");
+    await sleep(SLEEP_MS);
   }
 
-  return { ok: true, week: W, season: season || null, updated };
+  return { ok: true, updated, week: wk, season: ssn };
 }
