@@ -169,61 +169,39 @@ export default function LeagueAdmin({ leagueId, username }) {
     }
   }
 
-  // ---------- NEW: unified cron endpoints ----------
-  async function callCron(task, qs = "") {
-    const url = `/api/cron?task=${encodeURIComponent(task)}${qs ? `&${qs}` : ""}`;
-    const r = await fetch(url, { method: "POST" }); // POST to avoid caches; GET would also work
-    const text = await r.text();
-    let body;
-    try { body = JSON.parse(text); } catch { body = text; }
-    return { ok: r.ok, status: r.status, body };
-  }
-
-  async function handleRefreshPlayers() {
+  // Single button: Refresh players (ESPN) + dedupe + headshots via /api/cron?task=refresh
+  async function handleUnifiedRefresh() {
     setSaving(true);
     try {
-      const { ok, status, body } = await callCron("refresh");
-      if (!ok) {
-        alert(`Refresh failed (status ${status})\n${typeof body === "string" ? body : JSON.stringify(body)}`);
-      } else {
-        alert(`Refresh complete!\n${JSON.stringify(body)}`);
-      }
-    } catch (err) {
-      console.error("refresh error:", err);
-      alert(err?.message || String(err));
-    } finally {
-      setSaving(false);
-    }
-  }
+      const r = await fetch("/api/cron?task=refresh", { method: "POST" });
+      const text = await r.text();
+      // Try to parse JSON but keep raw text fallback so you always see details
+      let j;
+      try { j = JSON.parse(text); } catch (_) { j = null; }
 
-  async function handleBackfillHeadshots() {
-    setSaving(true);
-    try {
-      const { ok, status, body } = await callCron("headshots");
-      if (!ok) {
-        alert(`Headshots failed (status ${status})\n${typeof body === "string" ? body : JSON.stringify(body)}`);
-      } else {
-        alert(`Headshots complete!\n${JSON.stringify(body)}`);
+      if (!r.ok) {
+        alert(
+          `Refresh failed (status ${r.status})\n` +
+          (j ? JSON.stringify(j, null, 2) : text || "(no body)")
+        );
+        return;
       }
-    } catch (err) {
-      console.error("headshots error:", err);
-      alert(err?.message || String(err));
-    } finally {
-      setSaving(false);
-    }
-  }
 
-  async function handleDedupePlayers() {
-    setSaving(true);
-    try {
-      const { ok, status, body } = await callCron("dedupe");
-      if (!ok) {
-        alert(`Dedupe failed (status ${status})\n${typeof body === "string" ? body : JSON.stringify(body)}`);
+      // Pretty-print the combined steps if present
+      if (j && Array.isArray(j.steps)) {
+        const lines = j.steps.map(s =>
+          `${s.name}: ${s.ok ? "ok" : "err"}${s.status ? ` (status ${s.status})` : ""}${s.error ? ` — ${s.error}` : ""}`
+        );
+        alert(
+          `Refresh complete!\n` +
+          lines.join("\n") +
+          `\n\nDeleted: ${j.deleted ?? "-"}\nWritten: ${j.written ?? "-"}\nReceived: ${j.countReceived ?? "-"}\nSource: ${j.source || "-"}`
+        );
       } else {
-        alert(`Dedupe complete!\n${JSON.stringify(body)}`);
+        alert("Refresh complete!\n" + JSON.stringify(j || text, null, 2));
       }
     } catch (err) {
-      console.error("dedupe error:", err);
+      console.error("Unified refresh error:", err);
       alert(err?.message || String(err));
     } finally {
       setSaving(false);
@@ -296,13 +274,13 @@ export default function LeagueAdmin({ leagueId, username }) {
               </button>
             </div>
             <div className="muted mt8">
-              When the timestamp is reached, your cron should call <code>?task=refresh</code> etc., and for draft start use <code>findDueDrafts()</code> + <code>startDraft()</code>.
+              When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code> and then <code>startDraft()</code>.
             </div>
           </div>
         </div>
       )}
 
-      {/* Entry Settings — hidden once draft is not scheduled */}
+      {/* Entry Settings — only while draft is scheduled */}
       {draftScheduled && (
         <div className="card mb12">
           <div className="card-title">Entry Settings</div>
@@ -340,23 +318,20 @@ export default function LeagueAdmin({ leagueId, username }) {
         </div>
       )}
 
-      {/* Data Maintenance */}
+      {/* Data Maintenance — single unified button */}
       <div className="card mb12">
         <div className="card-title">Data Maintenance</div>
-        <div className="row gap12 ai-center" style={{ marginBottom: 8 }}>
-          <button className="btn btn-primary" disabled={saving} onClick={handleRefreshPlayers}>
-            Refresh Players (ESPN)
+        <div className="row gap12 ai-center">
+          <button className="btn btn-primary" disabled={saving} onClick={handleUnifiedRefresh}>
+            Refresh Players (ESPN) + Dedupe + Headshots
           </button>
-          <button className="btn" disabled={saving} onClick={handleBackfillHeadshots}>
-            Backfill Headshots
-          </button>
-          <button className="btn" disabled={saving} onClick={handleDedupePlayers}>
-            Dedupe Players
-          </button>
+          <div className="muted">
+            Runs the combined cron <code>/api/cron?task=refresh</code>.
+          </div>
         </div>
-        <div className="muted" style={{ lineHeight: 1.5 }}>
-          • These call <code>/api/cron?task=…</code> on your server.<br/>
-          • If you used a <code>CRON_SECRET</code>, make sure you’re passing it in your server code (we’re not sending one here).
+        <div className="muted mt8" style={{ lineHeight: 1.5 }}>
+          • This is the same logic your daily cron would run.<br />
+          • If you’ve just deployed changes, click once to refresh immediately.
         </div>
       </div>
 
@@ -425,14 +400,14 @@ export default function LeagueAdmin({ leagueId, username }) {
           </button>
           <button
             className="btn"
-            title="Calls the settlement cron endpoint immediately."
+            title="Calls the daily cron endpoint immediately to compute winners and enqueue payouts."
             disabled={saving}
             onClick={async () => {
               try {
                 setSaving(true);
                 const r = await fetch("/api/cron?task=settle", { method: "POST" });
                 const j = await r.json().catch(() => ({}));
-                alert(`Settlement triggered.\n${JSON.stringify(j)}`);
+                alert(`Settlement triggered.\n${JSON.stringify(j, null, 2)}`);
               } catch (err) {
                 console.error(err);
                 alert(err?.message || String(err));
