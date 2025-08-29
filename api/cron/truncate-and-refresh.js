@@ -4,9 +4,8 @@ import { adminDb } from "../../src/lib/firebaseAdmin.js";
 
 export const config = { maxDuration: 60 };
 
-const H = { "x-espn-site-app": "sports" };
-const TEAMS_URL =
-  "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams?lang=en&region=us";
+const CORE_TEAMS =
+  "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/teams?lang=en&region=us&limit=500";
 
 function normPos(pos) {
   return String(pos || "").toUpperCase();
@@ -29,10 +28,10 @@ function espnHeadshot(espnId) {
 }
 
 async function fetchJson(url, where) {
-  const r = await fetch(url, { cache: "no-store", headers: H });
+  const r = await fetch(url, { cache: "no-store" });
   if (!r.ok) {
     const text = await r.text().catch(() => "");
-    throw new Error(`fetch failed @ ${where} (${r.status}) ${text}`.slice(0, 500));
+    throw new Error(`fetch failed @ ${where} (${r.status}) ${text}`.slice(0, 400));
   }
   return r.json();
 }
@@ -44,18 +43,33 @@ function identityFor(p) {
   return `ntp:${k}`;
 }
 
+// simple concurrency limiter
+async function pMap(items, limit, worker) {
+  const ret = [];
+  let i = 0;
+  const runners = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+    while (i < items.length) {
+      const idx = i++;
+      ret[idx] = await worker(items[idx], idx);
+    }
+  });
+  await Promise.all(runners);
+  return ret;
+}
+
 export default async function handler(req, res) {
   const debug = {
     step: "start",
     teamsCount: 0,
-    rosterFulfilled: 0,
-    rosterRejected: 0,
-    sampleTeamIds: [],
-    sampleTeamAbbrs: [],
-    sampleRosterBucketsSeen: 0,
+    teamRefsFetched: 0,
+    rosterCollectionsFetched: 0,
+    rosterItemRefsSeen: 0,
+    athleteDetailsFetched: 0,
     collectedBeforeDedupe: 0,
     deleted: 0,
     written: 0,
+    notes: [],
+    sampleTeams: [],
   };
 
   try {
@@ -65,112 +79,116 @@ export default async function handler(req, res) {
       return res.status(401).json({ ok: false, error: "unauthorized" });
     }
 
-    // 1) Pull ESPN teams (HTTPS + lang/region) and parse
-    debug.step = "fetch-teams";
-    const teamsJson = await fetchJson(TEAMS_URL, "teams");
+    // -------- 1) Get team list from Core API --------
+    debug.step = "core-teams";
+    const teamsRoot = await fetchJson(CORE_TEAMS, "core-teams-root");
+    // teamsRoot.items -> [{ $ref: "…/teams/1" }, ...]
+    const teamRefs = Array.isArray(teamsRoot?.items) ? teamsRoot.items.map((x) => x?.$ref).filter(Boolean) : [];
+    debug.teamsCount = teamRefs.length;
+    debug.sampleTeams = teamRefs.slice(0, 5);
 
-    // ESPN uses a few shapes over time; try all:
-    const teamItems =
-      teamsJson?.sports?.[0]?.leagues?.[0]?.teams ??
-      teamsJson?.leagues?.[0]?.teams ??
-      teamsJson?.teams ??
-      [];
+    if (!teamRefs.length) {
+      debug.notes.push("No team refs from Core API");
+      return res.status(200).json({ ok: true, ...debug });
+    }
 
-    const teams = (Array.isArray(teamItems) ? teamItems : [])
-      .map((t) => t?.team || t)
-      .filter(Boolean)
-      .map((t) => ({
-        id: t.id,
-        abbr: t.abbreviation || t.slug || t.name,
-      }))
-      .filter((t) => t.id);
+    // -------- 2) Fetch each team doc (for abbreviation & id) --------
+    const teamDocs = await pMap(teamRefs, 10, async (ref) => {
+      try {
+        const t = await fetchJson(ref, `team:${ref}`);
+        debug.teamRefsFetched += 1;
+        return {
+          id: t?.id,
+          abbr: t?.abbreviation || t?.shortDisplayName || t?.name || "",
+          rosterUrl: t?.athletes?.$ref ? `${t.athletes.$ref}?limit=400` : null, // /teams/{id}/athletes
+        };
+      } catch (e) {
+        debug.notes.push(`team-fetch-failed:${ref}`);
+        return null;
+      }
+    });
 
-    debug.teamsCount = teams.length;
-    debug.sampleTeamIds = teams.slice(0, 6).map((t) => t.id);
-    debug.sampleTeamAbbrs = teams.slice(0, 6).map((t) => t.abbr);
-
+    const teams = teamDocs.filter(Boolean).filter((t) => t.rosterUrl);
     if (!teams.length) {
-      console.error("ESPN teams parse failed. root keys:", Object.keys(teamsJson || {}));
-      return res.status(200).json({ ok: true, ...debug, note: "no-teams-parsed" });
+      debug.notes.push("No team roster URLs");
+      return res.status(200).json({ ok: true, ...debug });
     }
 
-    // 2) Build roster URLs (HTTPS + lang/region)
-    const rosterUrls = teams.map(
-      (t) =>
-        `https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${t.id}?enable=roster&lang=en&region=us`
-    );
+    // -------- 3) Fetch each team roster collection (athletes list) --------
+    const rosterCollections = await pMap(teams, 8, async (t) => {
+      try {
+        const rc = await fetchJson(t.rosterUrl, `roster:${t.id}`);
+        debug.rosterCollectionsFetched += 1;
+        const athleteRefs = Array.isArray(rc?.items) ? rc.items.map((x) => x?.$ref).filter(Boolean) : [];
+        debug.rosterItemRefsSeen += athleteRefs.length;
+        return { team: t, refs: athleteRefs };
+      } catch (e) {
+        debug.notes.push(`roster-fetch-failed:${t.id}`);
+        return { team: t, refs: [] };
+      }
+    });
 
-    const rosterResults = await Promise.allSettled(
-      rosterUrls.map((u) => fetchJson(u, `roster:${u}`))
-    );
+    // Flatten athlete refs with their team abbr for context
+    const athleteRefPairs = [];
+    for (const rc of rosterCollections) {
+      for (const ref of rc.refs) {
+        athleteRefPairs.push({ ref, teamAbbr: rc.team.abbr });
+      }
+    }
+    if (!athleteRefPairs.length) {
+      debug.notes.push("No athlete refs");
+      return res.status(200).json({ ok: true, ...debug });
+    }
 
-    // 3) Normalize
+    // -------- 4) Fetch athlete detail for each ref (name, pos, team) --------
     const collected = [];
-    for (let i = 0; i < rosterResults.length; i++) {
-      const r = rosterResults[i];
-      if (r.status !== "fulfilled") {
-        debug.rosterRejected += 1;
-        console.warn("Roster fetch failed:", teams[i]?.id, r.reason?.message || r.reason);
-        continue;
+    await pMap(athleteRefPairs, 12, async ({ ref, teamAbbr }) => {
+      try {
+        const a = await fetchJson(ref, `athlete:${ref}`);
+        debug.athleteDetailsFetched += 1;
+
+        const espnId = a?.id ?? a?.uid ?? null;
+        const name =
+          a?.displayName ||
+          (a?.firstName && a?.lastName ? `${a.firstName} ${a.lastName}` : null) ||
+          a?.shortName ||
+          a?.name ||
+          espnId;
+
+        // position can be nested
+        const posAbbr =
+          a?.position?.abbreviation ||
+          a?.position?.name ||
+          a?.position ||
+          "";
+
+        // team abbr sometimes present on a.team or from the parent context
+        const team =
+          a?.team?.abbreviation ||
+          a?.team?.shortDisplayName ||
+          teamAbbr ||
+          "";
+
+        const player = {
+          id: String(espnId || name || "").trim(),
+          name: displayName({ name }),
+          position: normPos(posAbbr),
+          team: normTeam(team),
+          espnId: espnId ? String(espnId) : null,
+          photo: espnHeadshot(espnId),
+          projections: {},
+          matchups: {},
+        };
+
+        if (player.id) collected.push(player);
+      } catch (e) {
+        // skip one athlete if it fails
       }
-      debug.rosterFulfilled += 1;
-
-      const data = r.value || {};
-      // Most common: { team: { athletes: [ { items:[...] }, ... ] } }
-      const roster =
-        data?.team?.athletes ??
-        data?.athletes ??
-        data?.roster ??
-        [];
-      const buckets = Array.isArray(roster) ? roster : [];
-      debug.sampleRosterBucketsSeen += buckets.length;
-
-      for (const bucket of buckets) {
-        // bucket can be { position:..., items:[...] } OR already the items array
-        const items = Array.isArray(bucket?.items) ? bucket.items : (Array.isArray(bucket) ? bucket : []);
-        if (!Array.isArray(items)) continue;
-
-        for (const it of items) {
-          const person = it?.athlete || it;
-          const pos =
-            person?.position?.abbreviation ||
-            person?.position?.name ||
-            person?.position ||
-            it?.position;
-          const abbr =
-            person?.team?.abbreviation ||
-            person?.team?.shortDisplayName ||
-            person?.team?.name ||
-            teams[i]?.abbr ||
-            "";
-
-          const espnId = person?.id ?? person?.uid ?? it?.id ?? it?.uid ?? null;
-
-          const name =
-            person?.displayName ||
-            (person?.firstName && person?.lastName ? `${person.firstName} ${person.lastName}` : null) ||
-            person?.name ||
-            it?.displayName ||
-            it?.name ||
-            espnId;
-
-          const player = {
-            id: String(espnId || name || "").trim(),
-            name: displayName({ name }),
-            position: normPos(pos),
-            team: normTeam(abbr),
-            espnId: espnId ? String(espnId) : null,
-            photo: espnHeadshot(espnId),
-            projections: {},
-            matchups: {},
-          };
-          if (player.id) collected.push(player);
-        }
-      }
-    }
+    });
 
     debug.collectedBeforeDedupe = collected.length;
 
+    // -------- 5) De-dupe by (espnId) or (name|team|pos) --------
     const byIdent = new Map();
     for (const p of collected) {
       const k = identityFor(p);
@@ -179,7 +197,8 @@ export default async function handler(req, res) {
     const finalPlayers = Array.from(byIdent.values());
     const countReceived = finalPlayers.length;
 
-    // 4) Wipe existing (if any) and write new (fresh batch per chunk)
+    // -------- 6) Truncate + write (chunked, fresh batch each time) --------
+    // delete existing
     debug.step = "delete-old";
     const existingSnap = await adminDb.collection("players").get();
     const toDelete = existingSnap.docs.map((d) => d.ref);
@@ -191,9 +210,9 @@ export default async function handler(req, res) {
       debug.deleted += chunk.length;
     }
 
+    // write new
     debug.step = "write-new";
-    let written = 0;
-    let idx = 0;
+    let written = 0, idx = 0;
     while (idx < finalPlayers.length) {
       const chunk = finalPlayers.slice(idx, idx + 400);
       const batch = adminDb.batch();
@@ -226,7 +245,7 @@ export default async function handler(req, res) {
       ok: true,
       ...debug,
       countReceived,
-      source: "espn:teams+rosters",
+      source: "espn:core-v2 teams + athletes",
     });
   } catch (e) {
     console.error("truncate-and-refresh fatal:", e);
