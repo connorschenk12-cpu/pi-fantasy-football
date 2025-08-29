@@ -1,164 +1,132 @@
-// src/server/cron/dedupePlayers.js
 /* eslint-disable no-console */
-import { getBulkWriterWithBackoff, sleep } from "./firestoreWrite.js";
+// src/server/cron/dedupePlayers.js
+// Page through players, keep the best doc per identity, and rewrite conflicts minimally.
+// Identity priority: espnId > (name|team|pos). Fresher updatedAt wins.
 
-const isNum = (v) => typeof v === "number" && Number.isFinite(v);
-const toNum = (v) => (v == null || v === "" ? null : Number(v));
-const gt0 = (v) => isNum(v) && v > 0;
-
-function normalizeProj(obj) {
-  if (!obj || typeof obj !== "object") return {};
-  const out = {};
-  for (const [k, v] of Object.entries(obj)) {
-    const num = toNum(v);
-    if (num == null || Number.isNaN(num)) continue;
-    out[String(k)] = num;
-  }
-  return out;
-}
-function mergeProjections(existing = {}, incoming = {}) {
-  const a = normalizeProj(existing);
-  const b = normalizeProj(incoming);
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  const out = {};
-  for (const k of keys) {
-    const va = a[k];
-    const vb = b[k];
-    // prefer incoming if it's a positive number; else keep existing if defined
-    out[k] = gt0(vb) ? vb : (va != null ? va : (isNum(vb) ? vb : 0));
-  }
-  return out;
-}
-function normalizeMatchups(obj) {
-  if (!obj || typeof obj !== "object") return {};
-  const out = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v && typeof v === "object") {
-      out[String(k)] = {
-        opp: v.opp ?? v.opponent ?? v.vs ?? v.against ?? "",
-        ...v,
-      };
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+async function commitWithBackoff(batch, attempt=0){
+  try { await batch.commit(); }
+  catch(e){
+    const msg = String(e?.message||e);
+    if (/RESOURCE_EXHAUSTED/i.test(msg) && attempt < 5){
+      const wait = 300 * Math.pow(2, attempt);
+      console.warn(`dedupe: backoff ${wait}ms (attempt ${attempt+1})`);
+      await sleep(wait);
+      return commitWithBackoff(batch, attempt+1);
     }
-  }
-  return out;
-}
-function mergeMatchups(existing = {}, incoming = {}) {
-  const a = normalizeMatchups(existing);
-  const b = normalizeMatchups(incoming);
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  const out = {};
-  for (const k of keys) {
-    const ea = a[k] || {};
-    const eb = b[k] || {};
-    // prefer incoming if it has an opponent label
-    out[k] = eb.opp ? { ...ea, ...eb } : { ...ea };
-  }
-  return out;
-}
-
-// interpret updatedAt across shapes
-function ts(p) {
-  const raw = p.updatedAt;
-  if (!raw) return 0;
-  try {
-    if (raw.toDate) return raw.toDate().getTime();      // Firestore Timestamp (client)
-    if (raw.seconds) return Number(raw.seconds) * 1000; // Firestore Timestamp (admin)
-    if (raw instanceof Date) return raw.getTime();      // Date
-    return Number(raw) || 0;                            // ms
-  } catch (_) {
-    return 0;
+    throw e;
   }
 }
 
-// winner choice: prefer espnId presence, then newer updatedAt, then keep first (stable)
-function better(a, b) {
-  const aHasEspn = !!(a.espnId ?? a.espn_id);
-  const bHasEspn = !!(b.espnId ?? b.espn_id);
-  if (aHasEspn !== bHasEspn) return aHasEspn ? a : b;
-  const ta = ts(a);
-  const tb = ts(b);
-  if (ta !== tb) return ta > tb ? a : b;
-  return a;
+function ts(p){
+  const v = p?.updatedAt;
+  try{
+    if (!v) return 0;
+    if (v.toDate) return v.toDate().getTime();
+    if (v.seconds) return Number(v.seconds)*1000;
+    if (v instanceof Date) return v.getTime();
+    return Number(v) || 0;
+  }catch{ return 0; }
 }
 
-// identity: espnId if present, else name|team|position
-function identityFor(p) {
-  const eid = p.espnId ?? p.espn_id ?? null;
+function identityFor(p){
+  const eid = p.espnId ?? p.espn_id ?? (p.espn && (p.espn.playerId || p.espn.id)) ?? null;
   if (eid) return `espn:${String(eid)}`;
-  const k = `${(p.name || "").toLowerCase()}|${(p.team || "").toLowerCase()}|${(p.position || "").toLowerCase()}`;
+  const k = `${(p.name||"").toLowerCase()}|${(p.team||"").toLowerCase()}|${(p.position||"").toLowerCase()}`;
   return `ntp:${k}`;
 }
 
-export async function dedupePlayers({ adminDb }) {
-  const col = adminDb.collection("players");
-  const snap = await col.get();
-  if (snap.empty) return { ok: true, scanned: 0, groups: 0, deleted: 0, merged: 0 };
-
-  // 1) group by identity
-  const groups = new Map(); // ident -> [docs...]
-  let scanned = 0;
-  for (const d of snap.docs) {
-    scanned += 1;
-    const p = d.data() || {};
-    p.__ref = d.ref;
-    const ident = identityFor(p);
-    if (!groups.has(ident)) groups.set(ident, []);
-    groups.get(ident).push(p);
-  }
-
-  // 2) choose a winner per group; merge projections/matchups into winner; delete others
-  const writer = getBulkWriterWithBackoff(adminDb);
-  let deleted = 0;
-  let merged = 0;
-  let groupCount = 0;
-
-  for (const [ident, arr] of groups.entries()) {
-    groupCount += 1;
-    if (arr.length === 1) continue;
-
-    // pick champion
-    let champion = arr[0];
-    for (let i = 1; i < arr.length; i++) champion = better(champion, arr[i]);
-
-    // merge in the rest
-    let nextProjections = champion.projections || {};
-    let nextMatchups = champion.matchups || {};
-    let changed = false;
-
-    for (const p of arr) {
-      if (p === champion) continue;
-      const mergedProj = mergeProjections(nextProjections, p.projections);
-      const mergedM = mergeMatchups(nextMatchups, p.matchups);
-
-      const projChanged = JSON.stringify(mergedProj) !== JSON.stringify(nextProjections);
-      const matchChanged = JSON.stringify(mergedM) !== JSON.stringify(nextMatchups);
-      if (projChanged || matchChanged) changed = true;
-
-      nextProjections = mergedProj;
-      nextMatchups = mergedM;
-    }
-
-    // write champion updates if changed
-    if (changed) {
-      writer.set(
-        champion.__ref,
-        { projections: nextProjections, matchups: nextMatchups, updatedAt: new Date() },
-        { merge: true }
-      );
-      merged += 1;
-    }
-
-    // delete losers
-    for (const p of arr) {
-      if (p === champion) continue;
-      writer.delete(p.__ref);
-      deleted += 1;
-    }
-
-    // tiny pacing
-    if ((deleted + merged) % 300 === 0) await sleep(250);
-  }
-
-  await writer.close();
-  return { ok: true, scanned, groups: groupCount, deleted, merged };
+function chooseBest(a,b){
+  const ta = ts(a), tb = ts(b);
+  if (ta !== tb) return ta > tb ? a : b;
+  // Prefer one that has espnId/photo/projections populated
+  const score = (x)=> (x.espnId?3:0) + (x.photo?1:0) + (x.projections && Object.keys(x.projections||{}).length?1:0);
+  const sa = score(a), sb = score(b);
+  if (sa !== sb) return sa > sb ? a : b;
+  return a;
 }
+
+export async function dedupePlayers({ adminDb, limit=50, cursor=null }){
+  const pageSize = Math.max(1, Math.min(Number(limit)||50, 100));
+  const col = adminDb.collection("players");
+
+  // Read a page
+  let q = col.orderBy("name").orderBy("id").limit(pageSize);
+  if (cursor && cursor.includes("|")){
+    const [n,i] = cursor.split("|");
+    q = q.startAfter(n, i);
+  }
+  const snap = await q.get();
+  if (snap.empty) return { ok:true, done:true, processed:0, removed:0, merged:0 };
+
+  // Build identities within this page (local dedupe per page to avoid huge memory)
+  const byIdent = new Map();
+  const bucket = [];
+  for (const d of snap.docs){
+    const p = { id: d.id, ...(d.data()||{}) };
+    const ident = identityFor(p);
+    const cur = byIdent.get(ident);
+    if (!cur) byIdent.set(ident, { best: p, rest: [] });
+    else cur.rest.push(p);
+    bucket.push(p);
+  }
+
+  // For each identity with conflicts, keep best and remove/merge others
+  let processed = snap.size;
+  let removed = 0;
+  let merged  = 0;
+
+  const batch = adminDb.batch();
+
+  for (const [ident, grp] of byIdent.entries()){
+    if (grp.rest.length === 0) continue;
+
+    // compute best among all
+    let winner = grp.best;
+    for (const r of grp.rest) winner = chooseBest(winner, r);
+
+    // apply minimal merges: keep winner's docId === winner.id; delete others
+    for (const candidate of [grp.best, ...grp.rest]){
+      if (candidate.id === winner.id) continue;
+
+      // Merge: if winner lacks some lightweight fields, copy from candidate
+      const updates = {};
+      if (!winner.espnId && candidate.espnId) updates.espnId = candidate.espnId;
+      if (!winner.photo  && candidate.photo)  updates.photo  = candidate.photo;
+      if (!winner.team   && candidate.team)   updates.team   = candidate.team;
+      if (!winner.position && candidate.position) updates.position = candidate.position;
+
+      // Merge projections shallowly (prefer winner’s existing)
+      if (candidate.projections && typeof candidate.projections === "object"){
+        const mergedProj = { ...(winner.projections||{}) };
+        for (const [wk, val] of Object.entries(candidate.projections)){
+          if (mergedProj[wk] == null && val != null) mergedProj[wk] = Number(val) || 0;
+        }
+        if (Object.keys(mergedProj).length !== Object.keys(winner.projections||{}).length){
+          updates.projections = mergedProj;
+        }
+      }
+
+      if (Object.keys(updates).length){
+        batch.set(col.doc(winner.id), { ...updates, updatedAt: new Date() }, { merge:true });
+        merged += 1;
+      }
+
+      // delete the duplicate doc
+      batch.delete(col.doc(candidate.id));
+      removed += 1;
+    }
+  }
+
+  if (removed || merged){
+    await commitWithBackoff(batch);
+    await sleep(300);
+  }
+
+  const last = snap.docs[snap.docs.length-1];
+  const nextCursor = `${last.get("name")||""}|${last.get("id")||last.id}`;
+
+  return { ok:true, processed, removed, merged, done: snap.size < pageSize, nextCursor };
+}
+
+export default dedupePlayers;
