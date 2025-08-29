@@ -1,304 +1,156 @@
 // api/tools/dedupe-players.js
 /* eslint-disable no-console */
+
 import { adminDb } from "../../src/lib/firebaseAdmin.js";
 
-export const config = {
-  maxDuration: 60, // give ourselves enough time in serverless
-};
+export const config = { maxDuration: 60 };
 
-// ---------- helpers ----------
-function asId(x) {
-  if (x == null) return null;
-  if (typeof x === "object" && x.id != null) return String(x.id).trim();
-  return String(x).trim();
-}
+// ----- helpers -----
+const norm = (s) => String(s || "").trim().toLowerCase();
+const asId = (x) => (x == null ? null : String(x).trim());
 
-// normalize strings for identity key
-function norm(s) {
-  return String(s || "").trim().toLowerCase();
-}
-
-// pick a display-ish name
-function displayName(p) {
-  const firstLast =
-    (p.firstName || p.firstname || p.fname || "") +
-    (p.lastName || p.lastname || p.lname ? " " + (p.lastName || p.lastname || p.lname) : "");
+function getEspnId(p) {
   return (
+    p.espnId ??
+    p.espn_id ??
+    (p.espn && (p.espn.playerId || p.espn.id)) ??
+    null
+  );
+}
+
+function identityFor(p) {
+  const eid = getEspnId(p);
+  if (eid != null && String(eid).trim() !== "") return `espn:${String(eid)}`;
+  const name =
     p.name ||
     p.displayName ||
     p.fullName ||
     p.playerName ||
-    (firstLast.trim() || null) ||
-    (p.nickname || null) ||
-    (p.id != null ? String(p.id) : "(unknown)")
-  );
+    (p.firstName && p.lastName ? `${p.firstName} ${p.lastName}` : "");
+  const team = p.team || p.nflTeam || p.proTeam || "";
+  const pos = (p.position || p.pos || "").toString().toUpperCase();
+  return `ntp:${norm(name)}|${norm(team)}|${norm(pos)}`;
 }
 
-// identity: prefer espnId; else name|team|pos
-function identityFor(p) {
-  const eid =
-    p.espnId ??
-    p.espn_id ??
-    (p.espn && (p.espn.playerId || p.espn.id)) ??
-    null;
-  if (eid) return `espn:${String(eid)}`;
-  const k = `${norm(displayName(p))}|${norm(p.team || p.nflTeam || p.proTeam)}|${norm(
-    (p.position || p.pos || "").toString().toUpperCase()
-  )}`;
-  return `ntp:${k}`;
-}
-
-// interpret updatedAt across shapes to ms
-function ts(p) {
-  const raw = p.updatedAt;
-  if (!raw) return 0;
+// unify updatedAt across shapes and fallback to Firestore updateTime
+function tsFromDataOrMeta(data, metaUpdateTime) {
+  const raw = data?.updatedAt;
   try {
-    if (raw.toDate) return raw.toDate().getTime();      // Firestore Timestamp (client)
-    if (raw.seconds) return Number(raw.seconds) * 1000; // Firestore Timestamp (admin)
-    if (raw instanceof Date) return raw.getTime();      // Date
-    return Number(raw) || 0;                            // ms
-  } catch (_) {
-    return 0;
-  }
+    if (!raw) return metaUpdateTime || 0;
+    if (raw?.toDate) return raw.toDate().getTime();
+    if (raw?.seconds) return Number(raw.seconds) * 1000;
+    if (raw instanceof Date) return raw.getTime();
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+  } catch (_) {}
+  return metaUpdateTime || 0;
 }
 
-// score: prefer more recent; break ties by richer data (projections/photo/espnId)
-function score(p) {
-  const t = ts(p);
-  const projCount = p?.projections ? Object.keys(p.projections).length : 0;
-  const hasPhoto =
-    !!(p.photo || p.photoUrl || p.photoURL || p.headshot || p.headshotUrl || p.image || p.imageUrl);
-  const hasEspn = !!(p.espnId || p.espn_id || (p.espn && (p.espn.playerId || p.espn.id)));
-  // weight: time dominant, then espnId, then projections, then photo
-  return t * 1e6 + (hasEspn ? 1e5 : 0) + projCount * 10 + (hasPhoto ? 5 : 0);
+// keep newer; if tie, keep the one that has espnId; then smallest id for stability
+function chooseKeeper(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  if (a._t !== b._t) return a._t > b._t ? a : b;
+  const aHasEspn = a._hasEspn ? 1 : 0;
+  const bHasEspn = b._hasEspn ? 1 : 0;
+  if (aHasEspn !== bHasEspn) return aHasEspn > bHasEspn ? a : b;
+  return a.id < b.id ? a : b;
 }
 
-// merge projections (keep positive incoming; fall back to existing)
-const isNum = (v) => typeof v === "number" && Number.isFinite(v);
-const toNum = (v) => (v == null || v === "" ? null : Number(v));
-const gt0 = (v) => isNum(v) && v > 0;
-
-function normalizeProj(obj) {
-  if (!obj || typeof obj !== "object") return {};
-  const out = {};
-  for (const [k, v] of Object.entries(obj)) {
-    const num = toNum(v);
-    if (num == null || Number.isNaN(num)) continue;
-    out[String(k)] = num;
-  }
-  return out;
-}
-function mergeProjections(a0 = {}, b0 = {}) {
-  const a = normalizeProj(a0);
-  const b = normalizeProj(b0);
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  const out = {};
-  for (const k of keys) {
-    const va = a[k];
-    const vb = b[k];
-    out[k] = gt0(vb) ? vb : (va != null ? va : (isNum(vb) ? vb : 0));
-  }
-  return out;
-}
-
-function normalizeMatchups(obj) {
-  if (!obj || typeof obj !== "object") return {};
-  const out = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v && typeof v === "object") {
-      out[String(k)] = {
-        opp: v.opp ?? v.opponent ?? v.vs ?? v.against ?? "",
-        ...v,
-      };
-    }
-  }
-  return out;
-}
-function mergeMatchups(a0 = {}, b0 = {}) {
-  const a = normalizeMatchups(a0);
-  const b = normalizeMatchups(b0);
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  const out = {};
-  for (const k of keys) {
-    const ea = a[k] || {};
-    const eb = b[k] || {};
-    out[k] = eb.opp ? { ...ea, ...eb } : { ...ea };
-  }
-  return out;
-}
-
-function pickBestDoc(docs) {
-  let best = null;
-  let bestScore = -Infinity;
-  for (const d of docs) {
-    const s = score(d.data);
-    if (s > bestScore) {
-      bestScore = s;
-      best = d;
-    }
-  }
-  return best;
+// build an auth guard if you want (optional)
+function checkSecret(req) {
+  const needs = !!process.env.CRON_SECRET;
+  if (!needs) return { ok: true };
+  const got = req.headers["x-cron-secret"];
+  if (got && got === process.env.CRON_SECRET) return { ok: true };
+  return { ok: false, status: 401, body: { ok: false, error: "unauthorized" } };
 }
 
 export default async function handler(req, res) {
-  const dryRun = !("apply" in (req.query || {})) && !("apply" in (req.body || {}));
   try {
-    // Optional simple auth header (matches what LeagueAdmin sends)
-    const auth = req.headers["x-cron-secret"];
-    if (process.env.CRON_SECRET && auth !== process.env.CRON_SECRET) {
-      return res.status(401).json({ ok: false, error: "unauthorized" });
-    }
+    const auth = checkSecret(req);
+    if (!auth.ok) return res.status(auth.status).json(auth.body);
 
-    // 1) Load all global players
-    const snap = await adminDb.collection("players").get();
-    if (snap.empty) {
-      return res.status(200).json({
-        ok: true,
-        dryRun,
-        total: 0,
-        groups: 0,
-        duplicateGroups: 0,
-        duplicates: [],
-        message: "No players found.",
-      });
-    }
+    const apply = String(req.query.apply || "") === "1";
+    const limit = Math.max(1, Math.min(5000, Number(req.query.limit || 5000)));
 
-    // 2) Group by identity
-    const groups = new Map();
-    for (const doc of snap.docs) {
-      const data = doc.data() || {};
-      const idKey = identityFor(data);
-      const arr = groups.get(idKey) || [];
-      arr.push({ id: doc.id, ref: doc.ref, data });
-      groups.set(idKey, arr);
-    }
+    // 1) read all docs from global players (cap with limit for safety)
+    const col = adminDb.collection("players");
+    const snap = await col.get();
 
-    // 3) For each group, decide winner and losers, and prepare merges
-    let duplicateGroups = 0;
-    let toDelete = [];
-    let toUpdate = [];
-    const examples = [];
-
-    for (const [idKey, docs] of groups.entries()) {
-      if (docs.length <= 1) continue;
-
-      duplicateGroups += 1;
-      const winner = pickBestDoc(docs);
-      const losers = docs.filter((d) => d !== winner);
-
-      // Merge all losers' data into winner
-      let merged = { ...winner.data };
-      for (const L of losers) {
-        const ld = L.data || {};
-        // identity-ish fields
-        merged.espnId =
-          merged.espnId ??
-          merged.espn_id ??
-          ld.espnId ??
-          ld.espn_id ??
-          (ld.espn && (ld.espn.playerId || ld.espn.id)) ??
-          null;
-
-        // photo
-        merged.photo =
-          merged.photo ||
-          merged.photoUrl ||
-          merged.headshot ||
-          merged.image ||
-          ld.photo ||
-          ld.photoUrl ||
-          ld.headshot ||
-          ld.image ||
-          null;
-
-        // projections & matchups
-        merged.projections = mergeProjections(merged.projections, ld.projections);
-        merged.matchups = mergeMatchups(merged.matchups, ld.matchups);
-
-        // keep best name/position/team if missing
-        merged.name = merged.name || displayName(ld);
-        merged.position = (merged.position || merged.pos || "").toString().toUpperCase() ||
-                          (ld.position || ld.pos || "");
-        merged.team = merged.team || ld.team || ld.nflTeam || ld.proTeam || null;
-      }
-
-      // normalize minimal shape
-      merged = {
-        ...merged,
-        id: asId(winner.id),
-        name: displayName(merged),
-        position: (merged.position || merged.pos || "").toString().toUpperCase() || null,
-        team: merged.team || merged.nflTeam || merged.proTeam || null,
-        updatedAt: new Date(),
+    const rows = [];
+    let count = 0;
+    for (const d of snap.docs) {
+      if (count >= limit) break;
+      const data = d.data() || {};
+      const metaUpdateTime = d.updateTime ? Date.parse(d.updateTime.toDate().toISOString()) : 0;
+      const record = {
+        id: d.id,
+        _ref: d.ref,
+        _t: tsFromDataOrMeta(data, metaUpdateTime),
+        _hasEspn: !!getEspnId(data),
+        ...data,
       };
+      rows.push(record);
+      count += 1;
+    }
 
-      toUpdate.push({ ref: winner.ref, data: merged });
-      toDelete.push(...losers.map((l) => l.ref));
+    // 2) group by identity
+    const groups = new Map();
+    for (const r of rows) {
+      const key = identityFor(r);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    }
 
-      if (examples.length < 15) {
-        examples.push({
-          identity: idKey,
-          keep: winner.id,
-          remove: losers.map((l) => l.id),
+    // 3) decide keepers + duplicates
+    const deletions = [];
+    const summary = [];
+    for (const [key, arr] of groups.entries()) {
+      if (arr.length <= 1) continue;
+      // pick a keeper
+      let keeper = null;
+      for (const r of arr) keeper = chooseKeeper(keeper, r);
+      const dupes = arr.filter((x) => x.id !== keeper.id);
+
+      if (dupes.length) {
+        summary.push({
+          key,
+          keep: keeper.id,
+          remove: dupes.map((d) => d.id),
         });
+        deletions.push(...dupes.map((d) => d._ref));
       }
     }
 
-    if (dryRun) {
-      return res.status(200).json({
-        ok: true,
-        dryRun: true,
-        total: snap.size,
-        groups: groups.size,
-        duplicateGroups,
-        toUpdate: toUpdate.length,
-        toDelete: toDelete.length,
-        examples,
-        tip: "Add ?apply=1 to apply changes.",
-      });
-    }
-
-    // 4) Apply: update winners, delete losers in chunks
-    let updated = 0;
+    // 4) apply deletes in chunks (fresh batch per chunk)
     let deleted = 0;
-
-    const CHUNK = 400;
-    for (let i = 0; i < Math.max(toUpdate.length, toDelete.length); i += CHUNK) {
-      const batch = adminDb.batch();
-
-      // updates chunked
-      for (let j = i; j < Math.min(i + CHUNK, toUpdate.length); j++) {
-        const { ref, data } = toUpdate[j];
-        batch.set(ref, data, { merge: true });
-        updated++;
+    if (apply && deletions.length) {
+      const CHUNK = 400;
+      for (let i = 0; i < deletions.length; i += CHUNK) {
+        const slice = deletions.slice(i, i + CHUNK);
+        const batch = adminDb.batch();
+        slice.forEach((ref) => batch.delete(ref));
+        await batch.commit();
+        deleted += slice.length;
       }
-      // deletes chunked
-      for (let j = i; j < Math.min(i + CHUNK, toDelete.length); j++) {
-        const ref = toDelete[j];
-        batch.delete(ref);
-        deleted++;
-      }
-
-      await batch.commit();
     }
 
+    // 5) respond
     return res.status(200).json({
       ok: true,
-      dryRun: false,
-      total: snap.size,
+      mode: apply ? "apply" : "dry-run",
+      scanned: rows.length,
       groups: groups.size,
-      duplicateGroups,
-      updated,
+      duplicateGroups: summary.length,
+      toDelete: deletions.length,
       deleted,
-      examples,
+      preview: summary.slice(0, 25), // show a sample
     });
   } catch (err) {
     console.error("dedupe-players error:", err);
-    return res.status(500).json({
-      ok: false,
-      error: err?.message || String(err),
-      stack: process.env.NODE_ENV !== "production" ? err?.stack : undefined,
-      where: "dedupe-players",
-    });
+    return res
+      .status(500)
+      .json({ ok: false, error: String(err?.message || err) });
   }
 }
