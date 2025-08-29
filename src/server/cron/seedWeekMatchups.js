@@ -1,112 +1,125 @@
-// src/server/cron/seedWeekMatchups.js
 /* eslint-disable no-console */
+// src/server/cron/seedWeekMatchups.js
+// Seeds opponent matchups for a given week into each player doc.
+// Tolerant to ESPN schedule gaps + throttles Firestore to avoid quota.
 
-// Small pacing helpers to stay under quota
-const WRITE_CHUNK = 250;   // docs per batch
-const PAUSE_MS    = 250;   // pause between batches
-const SLOW_MS     = 60;    // between HTTP calls
+const SLEEP_MS = 120;          // tiny pause between batches
+const BATCH_SIZE = 200;        // conservative writes per batch
+const MAX_RETRIES = 4;
 
-const ESPN_BASE = "https://site.api.espn.com/apis/v2/sports/football/nfl";
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+async function fetchJson(url, label) {
+  const r = await fetch(url, { headers: { "x-espn-site-app": "sports" }, cache: "no-store" });
+  if (!r.ok) throw new Error(`${label} ${r.status}: ${await r.text()}`.slice(0, 500));
+  return r.json();
+}
 
-async function fetchJson(url, where, tries = 3) {
-  let lastErr;
-  for (let i = 1; i <= tries; i++) {
+function validInt(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function currentSeasonDefault() {
+  const now = new Date();
+  return now.getUTCFullYear(); // simple default; NFL season overlaps but good enough as a fallback
+}
+
+/** Try ESPN scoreboard with a few fallbacks (seasontype 2=regular, 1=pre, 3=post) */
+async function loadScoreboardSmart({ week, season, seasontype }) {
+  const seasonUse = validInt(season) || currentSeasonDefault();
+  const weekUse = validInt(week);
+  const typesToTry = [seasontype ? Number(seasontype) : 2, 1, 3]; // prefer requested/regular, then pre, then post
+
+  if (!weekUse) throw new Error("week is required for matchups seeding");
+
+  let lastErr = null;
+  for (const st of typesToTry) {
+    const url = `https://site.api.espn.com/apis/v2/sports/football/nfl/scoreboard?week=${weekUse}&seasontype=${st}&season=${seasonUse}`;
     try {
-      const r = await fetch(url, {
-        cache: "no-store",
-        headers: { "user-agent": "fantasy-cron/1.0", "x-espn-site-app": "sports" },
-      });
-      if (!r.ok) {
-        const text = await r.text().catch(() => "");
-        throw new Error(`${where} ${r.status}: ${text.slice(0, 160)}`);
+      const json = await fetchJson(url, "scoreboard");
+      if (Array.isArray(json?.events) && json.events.length > 0) {
+        return { json, season: seasonUse, week: weekUse, seasontype: st };
       }
-      return await r.json();
+      // If response is OK but empty, try next seasontype.
     } catch (e) {
       lastErr = e;
-      if (i < tries) await sleep(250 * i);
+      // 404 or 5xx — try next seasontype
     }
   }
-  throw lastErr;
+  throw lastErr || new Error("No scoreboard data found for provided week/season.");
 }
 
-function normTeam(x) {
-  return String(x || "").toUpperCase();
-}
-
-/**
- * Build a map of TEAM -> OPPONENT for a given week from the ESPN scoreboard.
- */
-async function opponentMapForWeek({ week, season, seasontype = 2 }) {
-  const url = `${ESPN_BASE}/scoreboard?week=${week}&seasontype=${seasontype}&season=${season}`;
-  const sc = await fetchJson(url, "scoreboard");
-  const events = Array.isArray(sc?.events) ? sc.events : [];
-  const map = new Map();
-
-  for (const e of events) {
+function collectOpponents(scoreboardJson) {
+  // Map teamAbbr -> opponentAbbr for the week
+  const opp = new Map();
+  const evts = Array.isArray(scoreboardJson?.events) ? scoreboardJson.events : [];
+  for (const e of evts) {
     const comps = Array.isArray(e?.competitions) ? e.competitions : [];
     for (const c of comps) {
-      const cmps = Array.isArray(c?.competitors) ? c.competitors : [];
-      if (cmps.length !== 2) continue;
-      const a = cmps[0]?.team?.abbreviation || cmps[0]?.team?.shortDisplayName;
-      const b = cmps[1]?.team?.abbreviation || cmps[1]?.team?.shortDisplayName;
+      const teams = Array.isArray(c?.competitors) ? c.competitors : [];
+      if (teams.length !== 2) continue;
+      const a = (teams[0]?.team?.abbreviation || teams[0]?.team?.shortDisplayName || "").toUpperCase();
+      const b = (teams[1]?.team?.abbreviation || teams[1]?.team?.shortDisplayName || "").toUpperCase();
       if (!a || !b) continue;
-      map.set(normTeam(a), normTeam(b));
-      map.set(normTeam(b), normTeam(a));
+      opp.set(a, b);
+      opp.set(b, a);
     }
   }
-  return map;
+  return opp;
 }
 
-/**
- * Writes matchups[week] = { opp } for every player whose team is in the opponent map.
- * Does not touch other weeks; merges in place.
- */
-export async function seedWeekMatchups({ adminDb, week, season }) {
-  const W = Number(week || 1);
-  const Y = Number(season || new Date().getFullYear());
+async function withBackoff(fn, label = "op") {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (e) {
+      const msg = String(e?.message || e);
+      const isQuota = msg.includes("RESOURCE_EXHAUSTED") || msg.includes("quota");
+      if (!isQuota || attempt >= MAX_RETRIES) throw e;
+      const delay = (200 + 200 * attempt);
+      console.warn(`${label}: quota hit; retrying in ${delay}ms (attempt ${attempt + 1})`);
+      await sleep(delay);
+      attempt += 1;
+    }
+  }
+}
 
-  // 1) Build TEAM->OPP map
-  const oppMap = await opponentMapForWeek({ week: W, season: Y, seasontype: 2 });
+export async function seedWeekMatchups({ adminDb, week, season, seasontype } = {}) {
+  // 1) get scoreboard (smart)
+  const { json, week: wk, season: ssn, seasontype: st } =
+    await withBackoff(() => loadScoreboardSmart({ week, season, seasontype }), "scoreboard");
 
-  // If no games parsed, avoid spamming writes—bail with note
+  const oppMap = collectOpponents(json);
   if (oppMap.size === 0) {
-    return { ok: true, note: "No games parsed for that week/season.", week: W, season: Y, updated: 0 };
+    return { ok: true, updated: 0, reason: "no-games", week: wk, season: ssn, seasontype: st };
   }
 
-  // 2) Load all players once
-  const snap = await adminDb.collection("players").get();
-  const players = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  // 2) read all players (we only set opponent for teams we know)
+  const playersSnap = await withBackoff(() => adminDb.collection("players").get(), "players-read");
+  const docs = playersSnap.docs;
 
-  // 3) Prepare throttled updates
+  // 3) write in small batches
   let updated = 0;
-  let idx = 0;
-
-  while (idx < players.length) {
-    const chunk = players.slice(idx, idx + WRITE_CHUNK);
+  for (let i = 0; i < docs.length; i += BATCH_SIZE) {
+    const chunk = docs.slice(i, i + BATCH_SIZE);
     const batch = adminDb.batch();
 
-    for (const p of chunk) {
-      const team = normTeam(p.team || p.nflTeam || p.proTeam);
-      const opp  = oppMap.get(team) || "";
+    for (const d of chunk) {
+      const p = d.data() || {};
+      const team = (p.team || p.nflTeam || p.proTeam || "").toUpperCase();
+      const opp = oppMap.get(team) || "";
+      const matchups = { ...(p.matchups || {}) };
+      matchups[String(wk)] = { ...(matchups[String(wk)] || {}), opp };
 
-      // Nothing to write if we don't know the opponent
-      if (!opp) continue;
-
-      // Merge existing matchups
-      const existing = (p.matchups && typeof p.matchups === "object") ? p.matchups : {};
-      const next = { ...existing, [String(W)]: { ...(existing[String(W)] || {}), opp } };
-
-      const ref = adminDb.collection("players").doc(String(p.id));
-      batch.set(ref, { matchups: next, updatedAt: new Date() }, { merge: true });
+      batch.set(d.ref, { matchups }, { merge: true });
       updated += 1;
     }
 
-    await batch.commit();
-    idx += chunk.length;
-    await sleep(PAUSE_MS);
+    await withBackoff(() => batch.commit(), "players-write");
+    await sleep(SLEEP_MS);
   }
 
-  return { ok: true, week: W, season: Y, updated };
+  return { ok: true, updated, week: wk, season: ssn, seasontype: st };
 }
