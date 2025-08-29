@@ -2,21 +2,39 @@
 /* eslint-disable no-console */
 import { adminDb } from "../../src/lib/firebaseAdmin.js";
 
-export const config = {
-  maxDuration: 60,
-};
+export const config = { maxDuration: 60 };
 
-// ESPN CORE endpoints (HAL-style; everything is $ref-based)
-const TEAMS_CORE =
+const CORE_TEAMS =
   "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/teams?limit=1000";
 
-// ---------- small helpers ----------
-function normPos(pos) {
-  return String(pos || "").toUpperCase();
+// Fallback site API
+const SITE_TEAM = (id) =>
+  `http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${id}?enable=roster`;
+const SITE_TEAMS =
+  "http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams";
+
+// --------- tiny utils ----------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function fetchJson(url, where, tries = 3) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      if (!r.ok) {
+        const text = await r.text().catch(() => "");
+        throw new Error(`HTTP ${r.status} ${text.slice(0, 200)}`);
+      }
+      return await r.json();
+    } catch (e) {
+      last = e;
+      await sleep(150 * (i + 1));
+    }
+  }
+  throw new Error(`fetch failed @ ${where}: ${String(last?.message || last)}`);
 }
-function normTeam(team) {
-  return String(team || "").toUpperCase();
-}
+
+function normPos(x) { return String(x || "").toUpperCase(); }
+function normTeam(x) { return String(x || "").toUpperCase(); }
 function displayName(p) {
   return (
     p.name ||
@@ -30,75 +48,65 @@ function espnHeadshot(espnId) {
   const idStr = String(espnId || "").replace(/[^\d]/g, "");
   return idStr ? `https://a.espncdn.com/i/headshots/nfl/players/full/${idStr}.png` : null;
 }
-
-async function fetchJson(url, where) {
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) {
-    const text = await r.text().catch(() => "");
-    throw new Error(`fetch failed @ ${where} (${r.status}) ${text}`.slice(0, 500));
-  }
-  return r.json();
-}
-
-// Simple concurrency limiter
-function mapLimit(items, limit, worker) {
-  return new Promise((resolve, reject) => {
-    const results = new Array(items.length);
-    let i = 0;
-    let active = 0;
-    let done = 0;
-
-    function next() {
-      while (active < limit && i < items.length) {
-        const idx = i++;
-        active++;
-        Promise.resolve(worker(items[idx], idx))
-          .then((val) => {
-            results[idx] = val;
-            active--;
-            done++;
-            if (done === items.length) resolve(results);
-            else next();
-          })
-          .catch((err) => reject(err));
-      }
-    }
-    if (items.length === 0) resolve(results);
-    else next();
-  });
-}
-
-// Fetch all pages for a Core API collection (has items + page.next.$ref)
-async function fetchAllPages(startUrl, where) {
-  let out = [];
-  let next = startUrl;
-  let guard = 0;
-  while (next && guard < 100) {
-    guard++;
-    const json = await fetchJson(next, `${where}[page${guard}]`);
-    const items = Array.isArray(json?.items) ? json.items : [];
-    for (const it of items) {
-      if (it?.$ref) out.push(it.$ref);
-    }
-    next = json?.page?.next?.$ref || null;
-  }
-  return out;
-}
-
-// identity: espnId > name|team|pos
 function identityFor(p) {
   const eid = p.espnId ?? p.espn_id ?? null;
   if (eid) return `espn:${String(eid)}`;
   const k = `${(p.name || "").toLowerCase()}|${(p.team || "").toLowerCase()}|${(p.position || "").toLowerCase()}`;
   return `ntp:${k}`;
 }
+function mapLimit(items, limit, worker) {
+  return new Promise((resolve, reject) => {
+    const results = new Array(items.length);
+    let i = 0, active = 0, done = 0;
+    function next() {
+      while (active < limit && i < items.length) {
+        const idx = i++;
+        active++;
+        Promise.resolve(worker(items[idx], idx))
+          .then((val) => { results[idx] = val; active--; done++; done === items.length ? resolve(results) : next(); })
+          .catch(reject);
+      }
+    }
+    items.length ? next() : resolve(results);
+  });
+}
 
+// --------- Core collection walker (HAL) ----------
+async function fetchAllRefs(startUrl, where) {
+  const out = [];
+  let url = startUrl;
+  let guard = 0;
+  while (url && guard < 120) {
+    guard++;
+    const json = await fetchJson(url, `${where}[page${guard}]`);
+    const items = Array.isArray(json?.items) ? json.items : [];
+    for (const it of items) {
+      // Some collections expose $ref, some expose href, some wrap under athlete.$ref
+      const ref = it?.$ref || it?.href || it?.athlete?.$ref || it?.athlete?.href || null;
+      if (ref) out.push(ref);
+    }
+    url = json?.page?.next?.$ref || json?.page?.next?.href || null;
+  }
+  return out;
+}
+
+// Resolve position abbreviation if only a $ref is present
+async function resolvePositionAbbr(a) {
+  try {
+    const pRef = a?.position?.$ref || a?.position?.href || null;
+    if (!pRef) return a?.position?.abbreviation || a?.position?.abbrev || null;
+    const p = await fetchJson(pRef, "position-ref");
+    return p?.abbreviation || p?.abbrev || null;
+  } catch {
+    return a?.position?.abbreviation || a?.position?.abbrev || null;
+  }
+}
+
+// --------- MAIN handler ----------
 export default async function handler(req, res) {
   const debug = {
-    teamsFetched: 0,
-    athleteCollectionsWalked: 0,
-    athleteRefsSeen: 0,
-    athleteDocsFetched: 0,
+    core: { teamRefs: 0, teamsOk: 0, athleteCollections: 0, athleteRefs: 0, athleteDocs: 0 },
+    site: { teams: 0, rosterPlayers: 0 },
     collectedBeforeDedupe: 0,
     deleted: 0,
     written: 0,
@@ -106,68 +114,54 @@ export default async function handler(req, res) {
   };
 
   try {
-    // 1) Fetch all teams from CORE
-    const teamsIndex = await fetchJson(TEAMS_CORE, "teams-core");
+    // 1) CORE: teams -> athletes (paginated) -> athlete docs
+    const teamsIndex = await fetchJson(CORE_TEAMS, "core-teams");
     const teamRefs = Array.isArray(teamsIndex?.items)
-      ? teamsIndex.items.map((x) => x?.$ref).filter(Boolean)
+      ? teamsIndex.items.map((x) => x?.$ref || x?.href).filter(Boolean)
       : [];
-    if (teamRefs.length === 0) {
-      return res.status(500).json({ ok: false, where: "teams-core", error: "no team refs" });
-    }
+    debug.core.teamRefs = teamRefs.length;
 
-    // Pull each team doc (to get abbreviation + athletes link)
-    const teams = await mapLimit(teamRefs, 8, async (ref) => {
+    const coreTeams = await mapLimit(teamRefs, 8, async (ref) => {
       try {
-        const t = await fetchJson(ref, "team-doc");
-        // team abbreviation found directly; athletes collection ref at t.athletes.$ref
-        const teamAbbr =
-          t?.abbreviation || t?.shortDisplayName || t?.displayName || t?.name || null;
-        const rosterUrl = t?.athletes?.$ref || null;
-        if (!teamAbbr || !rosterUrl) return null;
-        return { teamAbbr, rosterUrl };
-      } catch (_) {
+        const t = await fetchJson(ref, "core-team");
+        const abbr = t?.abbreviation || t?.shortDisplayName || t?.displayName || t?.name || null;
+        const athletesUrl = t?.athletes?.$ref || t?.athletes?.href || null;
+        if (!abbr || !athletesUrl) return null;
+        return { abbr, athletesUrl: `${athletesUrl}?limit=400` };
+      } catch {
         return null;
       }
     });
-    const validTeams = teams.filter(Boolean);
-    debug.teamsFetched = validTeams.length;
-    if (validTeams.length === 0) {
-      return res.status(500).json({ ok: false, where: "teams-resolve", error: "no teams valid" });
-    }
+    const validCoreTeams = coreTeams.filter(Boolean);
+    debug.core.teamsOk = validCoreTeams.length;
 
-    // 2) For each team, walk the athletes collection (paginated) and collect athlete refs
-    const rosterRefsByTeam = await mapLimit(validTeams, 8, async (t) => {
+    const perTeamRefs = await mapLimit(validCoreTeams, 8, async (t) => {
       try {
-        const refs = await fetchAllPages(`${t.rosterUrl}?limit=400`, `athletes:${t.teamAbbr}`);
-        debug.athleteCollectionsWalked += 1;
-        debug.athleteRefsSeen += refs.length;
-        return { teamAbbr: t.teamAbbr, refs };
+        const refs = await fetchAllRefs(t.athletesUrl, `core-athletes:${t.abbr}`);
+        return { abbr: t.abbr, refs };
       } catch (e) {
-        debug.notes.push(`roster-walk-fail:${t.teamAbbr}`);
-        return { teamAbbr: t.teamAbbr, refs: [] };
+        debug.notes.push(`core-athletes-fail:${t.abbr}`);
+        return { abbr: t.abbr, refs: [] };
       }
     });
 
-    // Flatten to [ { teamAbbr, ref } ... ]
-    const athleteJobs = [];
-    for (const row of rosterRefsByTeam) {
-      for (const ref of row.refs) athleteJobs.push({ teamAbbr: row.teamAbbr, ref });
+    let athleteJobs = [];
+    for (const row of perTeamRefs) {
+      debug.core.athleteCollections += 1;
+      debug.core.athleteRefs += row.refs.length;
+      for (const ref of row.refs) athleteJobs.push({ teamAbbr: row.abbr, ref });
     }
 
-    // 3) Fetch athlete docs (limit concurrency), normalize minimal player record
     const collected = [];
+
     await mapLimit(athleteJobs, 12, async (job) => {
       try {
-        const a = await fetchJson(job.ref, "athlete-doc");
-        debug.athleteDocsFetched += 1;
+        const a = await fetchJson(job.ref, "core-athlete");
+        debug.core.athleteDocs += 1;
 
         const espnId = a?.id != null ? String(a.id) : null;
-
-        // Try to get position abbreviation if present inline; if not, leave null
-        const posAbbr =
-          a?.position?.abbreviation ||
-          a?.position?.abbrev || // just in case
-          null;
+        let posAbbr = a?.position?.abbreviation || a?.position?.abbrev || null;
+        if (!posAbbr) posAbbr = await resolvePositionAbbr(a);
 
         const player = {
           id: String(espnId || a?.uid || a?.slug || a?.guid || a?.displayName || "").trim(),
@@ -176,19 +170,72 @@ export default async function handler(req, res) {
           team: normTeam(job.teamAbbr),
           espnId,
           photo: espnHeadshot(espnId),
-          projections: {}, // projections come from other sources; keep empty here
-          matchups: {}, // not part of this import
+          projections: {},
+          matchups: {},
         };
-
         if (player.id) collected.push(player);
-      } catch (_) {
-        // ignore single athlete failure
+      } catch {
+        // skip this athlete
       }
     });
 
+    // 2) If Core looks too small, also merge Site API rosters (teams -> ?enable=roster)
+    if (collected.length < 1200) {
+      try {
+        const siteTeams = await fetchJson(SITE_TEAMS, "site-teams");
+        const items = Array.isArray(siteTeams?.sports?.[0]?.leagues?.[0]?.teams)
+          ? siteTeams.sports[0].leagues[0].teams
+          : [];
+        const siteTeamIds = items
+          .map((t) => t?.team?.id)
+          .filter(Boolean)
+          .map(String);
+        debug.site.teams = siteTeamIds.length;
+
+        await mapLimit(siteTeamIds, 8, async (tid) => {
+          try {
+            const data = await fetchJson(SITE_TEAM(tid), `site-roster:${tid}`);
+            const teamAbbr =
+              data?.team?.abbreviation || data?.team?.shortDisplayName || data?.team?.name || "";
+            const roster = Array.isArray(data?.team?.athletes) ? data.team.athletes : [];
+            // roster may be buckets: [{position, items:[...]}, ...] OR flat
+            for (const bucket of roster) {
+              const items = Array.isArray(bucket?.items) ? bucket.items : Array.isArray(roster) ? roster : [];
+              for (const it of items) {
+                const person = it?.athlete || it;
+                const espnId = person?.id != null ? String(person.id) : null;
+                const pos =
+                  person?.position?.abbreviation || person?.position?.name || it?.position || null;
+                const p = {
+                  id: String(espnId || person?.uid || person?.displayName || "").trim(),
+                  name: displayName({ name: person?.displayName }),
+                  position: normPos(pos),
+                  team: normTeam(teamAbbr),
+                  espnId,
+                  photo: espnHeadshot(espnId),
+                  projections: {},
+                  matchups: {},
+                };
+                if (p.id) {
+                  collected.push(p);
+                  debug.site.rosterPlayers += 1;
+                }
+              }
+              // If this bucket was actually a player object, break
+              if (!Array.isArray(bucket?.items)) break;
+            }
+          } catch {
+            // skip one team
+          }
+        });
+      } catch (e) {
+        debug.notes.push(`site-fallback-failed:${String(e?.message || e)}`);
+      }
+    }
+
     debug.collectedBeforeDedupe = collected.length;
 
-    // 4) Dedupe: espnId > name|team|pos
+    // 3) Dedupe (espnId > name|team|pos)
     const byIdent = new Map();
     for (const p of collected) {
       const k = identityFor(p);
@@ -196,8 +243,7 @@ export default async function handler(req, res) {
     }
     const finalPlayers = Array.from(byIdent.values());
 
-    // 5) Wipe & write (chunked)
-    // wipe existing GLOBAL players
+    // 4) Wipe & write (400-doc chunks)
     const existingSnap = await adminDb.collection("players").get();
     const toDelete = existingSnap.docs.map((d) => d.ref);
     while (toDelete.length) {
@@ -208,23 +254,21 @@ export default async function handler(req, res) {
       debug.deleted += chunk.length;
     }
 
-    // write new players
-    let idx = 0;
-    while (idx < finalPlayers.length) {
-      const chunk = finalPlayers.slice(idx, idx + 400);
+    let i = 0;
+    while (i < finalPlayers.length) {
+      const chunk = finalPlayers.slice(i, i + 400);
       const batch = adminDb.batch();
       for (const raw of chunk) {
-        const id = String(raw.id);
-        const ref = adminDb.collection("players").doc(id);
+        const ref = adminDb.collection("players").doc(String(raw.id));
         batch.set(
           ref,
           {
-            id,
+            id: String(raw.id),
             name: raw.name,
-            position: raw.position,
-            team: raw.team,
-            espnId: raw.espnId,
-            photo: raw.photo,
+            position: raw.position || null,
+            team: raw.team || null,
+            espnId: raw.espnId || null,
+            photo: raw.photo || null,
             projections: raw.projections || {},
             matchups: raw.matchups || {},
             updatedAt: new Date(),
@@ -234,7 +278,7 @@ export default async function handler(req, res) {
       }
       await batch.commit();
       debug.written += chunk.length;
-      idx += chunk.length;
+      i += chunk.length;
     }
 
     return res.status(200).json({
@@ -242,13 +286,18 @@ export default async function handler(req, res) {
       deleted: debug.deleted,
       written: debug.written,
       countReceived: finalPlayers.length,
-      source: "espn:core teams+athletes (paginated)",
+      source:
+        collected.length < 1200
+          ? "espn:core teams+athletes (paginated) + site fallback"
+          : "espn:core teams+athletes (paginated)",
       debug,
     });
   } catch (e) {
     console.error("truncate-and-refresh fatal:", e);
-    return res
-      .status(500)
-      .json({ ok: false, where: "truncate-and-refresh", error: String(e?.message || e) });
+    return res.status(500).json({
+      ok: false,
+      where: "truncate-and-refresh",
+      error: String(e?.message || e),
+    });
   }
 }
