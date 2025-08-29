@@ -2,18 +2,16 @@
 // /api/cron/index.js
 import { adminDb } from "../../src/lib/firebaseAdmin.js";
 
-// Task handlers (server-only modules living under src/server/cron)
-import { refreshPlayersFromEspn }   from "../../src/server/cron/refreshPlayersFromEspn.js";
-import { seedWeekProjections }      from "../../src/server/cron/seedWeekProjections.js";
-import { seedWeekMatchups }         from "../../src/server/cron/seedWeekMatchups.js";
-import { backfillHeadshots }        from "../../src/server/cron/backfillHeadshots.js";
-import { dedupePlayers }            from "../../src/server/cron/dedupePlayers.js";
-import { settleSeason }             from "../../src/server/cron/settleSeason.js";
-import { truncateAndRefresh }       from "../../src/server/cron/truncateAndRefresh.js";
+// step functions
+import { refreshPlayersFromEspn } from "../../src/server/cron/refreshPlayersFromEspn.js";
+import { backfillHeadshots } from "../../src/server/cron/backfillHeadshots.js";
+import { dedupePlayers } from "../../src/server/cron/dedupePlayers.js";
+import { seedWeekProjections } from "../../src/server/cron/seedWeekProjections.js";
+import { seedWeekMatchups } from "../../src/server/cron/seedWeekMatchups.js";
+import { settleSeason } from "../../src/server/cron/settleSeason.js";
 
 export const config = { maxDuration: 60 };
 
-// Optional: simple header secret. If you don't want auth, just delete this fn and the check below.
 function unauthorized(req) {
   const need = process.env.CRON_SECRET;
   if (!need) return false;
@@ -21,54 +19,93 @@ function unauthorized(req) {
   return got !== need;
 }
 
+async function safeRun(name, fn) {
+  try {
+    const t0 = Date.now();
+    const res = await fn();
+    const ms = Date.now() - t0;
+    return { ok: true, name, ms, ...res };
+  } catch (e) {
+    console.error(`[cron] ${name} failed:`, e);
+    return { ok: false, name, error: String(e?.message || e) };
+  }
+}
+
 export default async function handler(req, res) {
   try {
-    if (unauthorized(req)) {
-      return res.status(401).json({ ok: false, error: "unauthorized" });
-    }
+    if (unauthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
 
     const url = new URL(req.url, `http://${req.headers.host}`);
     const task = (url.searchParams.get("task") || "").toLowerCase();
+    const week = url.searchParams.get("week");
+    const season = url.searchParams.get("season");
 
-    // Normalize optional params
-    const weekParam   = url.searchParams.get("week");
-    const seasonParam = url.searchParams.get("season");
-    const week   = weekParam   != null ? Number(weekParam)   : undefined;
-    const season = seasonParam != null ? Number(seasonParam) : undefined;
+    // ---------- COMBINED REFRESH PIPELINE ----------
+    if (task === "refresh") {
+      const steps = [];
 
-    switch (task) {
-      case "refresh":
-        // From ESPN teams/rosters (non-destructive)
-        return res.status(200).json(await refreshPlayersFromEspn({ adminDb }));
+      // 1) pull players from ESPN (no truncate here)
+      steps.push(
+        await safeRun("refreshPlayersFromEspn", () =>
+          refreshPlayersFromEspn({ adminDb })
+        )
+      );
 
-      case "truncate":
-      case "truncate-and-refresh":
-        // Wipe players (global) then repopulate from ESPN
-        return res.status(200).json(await truncateAndRefresh({ adminDb }));
+      // 2) dedupe players
+      steps.push(
+        await safeRun("dedupePlayers", () =>
+          dedupePlayers({ adminDb })
+        )
+      );
 
-      case "projections":
-        return res.status(200).json(await seedWeekProjections({ adminDb, week, season }));
+      // 3) backfill headshots
+      steps.push(
+        await safeRun("backfillHeadshots", () =>
+          backfillHeadshots({ adminDb })
+        )
+      );
 
-      case "matchups":
-        return res.status(200).json(await seedWeekMatchups({ adminDb, week, season }));
-
-      case "headshots":
-        return res.status(200).json(await backfillHeadshots({ adminDb }));
-
-      case "dedupe":
-        return res.status(200).json(await dedupePlayers({ adminDb }));
-
-      case "settle":
-        return res.status(200).json(await settleSeason({ adminDb }));
-
-      default:
-        return res.status(400).json({
-          ok: false,
-          error: "unknown task",
-          hint:
-            "use ?task=refresh|truncate|truncate-and-refresh|projections|matchups|headshots|dedupe|settle",
-        });
+      const ok = steps.every((s) => s.ok);
+      const summary = {
+        ok,
+        steps,
+        hint: "See 'steps' array for per-step status. Even if one failed, later steps may have run.",
+      };
+      return res.status(ok ? 200 : 500).json(summary);
     }
+
+    // ---------- INDIVIDUAL TASKS ----------
+    if (task === "headshots") {
+      const r = await backfillHeadshots({ adminDb });
+      return res.status(200).json({ ok: true, ...r });
+    }
+
+    if (task === "dedupe") {
+      const r = await dedupePlayers({ adminDb });
+      return res.status(200).json({ ok: true, ...r });
+    }
+
+    if (task === "projections") {
+      const r = await seedWeekProjections({ adminDb, week, season });
+      return res.status(200).json({ ok: true, ...r });
+    }
+
+    if (task === "matchups") {
+      const r = await seedWeekMatchups({ adminDb, week, season });
+      return res.status(200).json({ ok: true, ...r });
+    }
+
+    if (task === "settle") {
+      const r = await settleSeason({ adminDb });
+      return res.status(200).json({ ok: true, ...r });
+    }
+
+    return res.status(400).json({
+      ok: false,
+      error: "unknown task",
+      hint:
+        "use ?task=refresh|headshots|dedupe|projections|matchups|settle",
+    });
   } catch (e) {
     console.error("cron index fatal:", e);
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
