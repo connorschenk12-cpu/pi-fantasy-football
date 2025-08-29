@@ -1,7 +1,5 @@
 /* eslint-disable no-console */
-// src/server/cron/dedupePlayers.js
-// Keep one doc per identity; prefer the doc whose id matches espnId (if any),
-// else the one with a more recent updatedAt.
+import { adminDb } from "../../lib/firebaseAdmin.js";
 
 function identityFor(p) {
   const eid = p.espnId ?? p.espn_id ?? null;
@@ -9,61 +7,39 @@ function identityFor(p) {
   const k = `${(p.name || "").toLowerCase()}|${(p.team || "").toLowerCase()}|${(p.position || "").toLowerCase()}`;
   return `ntp:${k}`;
 }
-function ts(p) {
-  const raw = p.updatedAt;
-  if (!raw) return 0;
-  try {
-    if (raw.toDate) return raw.toDate().getTime();
-    if (raw.seconds) return Number(raw.seconds) * 1000;
-    if (raw instanceof Date) return raw.getTime();
-    return Number(raw) || 0;
-  } catch {
-    return 0;
-  }
-}
 
-export async function dedupePlayers({ adminDb }) {
-  const snap = await adminDb.collection("players").get();
-  const docs = snap.docs;
+export async function dedupePlayers({ adminDb: injected } = {}) {
+  const db = injected || adminDb;
 
-  const groups = new Map(); // ident -> [{ref, data}]
-  for (const d of docs) {
-    const data = d.data() || {};
-    const ident = identityFor(data);
-    if (!groups.has(ident)) groups.set(ident, []);
-    groups.get(ident).push({ ref: d.ref, data });
-  }
+  const snap = await db.collection("players").get();
+  const byIdent = new Map();
+  const dupes = [];
 
-  let deleted = 0;
-  let kept = 0;
-
-  for (const entries of groups.values()) {
-    if (entries.length <= 1) { kept += entries.length; continue; }
-
-    // choose winner
-    entries.sort((a, b) => {
-      const ta = ts(a.data);
-      const tb = ts(b.data);
-      if (ta !== tb) return tb - ta; // newer first
-      return String(a.ref.id).localeCompare(String(b.ref.id)); // stable
-    });
-
-    const winner = entries[0];
-    // If any doc id equals espnId, prefer that one
-    const idxByEspnId = entries.findIndex(e => e.data?.espnId && String(e.data.espnId) === String(e.ref.id));
-    const chosen = idxByEspnId >= 0 ? entries[idxByEspnId] : winner;
-
-    // delete the rest
-    const losers = entries.filter(e => e.ref.path !== chosen.ref.path);
-    for (let i = 0; i < losers.length; i += 400) {
-      const chunk = losers.slice(i, i + 400);
-      const batch = adminDb.batch();
-      chunk.forEach((e) => batch.delete(e.ref));
-      await batch.commit();
-      deleted += chunk.length;
+  for (const d of snap.docs) {
+    const p = d.data() || {};
+    const key = identityFor(p);
+    const cur = byIdent.get(key);
+    if (!cur) byIdent.set(key, { ref: d.ref, data: p });
+    else {
+      // keep the one with espnId/photo or newer updatedAt
+      const better = (a, b) => {
+        const aScore =
+          (a.data.espnId ? 2 : 0) + (a.data.photo ? 1 : 0) + (a.data.updatedAt ? 0.1 : 0);
+        const bScore =
+          (b.data.espnId ? 2 : 0) + (b.data.photo ? 1 : 0) + (b.data.updatedAt ? 0.1 : 0);
+        return aScore >= bScore ? a : b;
+      };
+      const keep = better(cur, { ref: d.ref, data: p });
+      const drop = keep.ref.isEqual(cur.ref) ? { ref: d.ref } : cur;
+      byIdent.set(key, keep);
+      dupes.push(drop.ref);
     }
-    kept += 1;
   }
 
-  return { ok: true, kept, deleted };
+  if (!dupes.length) return { ok:true, deleted:0 };
+  const writer = db.bulkWriter({ throttling: { initialOpsPerSecond: 150, maxOpsPerSecond: 300 } });
+  writer.onWriteError((err) => (err.code === 8 && err.failedAttempts < 5 ? true : false));
+  for (const ref of dupes) writer.delete(ref);
+  await writer.close();
+  return { ok:true, deleted: dupes.length };
 }
