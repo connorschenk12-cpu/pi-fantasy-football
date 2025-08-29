@@ -46,11 +46,6 @@ function identityFor(p) {
 
 export default async function handler(req, res) {
   try {
-    // -------- optional auth for cron ----------
-    const auth = req.headers["x-cron-secret"];
-    if (process.env.CRON_SECRET && auth !== process.env.CRON_SECRET) {
-      return res.status(401).json({ ok: false, error: "unauthorized" });
-    }
 
     // -------- 1) wipe existing GLOBAL players (chunked) ----------
     const existingSnap = await adminDb.collection("players").get();
