@@ -1,428 +1,133 @@
 /* eslint-disable no-console */
 // src/components/LeagueAdmin.js
-import React, { useEffect, useMemo, useState } from "react";
-import {
-  listenLeague,
-  listMemberUsernames,
-  initDraftOrder,
-  startDraft,
-  endDraft,
-  setEntrySettings,
-  setDraftSchedule,
-  ensureOrRecreateSchedule,
-  leagueIsFree,
-  // season controls
-  setCurrentWeek,
-  setSeasonEnded,
-} from "../lib/storage.js";
+import React, { useMemo, useState } from "react";
 
-export default function LeagueAdmin({ leagueId, username }) {
-  const [league, setLeague] = useState(null);
-  const [members, setMembers] = useState([]);
+export default function LeagueAdmin() {
+  const thisSeason = useMemo(() => new Date().getFullYear(), []);
   const [saving, setSaving] = useState(false);
+  const [week, setWeek] = useState(1);
+  const [season, setSeason] = useState(thisSeason);
+  const [lastResult, setLastResult] = useState(null);
 
-  // Entry settings form state
-  const [entryEnabled, setEntryEnabled] = useState(false);
-  const [entryAmountPi, setEntryAmountPi] = useState(0);
-
-  // Draft scheduling form state
-  const [draftDateTime, setDraftDateTime] = useState("");
-
-  const isOwner = useMemo(() => !!league && league.owner === username, [league, username]);
-  const draftStatus = league?.draft?.status || "scheduled";
-  const draftDone = draftStatus === "done";
-  const draftScheduled = draftStatus === "scheduled";
-
-  // Subscribe to league
-  useEffect(() => {
-    if (!leagueId) return;
-    return listenLeague(leagueId, (L) => setLeague(L));
-  }, [leagueId]);
-
-  // Load members list
-  useEffect(() => {
-    if (!leagueId) return;
-    (async () => {
-      try {
-        setMembers(await listMemberUsernames(leagueId));
-      } catch (e) {
-        console.error("listMemberUsernames:", e);
-      }
-    })();
-  }, [leagueId]);
-
-  // Seed form defaults when league loads/updates
-  useEffect(() => {
-    if (!league) return;
-    setEntryEnabled(!!league?.entry?.enabled);
-    setEntryAmountPi(Number(league?.entry?.amountPi || 0));
-
-    const sched = Number(league?.draft?.scheduledAt || 0);
-    if (sched) {
-      const dt = new Date(sched);
-      const pad = (n) => String(n).padStart(2, "0");
-      const local = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(
-        dt.getHours()
-      )}:${pad(dt.getMinutes())}`;
-      setDraftDateTime(local);
-    } else {
-      setDraftDateTime("");
-    }
-  }, [league]);
-
-  if (!league) {
-    return <div className="container">Loading league settings…</div>;
-  }
-
-  if (!isOwner) {
-    return (
-      <div className="container">
-        <div className="ribbon ribbon-info">Only the league owner can view admin tools.</div>
-      </div>
-    );
-  }
-
-  async function handleInitDraftOrder() {
-    setSaving(true);
+  async function runTask(task, params = {}) {
     try {
-      const order = await initDraftOrder({ leagueId });
-      alert("Draft order set: " + order.join(" → "));
-    } catch (e) {
-      console.error(e);
-      alert(e?.message || String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
+      setSaving(true);
+      setLastResult(null);
 
-  async function handleStartDraftNow() {
-    setSaving(true);
-    try {
-      await startDraft({ leagueId });
-      alert("Draft started!");
-    } catch (e) {
-      console.error(e);
-      alert(e?.message || String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
+      const qs = new URLSearchParams({ task, ...Object.fromEntries(
+        Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "")
+      ) });
 
-  async function handleEndDraft() {
-    setSaving(true);
-    try {
-      await endDraft({ leagueId });
-      alert("Draft ended.");
-    } catch (e) {
-      console.error(e);
-      alert(e?.message || String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
+      const res = await fetch(`/api/cron?${qs.toString()}`);
+      const text = await res.text();
+      let json;
+      try { json = JSON.parse(text); } catch { json = { raw: text }; }
 
-  async function handleSaveEntry() {
-    setSaving(true);
-    try {
-      await setEntrySettings({
-        leagueId,
-        enabled: !!entryEnabled,
-        amountPi: Number(entryAmountPi || 0),
-      });
-      alert("Entry settings saved.");
-    } catch (e) {
-      console.error(e);
-      alert(e?.message || String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleScheduleDraft() {
-    if (!draftDateTime) {
-      alert("Pick a date & time first.");
-      return;
-    }
-    setSaving(true);
-    try {
-      const ms = new Date(draftDateTime).getTime();
-      await setDraftSchedule({ leagueId, startsAtMs: ms });
-      alert("Draft scheduled!");
-    } catch (e) {
-      console.error(e);
-      alert(e?.message || String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleWriteSchedule() {
-    setSaving(true);
-    try {
-      await ensureOrRecreateSchedule(leagueId, 14);
-      alert("Season schedule created.");
-    } catch (e) {
-      console.error(e);
-      alert(e?.message || String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // Single button: Refresh players (ESPN) + dedupe + headshots via /api/cron?task=refresh
-  async function handleUnifiedRefresh() {
-    setSaving(true);
-    try {
-      const r = await fetch("/api/cron?task=refresh", { method: "POST" });
-      const text = await r.text();
-      // Try to parse JSON but keep raw text fallback so you always see details
-      let j;
-      try { j = JSON.parse(text); } catch (_) { j = null; }
-
-      if (!r.ok) {
-        alert(
-          `Refresh failed (status ${r.status})\n` +
-          (j ? JSON.stringify(j, null, 2) : text || "(no body)")
-        );
+      if (!res.ok) {
+        const payload = json || {};
+        const msg = payload.error || payload.message || `HTTP ${res.status}`;
+        setLastResult({ ok: false, status: res.status, payload });
+        alert(`Refresh failed (status ${res.status})\n${JSON.stringify(payload, null, 2)}`);
         return;
       }
 
-      // Pretty-print the combined steps if present
-      if (j && Array.isArray(j.steps)) {
-        const lines = j.steps.map(s =>
-          `${s.name}: ${s.ok ? "ok" : "err"}${s.status ? ` (status ${s.status})` : ""}${s.error ? ` — ${s.error}` : ""}`
-        );
-        alert(
-          `Refresh complete!\n` +
-          lines.join("\n") +
-          `\n\nDeleted: ${j.deleted ?? "-"}\nWritten: ${j.written ?? "-"}\nReceived: ${j.countReceived ?? "-"}\nSource: ${j.source || "-"}`
-        );
-      } else {
-        alert("Refresh complete!\n" + JSON.stringify(j || text, null, 2));
-      }
-    } catch (err) {
-      console.error("Unified refresh error:", err);
-      alert(err?.message || String(err));
+      setLastResult({ ok: true, status: res.status, payload: json });
+      alert(`Refresh complete!\n${JSON.stringify(json, null, 2)}`);
+    } catch (e) {
+      console.error(e);
+      setLastResult({ ok: false, error: String(e?.message || e) });
+      alert(String(e?.message || e));
     } finally {
       setSaving(false);
     }
   }
 
-  const schedStr = (() => {
-    const s = Number(league?.draft?.scheduledAt || 0);
-    return s ? new Date(s).toLocaleString() : "—";
-  })();
-
-  const currentWeek = Number(league?.settings?.currentWeek || 1);
-  const seasonEnded = !!league?.settings?.seasonEnded;
-
   return (
-    <div className="container">
-      {/* Header */}
-      <div className="header">
-        <h3 className="m0">League Admin</h3>
-        <div className="badge">
-          Week {currentWeek} • {members.length} teams
-        </div>
+    <div className="card">
+      <h2>League Admin</h2>
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
+        <label>
+          Week{" "}
+          <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
+            {Array.from({ length: 18 }).map((_, i) => (
+              <option key={i + 1} value={i + 1}>W{i + 1}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Season{" "}
+          <input
+            type="number"
+            value={season}
+            onChange={(e) => setSeason(Number(e.target.value))}
+            style={{ width: 96 }}
+          />
+        </label>
       </div>
 
-      {/* League summary */}
-      <div className="card mb12">
-        <div className="card-title">Overview</div>
-        <div className="grid2">
-          <div><b>League:</b> {league?.name}</div>
-          <div><b>Owner:</b> {league?.owner}</div>
-          <div className="col-span-2"><b>Members:</b> {members.join(", ") || "—"}</div>
-        </div>
+      {/* PRIMARY one-click workflow */}
+      <div className="card" style={{ padding: 12, marginBottom: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Data Maintenance</h3>
+        <p style={{ marginTop: 0, color: "#666" }}>
+          Runs <strong>refresh players (ESPN)</strong> → <strong>backfill headshots</strong> → <strong>dedupe</strong>.
+        </p>
+        <button
+          className="btn btn-primary"
+          disabled={saving}
+          onClick={() => runTask("full-refresh")}
+        >
+          {saving ? "Refreshing…" : "Full Refresh (ESPN)"}
+        </button>
       </div>
 
-      {/* Draft Controls — hidden if draft is done */}
-      {!draftDone && (
-        <div className="card mb12">
-          <div className="card-title">Draft Controls</div>
-          <div className="grid2 mb8">
-            <div><b>Status:</b> {league?.draft?.status || "scheduled"}</div>
-            <div><b>Scheduled for:</b> {schedStr}</div>
-            <div><b>Clock (ms):</b> {league?.draft?.clockMs || 5000}</div>
-            <div><b>Rounds:</b> {league?.draft?.roundsTotal || 12}</div>
-          </div>
-          <div className="btnbar">
-            <button className="btn btn-primary" disabled={saving} onClick={handleInitDraftOrder}>
-              Initialize Draft Order
-            </button>
-            <button className="btn btn-ghost" disabled={saving} onClick={handleWriteSchedule}>
-              Recreate Season Schedule
-            </button>
-            <button className="btn btn-primary" disabled={saving} onClick={handleStartDraftNow}>
-              Start Draft Now
-            </button>
-            <button className="btn btn-danger" disabled={saving} onClick={handleEndDraft}>
-              End Draft
-            </button>
-          </div>
-          <div className="mt12">
-            <label className="block mb4"><b>Schedule draft (local time)</b></label>
-            <input
-              className="input"
-              type="datetime-local"
-              value={draftDateTime}
-              onChange={(e) => setDraftDateTime(e.target.value)}
-            />
-            <div className="mt8">
-              <button className="btn" disabled={saving} onClick={handleScheduleDraft}>
-                Save Draft Schedule
-              </button>
-            </div>
-            <div className="muted mt8">
-              When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code> and then <code>startDraft()</code>.
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Entry Settings — only while draft is scheduled */}
-      {draftScheduled && (
-        <div className="card mb12">
-          <div className="card-title">Entry Settings</div>
-          <div className="row wrap gap12 ai-center">
-            <label className="row ai-center gap8">
-              <input
-                type="checkbox"
-                checked={entryEnabled}
-                onChange={(e) => setEntryEnabled(e.target.checked)}
-              />
-              Require entry fee
-            </label>
-            <label className="row ai-center gap8">
-              Amount (Pi):
-              <input
-                className="input"
-                type="number"
-                min="0"
-                step="0.01"
-                value={entryAmountPi}
-                onChange={(e) => setEntryAmountPi(e.target.value)}
-                style={{ width: 120 }}
-                disabled={!entryEnabled}
-              />
-            </label>
-            <button className="btn btn-primary" disabled={saving} onClick={handleSaveEntry}>
-              Save
-            </button>
-          </div>
-          {!leagueIsFree(league) && (
-            <div className="muted mt8">
-              Payments are collected in the <b>My Team</b> tab via your provider flow.
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Data Maintenance — single unified button */}
-      <div className="card mb12">
-        <div className="card-title">Data Maintenance</div>
-        <div className="row gap12 ai-center">
-          <button className="btn btn-primary" disabled={saving} onClick={handleUnifiedRefresh}>
-            Refresh Players (ESPN) + Dedupe + Headshots
+      {/* Optional advanced actions */}
+      <details className="card" style={{ padding: 12 }}>
+        <summary style={{ cursor: "pointer", fontWeight: 600 }}>Advanced tasks</summary>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+          <button className="btn" disabled={saving} onClick={() => runTask("refresh")}>
+            Refresh Players Only
           </button>
-          <div className="muted">
-            Runs the combined cron <code>/api/cron?task=refresh</code>.
-          </div>
-        </div>
-        <div className="muted mt8" style={{ lineHeight: 1.5 }}>
-          • This is the same logic your daily cron would run.<br />
-          • If you’ve just deployed changes, click once to refresh immediately.
-        </div>
-      </div>
-
-      {/* Season Controls */}
-      <div className="card mb12">
-        <div className="card-title">Season Controls</div>
-        <div className="mb8">
-          <span className="badge">Current Week: {currentWeek}</span>{" "}
-          <span className="badge" style={{ marginLeft: 6 }}>
-            Season Ended: {seasonEnded ? "Yes" : "No"}
-          </span>
-        </div>
-        <div className="row wrap gap12 ai-center">
-          <label className="row ai-center gap8">
-            Set Week:
-            <input
-              id="admin-week-input"
-              className="input"
-              type="number"
-              min="1"
-              step="1"
-              defaultValue={currentWeek}
-              style={{ width: 100 }}
-            />
-          </label>
-          <button
-            className="btn btn-primary"
-            disabled={saving}
-            onClick={async () => {
-              try {
-                setSaving(true);
-                const input = document.getElementById("admin-week-input");
-                const w = Number(input?.value || 1);
-                await setCurrentWeek({ leagueId, week: w });
-                if (w >= 18 && !seasonEnded) {
-                  await setSeasonEnded({ leagueId, seasonEnded: true });
-                }
-                alert("Week updated.");
-              } catch (err) {
-                console.error(err);
-                alert(err?.message || String(err));
-              } finally {
-                setSaving(false);
-              }
-            }}
-          >
-            Save Week
+          <button className="btn" disabled={saving} onClick={() => runTask("headshots")}>
+            Backfill Headshots Only
           </button>
-          <button
-            className="btn btn-danger"
-            disabled={saving || seasonEnded}
-            onClick={async () => {
-              try {
-                setSaving(true);
-                await setSeasonEnded({ leagueId, seasonEnded: true });
-                alert("Season marked as ended.");
-              } catch (err) {
-                console.error(err);
-                alert(err?.message || String(err));
-              } finally {
-                setSaving(false);
-              }
-            }}
-          >
-            End Season Now
+          <button className="btn" disabled={saving} onClick={() => runTask("dedupe")}>
+            Dedupe Players Only
           </button>
           <button
             className="btn"
-            title="Calls the daily cron endpoint immediately to compute winners and enqueue payouts."
             disabled={saving}
-            onClick={async () => {
-              try {
-                setSaving(true);
-                const r = await fetch("/api/cron?task=settle", { method: "POST" });
-                const j = await r.json().catch(() => ({}));
-                alert(`Settlement triggered.\n${JSON.stringify(j, null, 2)}`);
-              } catch (err) {
-                console.error(err);
-                alert(err?.message || String(err));
-              } finally {
-                setSaving(false);
-              }
-            }}
+            onClick={() => runTask("projections", { week, season })}
           >
-            Run Payout Settlement
+            Seed Projections (W{week}, {season})
+          </button>
+          <button
+            className="btn"
+            disabled={saving}
+            onClick={() => runTask("matchups", { week, season })}
+          >
+            Seed Matchups (W{week}, {season})
+          </button>
+          <button className="btn" disabled={saving} onClick={() => runTask("settle")}>
+            Settle Season (Winners → Payouts)
           </button>
         </div>
-        <div className="muted mt8" style={{ lineHeight: 1.5 }}>
-          • When <b>Week ≥ 18</b> or <b>Season Ended = Yes</b>, the daily cron will settle the league.<br />
-          • Ensure all entry payments are recorded and <code>treasury.poolPi</code> is funded.<br />
-          • The cron enqueues payouts and calls your server to send Pi.
+      </details>
+
+      {/* Last result panel */}
+      <div style={{ marginTop: 16, fontFamily: "monospace", whiteSpace: "pre-wrap" }}>
+        <h4 style={{ margin: "12px 0 6px" }}>Last result</h4>
+        <div
+          style={{
+            padding: 10,
+            background: "#f7f7f7",
+            border: "1px solid #eee",
+            borderRadius: 6,
+            maxHeight: 280,
+            overflow: "auto",
+          }}
+        >
+          {lastResult ? JSON.stringify(lastResult, null, 2) : "(none yet)"}
         </div>
       </div>
     </div>
