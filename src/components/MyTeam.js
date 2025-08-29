@@ -2,55 +2,75 @@
 // src/components/MyTeam.js
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  listPlayersMap,
-  listenTeam,
-  listenLeague,
-  moveToBench,
-  moveToStarter,
-  releasePlayerAndClearSlot,
-  computeTeamPoints,
-  asId,
   ROSTER_SLOTS,
+  allowedSlotsForPlayer,
+  listenTeam,
+  emptyRoster,
+  asId,
+  listPlayersMap,
+  moveToStarter,
+  moveToBench,
+  releasePlayerAndClearSlot,
+  projForWeek,
+  opponentForWeek,
 } from "../lib/storage";
 import PlayerBadge from "./common/PlayerBadge";
 
 export default function MyTeam({ leagueId, username, currentWeek }) {
-  const [league, setLeague] = useState(null);
-  const [team, setTeam] = useState(null);
+  const [team, setTeam] = useState({ roster: emptyRoster(), bench: [] });
   const [playersMap, setPlayersMap] = useState(new Map());
-  const [week, setWeek] = useState(Number(currentWeek || 1));
+  const week = Number(currentWeek || 1);
 
-  // Subscribe to league + team
+  // live team
   useEffect(() => {
-    if (!leagueId) return;
-    const unsubL = listenLeague(leagueId, setLeague);
-    const unsubT = listenTeam({ leagueId, username, onChange: setTeam });
-    return () => {
-      unsubL && unsubL();
-      unsubT && unsubT();
-    };
+    if (!leagueId || !username) return;
+    const unsub = listenTeam({ leagueId, username, onChange: (t) => {
+      setTeam(t || { roster: emptyRoster(), bench: [] });
+    }});
+    return () => unsub && unsub();
   }, [leagueId, username]);
 
-  useEffect(() => setWeek(Number(currentWeek || 1)), [currentWeek]);
-
-  // Load global players map
+  // players map
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const map = await listPlayersMap();
-      if (mounted) setPlayersMap(map || new Map());
+      try {
+        const m = await listPlayersMap();
+        if (mounted) setPlayersMap(m || new Map());
+      } catch (e) {
+        console.error("listPlayersMap error:", e);
+      }
     })();
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, []);
 
-  const points = useMemo(() => {
-    if (!team) return { lines: [], total: 0 };
-    return computeTeamPoints({ roster: team.roster, week, playersMap });
-  }, [team, week, playersMap]);
+  const pById = (pid) => (pid ? playersMap.get(asId(pid)) : null);
 
-  async function handleBench(slot) {
+  const rosterLines = useMemo(() => {
+    return (ROSTER_SLOTS || []).map((slot) => {
+      const pid = team?.roster?.[slot] || null;
+      const player = pById(pid);
+      const projected = player ? projForWeek(player, week) : 0;
+      const opp = player ? opponentForWeek(player, week) : "";
+      return { slot, pid, player, projected, opp };
+    });
+  }, [team, playersMap, week]);
+
+  const benchPlayers = useMemo(() => {
+    const ids = Array.isArray(team?.bench) ? team.bench : [];
+    return ids.map((pid) => pById(pid)).filter(Boolean);
+  }, [team, playersMap]);
+
+  async function doMoveToStarter(playerId, slot) {
+    try {
+      await moveToStarter({ leagueId, username, playerId, slot });
+    } catch (e) {
+      console.error("moveToStarter:", e);
+      alert(String(e?.message || e));
+    }
+  }
+
+  async function doBench(slot) {
     try {
       await moveToBench({ leagueId, username, slot });
     } catch (e) {
@@ -59,93 +79,56 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
-  async function handleStarter(pid, slot) {
+  async function doRelease(playerId) {
+    const ok = typeof window !== "undefined"
+      ? window.confirm("Release this player?")
+      : true;
+    if (!ok) return;
     try {
-      await moveToStarter({ leagueId, username, playerId: pid, slot });
-    } catch (e) {
-      console.error("moveToStarter:", e);
-      alert(String(e?.message || e));
-    }
-  }
-
-  async function handleRelease(pid) {
-    if (!window.confirm("Release this player?")) return;
-    try {
-      await releasePlayerAndClearSlot({ leagueId, username, playerId: pid });
+      await releasePlayerAndClearSlot({ leagueId, username, playerId });
     } catch (e) {
       console.error("releasePlayerAndClearSlot:", e);
       alert(String(e?.message || e));
     }
   }
 
-  const rosterLines = useMemo(() => {
-    return (ROSTER_SLOTS || []).map((slot) => {
-      const pid = asId(team?.roster?.[slot] || null);
-      const p = pid ? playersMap.get(pid) : null;
-      const pts = points.lines.find((l) => l.slot === slot);
-      return { slot, pid, player: p, pts };
-    });
-  }, [team, playersMap, points]);
-
-  const benchLines = useMemo(() => {
-    return (team?.bench || []).map((pid) => {
-      const p = playersMap.get(asId(pid));
-      return { pid, player: p };
-    });
-  }, [team, playersMap]);
-
   return (
-    <div>
-      <h2>My Team</h2>
-      <div style={{ marginBottom: 8 }}>
-        Week:{" "}
-        <select value={week} onChange={(e) => setWeek(Number(e.target.value))}>
-          {Array.from({ length: 18 }).map((_, i) => (
-            <option key={i + 1} value={i + 1}>
-              Week {i + 1}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <h3>Starters</h3>
+    <div className="my-team">
+      <h2>Starters</h2>
       <table className="table wide-names">
         <thead>
           <tr>
-            <th>Slot</th>
-            <th>Name</th>
-            <th className="num">Points</th>
-            <th />
+            <th style={{ width: 80 }}>Slot</th>
+            <th>Player</th>
+            <th>Opp</th>
+            <th className="num">Proj (W{week})</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
-          {rosterLines.map((line) => (
-            <tr key={line.slot}>
-              <td>{line.slot}</td>
+          {rosterLines.map(({ slot, pid, player, projected, opp }) => (
+            <tr key={slot}>
+              <td>{slot}</td>
               <td>
-                {line.player ? (
-                  <PlayerBadge player={line.player} />
-                ) : (
-                  <span style={{ color: "#999" }}>Empty</span>
-                )}
-              </td>
-              <td className="num">{line.pts?.points?.toFixed(1) || "-"}</td>
-              <td>
-                {line.pid && (
+                {player ? (
                   <>
-                    <button
-                      className="btn btn-sm"
-                      onClick={() => handleBench(line.slot)}
-                    >
-                      Bench
-                    </button>{" "}
-                    <button
-                      className="btn btn-sm btn-danger"
-                      onClick={() => handleRelease(line.pid)}
-                    >
-                      Release
-                    </button>
+                    <PlayerBadge player={player} />
+                    <span className="player-sub">
+                      {(player.position || "-")}{player.team ? ` • ${player.team}` : ""}
+                    </span>
                   </>
+                ) : <span style={{ color: "#888" }}>— empty —</span>}
+              </td>
+              <td>{opp || "-"}</td>
+              <td className="num">{projected ? projected.toFixed(1) : "0.0"}</td>
+              <td>
+                {player ? (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button className="btn" onClick={() => doBench(slot)}>Bench</button>
+                    <button className="btn btn-danger" onClick={() => doRelease(pid)}>Release</button>
+                  </div>
+                ) : (
+                  <span style={{ color: "#999" }}>—</span>
                 )}
               </td>
             </tr>
@@ -153,50 +136,82 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
         </tbody>
       </table>
 
-      <h3>Bench</h3>
+      <h2 style={{ marginTop: 24 }}>Bench</h2>
       <table className="table wide-names">
         <thead>
           <tr>
-            <th>Name</th>
-            <th />
+            <th>Player</th>
+            <th>Opp</th>
+            <th className="num">Proj (W{week})</th>
+            <th>Start At</th>
           </tr>
         </thead>
         <tbody>
-          {benchLines.map((line) => (
-            <tr key={line.pid}>
-              <td>
-                {line.player ? (
-                  <PlayerBadge player={line.player} />
-                ) : (
-                  <span style={{ color: "#999" }}>Unknown</span>
-                )}
-              </td>
-              <td>
-                {line.pid && (
-                  <>
-                    <button
-                      className="btn btn-sm"
-                      onClick={() => handleStarter(line.pid, "FLEX")}
-                    >
-                      Start
-                    </button>{" "}
-                    <button
-                      className="btn btn-sm btn-danger"
-                      onClick={() => handleRelease(line.pid)}
-                    >
-                      Release
-                    </button>
-                  </>
-                )}
+          {benchPlayers.map((bp) => {
+            const allowed = allowedSlotsForPlayer(bp); // e.g., ["RB"] or ["WR"] etc.
+            // Map position → concrete starter slots (e.g., RB -> RB1,RB2,FLEX)
+            const slotOptions = (() => {
+              const pos = String(bp?.position || "").toUpperCase();
+              switch (pos) {
+                case "QB": return ["QB"];
+                case "RB": return ["RB1", "RB2", "FLEX"];
+                case "WR": return ["WR1", "WR2", "FLEX"];
+                case "TE": return ["TE", "FLEX"];
+                case "K":  return ["K"];
+                case "DEF":return ["DEF"];
+                default:   return ["FLEX"]; // safe fallback
+              }
+            })();
+
+            // Filter options by allowed (rules) just in case
+            const legalTargets = slotOptions.filter((slot) => {
+              const p = String(bp?.position || "").toUpperCase();
+              if (slot.startsWith("RB")) return p === "RB";
+              if (slot.startsWith("WR")) return p === "WR";
+              return (
+                (slot === "QB" && p === "QB") ||
+                (slot === "TE" && p === "TE") ||
+                (slot === "K"  && p === "K")  ||
+                (slot === "DEF"&& p === "DEF")||
+                (slot === "FLEX" && (p === "RB" || p === "WR" || p === "TE"))
+              );
+            });
+
+            return (
+              <tr key={bp.id}>
+                <td>
+                  <PlayerBadge player={bp} />
+                  <span className="player-sub">
+                    {(bp.position || "-")}{bp.team ? ` • ${bp.team}` : ""}
+                  </span>
+                </td>
+                <td>{opponentForWeek(bp, week) || "-"}</td>
+                <td className="num">{projForWeek(bp, week).toFixed(1)}</td>
+                <td>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {legalTargets.map((slot) => (
+                      <button
+                        key={slot}
+                        className="btn btn-primary"
+                        onClick={() => doMoveToStarter(bp.id, slot)}
+                      >
+                        {slot}
+                      </button>
+                    ))}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+          {benchPlayers.length === 0 && (
+            <tr>
+              <td colSpan={4} style={{ color: "#999", paddingTop: 12 }}>
+                No one on your bench yet.
               </td>
             </tr>
-          ))}
+          )}
         </tbody>
       </table>
-
-      <div style={{ marginTop: 12, fontWeight: "bold" }}>
-        Total Points: {points.total.toFixed(1)}
-      </div>
     </div>
   );
 }
