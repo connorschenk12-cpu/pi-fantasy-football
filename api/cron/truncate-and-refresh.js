@@ -2,11 +2,13 @@
 /* eslint-disable no-console */
 import { adminDb } from "../../src/lib/firebaseAdmin.js";
 
-const TEAMS_URL = "http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams";
+const TEAMS_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams";
 
 export const config = {
-  maxDuration: 60, // Node function limit on Vercel
+  maxDuration: 60,
 };
+
+const H = { "x-espn-site-app": "sports" };
 
 function normPos(pos) {
   return String(pos || "").toUpperCase();
@@ -29,7 +31,7 @@ function espnHeadshot(espnId) {
 }
 
 async function fetchJson(url, where) {
-  const r = await fetch(url, { cache: "no-store" });
+  const r = await fetch(url, { cache: "no-store", headers: H });
   if (!r.ok) {
     const text = await r.text().catch(() => "");
     throw new Error(`fetch failed @ ${where} (${r.status}) ${text}`.slice(0, 500));
@@ -46,6 +48,11 @@ function identityFor(p) {
 
 export default async function handler(req, res) {
   try {
+    // -------- optional auth (leave env unset to disable) ----------
+    const auth = req.headers["x-cron-secret"];
+    if (process.env.CRON_SECRET && auth !== process.env.CRON_SECRET) {
+      return res.status(401).json({ ok: false, error: "unauthorized" });
+    }
 
     // -------- 1) wipe existing GLOBAL players (chunked) ----------
     const existingSnap = await adminDb.collection("players").get();
@@ -62,46 +69,72 @@ export default async function handler(req, res) {
 
     // -------- 2) pull ESPN teams and rosters ----------
     const teamsJson = await fetchJson(TEAMS_URL, "teams");
-    const teamItems = teamsJson?.sports?.[0]?.leagues?.[0]?.teams || [];
-    const teams = teamItems
-      .map((t) => t?.team)
+    // Try a few shapes ESPN uses
+    const teamItems =
+      teamsJson?.sports?.[0]?.leagues?.[0]?.teams ??
+      teamsJson?.leagues?.[0]?.teams ??
+      teamsJson?.teams ??
+      [];
+
+    const teams = (Array.isArray(teamItems) ? teamItems : [])
+      .map((t) => t?.team || t) // some items are { team: {...} }
       .filter(Boolean)
-      .map((t) => ({ id: t.id, slug: t.abbreviation || t.slug || t.name }));
+      .map((t) => ({
+        id: t.id,
+        abbr: t.abbreviation || t.slug || t.name,
+      }))
+      .filter((t) => t.id);
 
     if (!teams.length) {
+      console.error("ESPN teams parse failed. Root keys seen:", Object.keys(teamsJson || {}));
       return res.status(500).json({ ok: false, where: "teams-parse", error: "no teams found" });
     }
 
-    // fetch each roster
-    const rosterUrls = teams.map((t) => `http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${t.id}?enable=roster`);
-    const rosterResults = await Promise.allSettled(rosterUrls.map((u) => fetchJson(u, `roster:${u}`)));
+    // Build roster URLs (use HTTPS)
+    const rosterUrls = teams.map(
+      (t) => `https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${t.id}?enable=roster`
+    );
+
+    const rosterResults = await Promise.allSettled(
+      rosterUrls.map((u) => fetchJson(u, `roster:${u}`))
+    );
 
     // -------- 3) normalize & dedupe ----------
+    let rosterFulfilled = 0;
+    let rosterRejected = 0;
     const collected = [];
+
     rosterResults.forEach((r, idx) => {
+      const teamMeta = teams[idx];
       if (r.status !== "fulfilled") {
-        console.warn("Roster fetch failed:", teams[idx]?.id, r.reason?.message || r.reason);
+        rosterRejected += 1;
+        console.warn("Roster fetch failed:", teamMeta?.id, r.reason?.message || r.reason);
         return;
       }
+      rosterFulfilled += 1;
+
       const data = r.value || {};
-      const roster = data?.team?.athletes || []; // sometimes grouped by position
-      // roster can be: [{ items: [players...] }, { items: [...] }] OR flat array
+      // ESPN roster shape tends to be { team: { athletes: [ { items:[players...] }, ... ] } }
+      const roster = data?.team?.athletes || data?.athletes || [];
       const buckets = Array.isArray(roster) ? roster : [];
       for (const bucket of buckets) {
         const items = bucket?.items || bucket || [];
         if (!Array.isArray(items)) continue;
         for (const it of items) {
-          // ESPN item shape
-          const pid = it?.id ?? it?.uid ?? null;
           const person = it?.athlete || it;
-          const pos = person?.position?.abbreviation || person?.position?.name || person?.position || it?.position;
-          const team = person?.team?.abbreviation || person?.team?.name || person?.team?.displayName || data?.team?.abbreviation;
+          const pos =
+            person?.position?.abbreviation ||
+            person?.position?.name ||
+            person?.position ||
+            it?.position;
+          const abbr =
+            person?.team?.abbreviation ||
+            person?.team?.shortDisplayName ||
+            person?.team?.name ||
+            teamMeta?.abbr ||
+            "";
 
-          const espnId =
-            person?.id ??
-            person?.uid ??
-            pid ??
-            null;
+          const espnId = person?.id ?? person?.uid ?? it?.id ?? it?.uid ?? null;
 
           const name =
             person?.displayName ||
@@ -115,13 +148,11 @@ export default async function handler(req, res) {
             id: String(espnId || name || "").trim(),
             name: displayName({ name }),
             position: normPos(pos),
-            team: normTeam(team),
+            team: normTeam(abbr),
             espnId: espnId ? String(espnId) : null,
-            // headshot from espnId; if roster had one, we could also use person.headshot.href
             photo: espnHeadshot(espnId),
-            // compact fields we support downstream
-            projections: {}, // none from this endpoint (future: add projection source if desired)
-            matchups: {},    // none here
+            projections: {},
+            matchups: {},
           };
           if (player.id) collected.push(player);
         }
@@ -132,12 +163,11 @@ export default async function handler(req, res) {
     for (const p of collected) {
       const k = identityFor(p);
       if (!byIdent.has(k)) byIdent.set(k, p);
-      // if needed, we could prefer ones that have espnId/headshot; here all should have espnId
     }
     const finalPlayers = Array.from(byIdent.values());
     const countReceived = finalPlayers.length;
 
-    // -------- 4) write in chunks (new batch per chunk) ----------
+    // -------- 4) write in chunks (NEW batch per chunk) ----------
     let written = 0;
     let idx = 0;
     while (idx < finalPlayers.length) {
@@ -172,6 +202,8 @@ export default async function handler(req, res) {
       deleted,
       written,
       countReceived,
+      rosterFulfilled,
+      rosterRejected,
       source: "espn:teams+rosters",
     });
   } catch (e) {
