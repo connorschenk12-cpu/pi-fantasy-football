@@ -1,71 +1,68 @@
-// src/server/cron/backfillHeadshots.js
 /* eslint-disable no-console */
-import { getBulkWriterWithBackoff, sleep } from "./firestoreWrite.js";
+// src/server/cron/backfillHeadshots.js
+// Pages through players and only fills missing headshots.
+// Uses exponential backoff on commit. Cursor: "<name>|<id>"
 
-function isHttpUrl(u) {
-  return !!u && typeof u === "string" && /^https?:\/\//i.test(u);
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+async function commitWithBackoff(batch, attempt=0){
+  try { await batch.commit(); }
+  catch(e){
+    const msg = String(e?.message||e);
+    if (/RESOURCE_EXHAUSTED/i.test(msg) && attempt < 5){
+      const wait = 300 * Math.pow(2, attempt);
+      console.warn(`headshots: backoff ${wait}ms (attempt ${attempt+1})`);
+      await sleep(wait);
+      return commitWithBackoff(batch, attempt+1);
+    }
+    throw e;
+  }
 }
-function isEspnHeadshot(u) {
-  return isHttpUrl(u) && /espncdn\.com\/i\/headshots\/nfl\/players\/full\/\d+\.png/i.test(u);
-}
-function espnHeadshot(espnId) {
-  const idStr = String(espnId || "").replace(/[^\d]/g, "");
+
+function espnHeadshot(espnId){
+  const idStr = String(espnId||"").replace(/[^\d]/g,"");
   return idStr ? `https://a.espncdn.com/i/headshots/nfl/players/full/${idStr}.png` : null;
 }
 
-/**
- * Backfill missing headshots using ESPN id.
- * - Does NOT overwrite a non-ESPN custom photo
- * - If photo is empty or already ESPN-style (but wrong/missing), updates it
- */
-export async function backfillHeadshots({ adminDb }) {
+export async function backfillHeadshots({ adminDb, limit=25, cursor=null }){
   const col = adminDb.collection("players");
-  const snap = await col.get();
+  let q = col.orderBy("name").orderBy("id").limit(Math.max(1, Math.min(limit, 100)));
 
-  if (snap.empty) {
-    return { ok: true, scanned: 0, updated: 0, skipped: 0 };
+  if (cursor && cursor.includes("|")){
+    const [n,i] = cursor.split("|");
+    q = q.startAfter(n, i);
   }
 
-  const writer = getBulkWriterWithBackoff(adminDb);
-  let scanned = 0;
+  const snap = await q.get();
+  if (snap.empty) return { ok:true, done:true, processed:0, updated:0 };
+
+  let processed = 0;
   let updated = 0;
-  let skipped = 0;
+  const batch = adminDb.batch();
 
-  for (const d of snap.docs) {
-    scanned += 1;
+  for (const d of snap.docs){
+    processed += 1;
     const p = d.data() || {};
-    const espnId = p.espnId ?? p.espn_id ?? null;
+    if (p.photo) continue;
 
-    // If the doc already has a custom (non-ESPN) http photo, skip
-    if (isHttpUrl(p.photo) && !isEspnHeadshot(p.photo)) {
-      skipped += 1;
-      continue;
-    }
+    const espnId =
+      p.espnId ?? p.espn_id ?? (p.espn && (p.espn.playerId || p.espn.id)) ?? null;
+    const photo = espnHeadshot(espnId);
+    if (!photo) continue;
 
-    // If no espnId, we can't backfill
-    if (!espnId) {
-      skipped += 1;
-      continue;
-    }
-
-    const desired = espnHeadshot(espnId);
-    if (!desired) {
-      skipped += 1;
-      continue;
-    }
-
-    if (p.photo === desired) {
-      skipped += 1; // already correct
-      continue;
-    }
-
-    writer.set(d.ref, { photo: desired, updatedAt: new Date() }, { merge: true });
+    batch.set(d.ref, { photo, updatedAt: new Date() }, { merge:true });
     updated += 1;
-
-    // small pacing after bursts
-    if (updated % 300 === 0) await sleep(250);
   }
 
-  await writer.close();
-  return { ok: true, scanned, updated, skipped };
+  if (updated > 0){
+    await commitWithBackoff(batch);
+    await sleep(300);
+  }
+
+  const last = snap.docs[snap.docs.length-1];
+  const nextCursor = `${last.get("name")||""}|${last.get("id")||last.id}`;
+
+  return { ok:true, processed, updated, done: snap.size < Math.max(1, Math.min(limit, 100)), nextCursor };
 }
+
+export default backfillHeadshots;
