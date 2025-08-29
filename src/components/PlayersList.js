@@ -2,7 +2,7 @@
 // src/components/PlayersList.js
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  listPlayers,
+  listPlayers,            // <-- global-only (no args)
   projForWeek,
   opponentForWeek,
   addDropPlayer,
@@ -18,19 +18,21 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
   const [week, setWeek] = useState(Number(currentWeek || 1));
   const [claims, setClaims] = useState(new Map());
 
+  // Load GLOBAL players (no leagueId argument now)
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        const arr = await listPlayers({ leagueId });
+        const arr = await listPlayers(); // <-- changed
         if (mounted) setPlayers(arr || []);
       } catch (e) {
         console.error("listPlayers error:", e);
       }
     })();
     return () => { mounted = false; };
-  }, [leagueId]);
+  }, []); // <-- no leagueId dependency
 
+  // Listen to league claims so we can show "Owned by ..."
   useEffect(() => {
     if (!leagueId) return;
     const unsub = listenLeagueClaims(leagueId, setClaims);
@@ -144,7 +146,8 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
           {filtered.length === 0 && (
             <tr>
               <td colSpan={username ? 4 : 3} style={{ color: "#999", paddingTop: 12 }}>
-                No players match your filters. Add players to Firestore or clear filters.
+                No players match your filters. If this is a fresh deploy, try “Refresh Players”
+                in <b>League Admin → Data Maintenance</b>.
               </td>
             </tr>
           )}
