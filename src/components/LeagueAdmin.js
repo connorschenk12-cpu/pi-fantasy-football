@@ -39,7 +39,7 @@ export default function LeagueAdmin({ leagueId, username }) {
     return listenLeague(leagueId, (L) => setLeague(L));
   }, [leagueId]);
 
-  // Load members
+  // Load members list
   useEffect(() => {
     if (!leagueId) return;
     (async () => {
@@ -51,7 +51,7 @@ export default function LeagueAdmin({ leagueId, username }) {
     })();
   }, [leagueId]);
 
-  // Seed form defaults
+  // Seed form defaults when league loads/updates
   useEffect(() => {
     if (!league) return;
     setEntryEnabled(!!league?.entry?.enabled);
@@ -70,7 +70,9 @@ export default function LeagueAdmin({ leagueId, username }) {
     }
   }, [league]);
 
-  if (!league) return <div className="container">Loading league settings…</div>;
+  if (!league) {
+    return <div className="container">Loading league settings…</div>;
+  }
 
   if (!isOwner) {
     return (
@@ -167,25 +169,36 @@ export default function LeagueAdmin({ leagueId, username }) {
     }
   }
 
-  // ONE BUTTON: truncate players, then re-seed from ESPN team rosters
+  // ONE BUTTON: truncate existing players and seed from ESPN (teams + rosters)
   async function handleTruncateAndRefresh() {
     setSaving(true);
     try {
-      const headers =
-        process.env.REACT_APP_CRON_SECRET
-          ? { "x-cron-secret": process.env.REACT_APP_CRON_SECRET }
-          : {};
-
-      const r = await fetch("/api/cron/truncate-and-refresh", { headers });
-      const body = await r.json().catch(() => ({}));
+      const r = await fetch("/api/cron/truncate-and-refresh", { method: "POST" });
+      const text = await r.text();
+      let body;
+      try { body = JSON.parse(text); } catch { body = text; }
 
       if (!r.ok) {
-        alert(`Refresh failed (status ${r.status})\n${body?.error || ""}`);
-      } else {
         alert(
-          `Refresh complete.\nDeleted: ${body.deleted ?? "?"}\nWritten: ${body.written ?? "?"}`
+          [
+            "Refresh failed",
+            `status ${r.status}`,
+            typeof body === "string" ? body : JSON.stringify(body)
+          ].join("\n")
         );
+        return;
       }
+
+      // Expecting shape { ok, deleted, written, countReceived, source }
+      alert(
+        [
+          "Refresh complete!",
+          `Deleted: ${body.deleted ?? "?"}`,
+          `Written: ${body.written ?? "?"}`,
+          `Received: ${body.countReceived ?? "?"}`,
+          `Source: ${body.source ?? "espn"}`
+        ].join("\n")
+      );
     } catch (err) {
       console.error("truncate-and-refresh error:", err);
       alert(err?.message || String(err));
@@ -212,7 +225,7 @@ export default function LeagueAdmin({ leagueId, username }) {
         </div>
       </div>
 
-      {/* Overview */}
+      {/* League summary */}
       <div className="card mb12">
         <div className="card-title">Overview</div>
         <div className="grid2">
@@ -259,11 +272,14 @@ export default function LeagueAdmin({ leagueId, username }) {
                 Save Draft Schedule
               </button>
             </div>
+            <div className="muted mt8">
+              When the timestamp is reached, your cron/edge job should call <code>findDueDrafts()</code> and then <code>startDraft()</code>.
+            </div>
           </div>
         </div>
       )}
 
-      {/* Entry Settings — only while draft is still scheduled */}
+      {/* Entry Settings — hidden once draft is not scheduled */}
       {draftScheduled && (
         <div className="card mb12">
           <div className="card-title">Entry Settings</div>
@@ -305,16 +321,21 @@ export default function LeagueAdmin({ leagueId, username }) {
       <div className="card mb12">
         <div className="card-title">Data Maintenance</div>
         <div className="row gap12 ai-center">
-          <button className="btn btn-primary" disabled={saving} onClick={handleTruncateAndRefresh}>
-            Reset & Refresh Players (ESPN only)
+          <button
+            className="btn btn-primary"
+            disabled={saving}
+            onClick={handleTruncateAndRefresh}
+            title="Deletes existing global players and re-seeds from ESPN (teams + rosters)."
+          >
+            Refresh Players from ESPN (truncate + seed)
           </button>
           <div className="muted">
-            Clears <code>players</code> then reseeds from ESPN team rosters (includes headshots).
+            Pulls only from ESPN teams/rosters to avoid duplicates.
           </div>
         </div>
         <div className="muted mt8" style={{ lineHeight: 1.5 }}>
-          • One-time cleanup to remove duplicates and unify IDs.<br/>
-          • After this, keep your daily job pointed at ESPN-only refresh.
+          • This runs the same logic your daily cron can execute.<br/>
+          • It replaces your global <code>players</code> collection with a clean ESPN-only set.
         </div>
       </div>
 
@@ -401,6 +422,11 @@ export default function LeagueAdmin({ leagueId, username }) {
           >
             Run Payout Settlement
           </button>
+        </div>
+        <div className="muted mt8" style={{ lineHeight: 1.5 }}>
+          • When <b>Week ≥ 18</b> or <b>Season Ended = Yes</b>, the daily cron will settle the league.<br />
+          • Ensure all entry payments are recorded and <code>treasury.poolPi</code> is funded.<br />
+          • The cron enqueues payouts and calls your server to send Pi.
         </div>
       </div>
     </div>
