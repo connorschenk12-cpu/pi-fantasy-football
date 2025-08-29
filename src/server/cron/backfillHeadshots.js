@@ -1,31 +1,25 @@
 /* eslint-disable no-console */
-// src/server/cron/backfillHeadshots.js
+import { adminDb } from "../../lib/firebaseAdmin.js";
 
-const espnHeadshot = (espnId) => {
-  const idStr = String(espnId || "").replace(/[^\d]/g, "");
-  return idStr ? `https://a.espncdn.com/i/headshots/nfl/players/full/${idStr}.png` : null;
-};
+export async function backfillHeadshots({ adminDb: injected } = {}) {
+  const db = injected || adminDb;
 
-export async function backfillHeadshots({ adminDb }) {
-  const snap = await adminDb.collection("players").get();
-  const docs = snap.docs;
+  const snap = await db.collection("players").get();
+  const writer = db.bulkWriter({ throttling: { initialOpsPerSecond: 150, maxOpsPerSecond: 300 } });
+  writer.onWriteError((err) => (err.code === 8 && err.failedAttempts < 5 ? true : false));
+
   let touched = 0;
-
-  for (let i = 0; i < docs.length; i += 400) {
-    const chunk = docs.slice(i, i + 400);
-    const batch = adminDb.batch();
-    for (const d of chunk) {
-      const p = d.data() || {};
-      if (!p.photo && p.espnId) {
-        const photo = espnHeadshot(p.espnId);
-        if (photo) {
-          batch.set(d.ref, { photo }, { merge: true });
-          touched += 1;
-        }
-      }
-    }
-    await batch.commit();
+  for (const d of snap.docs) {
+    const p = d.data() || {};
+    if (p.photo) continue;
+    const eid = p.espnId || p.espn_id;
+    if (!eid) continue;
+    const idStr = String(eid).replace(/[^\d]/g, "");
+    if (!idStr) continue;
+    const url = `https://a.espncdn.com/i/headshots/nfl/players/full/${idStr}.png`;
+    writer.update(d.ref, { photo: url, updatedAt: new Date() });
+    touched += 1;
   }
-
-  return { ok: true, updated: touched };
+  await writer.close();
+  return { ok:true, updated:touched };
 }
