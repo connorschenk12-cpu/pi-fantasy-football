@@ -4,11 +4,11 @@ import { adminDb } from "../../src/lib/firebaseAdmin.js";
 
 // tasks
 import { refreshPlayersFromEspn } from "../../src/server/cron/refreshPlayersFromEspn.js";
-import { backfillHeadshots }      from "../../src/server/cron/backfillHeadshots.js";
-import { dedupePlayers }          from "../../src/server/cron/dedupePlayers.js";
-import { seedWeekProjections }    from "../../src/server/cron/seedWeekProjections.js";
-import { seedWeekMatchups }       from "../../src/server/cron/seedWeekMatchups.js";
-import { settleSeason }           from "../../src/server/cron/settleSeason.js";
+import { seedWeekProjections } from "../../src/server/cron/seedWeekProjections.js";
+import { seedWeekMatchups } from "../../src/server/cron/seedWeekMatchups.js";
+import { backfillHeadshots } from "../../src/server/cron/backfillHeadshots.js";
+import { dedupePlayers } from "../../src/server/cron/dedupePlayers.js";
+import { settleSeason } from "../../src/server/cron/settleSeason.js";
 
 export const config = { maxDuration: 60 };
 
@@ -19,72 +19,62 @@ function unauthorized(req) {
   return got !== need;
 }
 
-async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
 export default async function handler(req, res) {
   try {
     if (unauthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
 
     const url = new URL(req.url, `http://${req.headers.host}`);
     const task = (url.searchParams.get("task") || "").toLowerCase();
+
+    // Common optional params
     const week = url.searchParams.get("week");
     const season = url.searchParams.get("season");
+    const limit = url.searchParams.get("limit");
+    const cursor = url.searchParams.get("cursor");
+    const team = url.searchParams.get("team"); // some tasks might use it later
 
-    if (task === "refresh") {
-      const out = await refreshPlayersFromEspn({ adminDb });
-      return res.status(200).json(out);
+    let out;
+
+    switch (task) {
+      case "refresh":
+        out = await refreshPlayersFromEspn({ adminDb, limit, cursor, team });
+        break;
+
+      case "projections":
+        out = await seedWeekProjections({ adminDb, week, season, limit, cursor });
+        break;
+
+      case "matchups":
+        out = await seedWeekMatchups({ adminDb, week, season, limit, cursor });
+        break;
+
+      case "headshots":
+        out = await backfillHeadshots({ adminDb, limit, cursor });
+        break;
+
+      case "dedupe":
+        out = await dedupePlayers({ adminDb, limit, cursor });
+        break;
+
+      case "settle":
+        out = await settleSeason({ adminDb, limit, cursor });
+        break;
+
+      default:
+        return res.status(400).json({
+          ok: false,
+          error: "unknown task",
+          hint:
+            "use ?task=refresh|projections|matchups|headshots|dedupe|settle " +
+            "and optionally &week=&season=&limit=&cursor=",
+        });
     }
 
-    if (task === "headshots") {
-      const out = await backfillHeadshots({ adminDb });
-      return res.status(200).json(out);
-    }
-
-    if (task === "dedupe") {
-      const out = await dedupePlayers({ adminDb });
-      return res.status(200).json(out);
-    }
-
-    if (task === "projections") {
-      const out = await seedWeekProjections({ adminDb, week, season });
-      return res.status(200).json(out);
-    }
-
-    if (task === "matchups") {
-      const out = await seedWeekMatchups({ adminDb, week, season });
-      return res.status(200).json(out);
-    }
-
-    if (task === "settle") {
-      const out = await settleSeason({ adminDb });
-      return res.status(200).json(out);
-    }
-
-    if (task === "full-refresh") {
-      const steps = [];
-
-      const r1 = await refreshPlayersFromEspn({ adminDb });
-      steps.push({ step: "refreshPlayersFromEspn", ...r1 });
-      await sleep(500);
-
-      const r2 = await backfillHeadshots({ adminDb });
-      steps.push({ step: "backfillHeadshots", ...r2 });
-      await sleep(500);
-
-      const r3 = await dedupePlayers({ adminDb });
-      steps.push({ step: "dedupePlayers", ...r3 });
-
-      return res.status(200).json({ ok: true, steps });
-    }
-
-    return res.status(400).json({
-      ok: false,
-      error: "unknown task",
-      hint: "use ?task=refresh|headshots|dedupe|projections|matchups|settle|full-refresh",
-    });
+    // Standardize HTTP status
+    if (out && out.ok) return res.status(200).json(out);
+    return res.status(500).json(out || { ok: false, error: "unknown failure" });
   } catch (e) {
     console.error("cron index fatal:", e);
-    // Bubble up Firestore quota messages to the client for visibility
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
