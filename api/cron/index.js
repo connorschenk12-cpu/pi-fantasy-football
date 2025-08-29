@@ -2,7 +2,7 @@
 // /api/cron/index.js
 import { adminDb } from "../../src/lib/firebaseAdmin.js";
 
-// tasks
+// paged helpers
 import { refreshPlayersFromEspn } from "../../src/server/cron/refreshPlayersFromEspn.js";
 import { seedWeekProjections } from "../../src/server/cron/seedWeekProjections.js";
 import { seedWeekMatchups } from "../../src/server/cron/seedWeekMatchups.js";
@@ -19,62 +19,61 @@ function unauthorized(req) {
   return got !== need;
 }
 
+function pageParams(url) {
+  const limit = Number(url.searchParams.get("limit")) || 25; // gentle default
+  const cursor = url.searchParams.get("cursor") || null;
+  return { limit: Math.max(1, Math.min(limit, 100)), cursor };
+}
+
 export default async function handler(req, res) {
   try {
-    if (unauthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+    if (unauthorized(req)) return res.status(401).json({ ok:false, error:"unauthorized" });
 
     const url = new URL(req.url, `http://${req.headers.host}`);
     const task = (url.searchParams.get("task") || "").toLowerCase();
 
-    // Common optional params
-    const week = url.searchParams.get("week");
+    const { limit, cursor } = pageParams(url);
+    const week   = url.searchParams.get("week");
     const season = url.searchParams.get("season");
-    const limit = url.searchParams.get("limit");
-    const cursor = url.searchParams.get("cursor");
-    const team = url.searchParams.get("team"); // some tasks might use it later
+    const overwrite = url.searchParams.get("overwrite");
 
     let out;
 
     switch (task) {
       case "refresh":
-        out = await refreshPlayersFromEspn({ adminDb, limit, cursor, team });
-        break;
+        // ESPN team/roster import is already chunked internally
+        out = await refreshPlayersFromEspn({ adminDb, limit, cursor });
+        return res.status(200).json(out);
 
       case "projections":
-        out = await seedWeekProjections({ adminDb, week, season, limit, cursor });
-        break;
+        out = await seedWeekProjections({ adminDb, week: Number(week), season: Number(season), limit, cursor, overwrite, req });
+        return res.status(200).json(out);
 
       case "matchups":
-        out = await seedWeekMatchups({ adminDb, week, season, limit, cursor });
-        break;
+        out = await seedWeekMatchups({ adminDb, week: Number(week), season: Number(season), limit, cursor, req });
+        return res.status(200).json(out);
 
       case "headshots":
         out = await backfillHeadshots({ adminDb, limit, cursor });
-        break;
+        return res.status(200).json(out);
 
       case "dedupe":
         out = await dedupePlayers({ adminDb, limit, cursor });
-        break;
+        return res.status(200).json(out);
 
       case "settle":
         out = await settleSeason({ adminDb, limit, cursor });
-        break;
+        return res.status(200).json(out);
 
       default:
         return res.status(400).json({
-          ok: false,
-          error: "unknown task",
-          hint:
-            "use ?task=refresh|projections|matchups|headshots|dedupe|settle " +
-            "and optionally &week=&season=&limit=&cursor=",
+          ok:false,
+          error:"unknown task",
+          hint:"use ?task=refresh|projections|matchups|headshots|dedupe|settle&limit=25&cursor=<from-last>"
         });
     }
-
-    // Standardize HTTP status
-    if (out && out.ok) return res.status(200).json(out);
-    return res.status(500).json(out || { ok: false, error: "unknown failure" });
   } catch (e) {
     console.error("cron index fatal:", e);
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
 }
