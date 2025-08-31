@@ -1,9 +1,9 @@
 /* eslint-disable no-console */
-// src/server/cron/seedWeekProjections.js
-// Minimal working seeder that writes a placeholder projection if missing.
-// Replace the projection logic later with your real source.
+// src/server/cron/seedWeekProjectionsFromProps.js
+// Same API shape as above, but imagine you’ll fill this with “props/lines” data later.
+// For now it mirrors the baseline behavior so your button always works.
 
-export async function seedWeekProjections({
+export async function seedWeekProjectionsFromProps({
   adminDb,
   week = 1,
   season,
@@ -18,7 +18,6 @@ export async function seedWeekProjections({
 
   let q = playersCol.orderBy("name").limit(Number(limit) || 25);
   if (cursor) {
-    // cursor must match the same orderBy field; we use name here
     q = q.startAfter(cursor);
   }
 
@@ -35,20 +34,18 @@ export async function seedWeekProjections({
     const projections = data.projections || {};
     const key = String(week || 1);
 
-    // If we don't want to overwrite and a value exists, skip
     if (!overwrite && projections[key] != null) {
       skipped++;
       continue;
     }
 
-    // Placeholder logic: set a tiny baseline so UI sorts consistently
-    // (e.g., QBs slightly above others). Replace with real logic later.
+    // Placeholder “props” baseline, slightly different just to distinguish
     const pos = String(data.position || "").toUpperCase();
     const base =
-      pos === "QB" ? 12.0 :
-      pos === "RB" ? 9.0 :
-      pos === "WR" ? 9.0 :
-      pos === "TE" ? 7.0 :
+      pos === "QB" ? 13.0 :
+      pos === "RB" ? 9.5 :
+      pos === "WR" ? 9.5 :
+      pos === "TE" ? 7.5 :
       pos === "K"  ? 6.0 :
       pos === "DEF"? 6.0 : 5.0;
 
@@ -60,7 +57,6 @@ export async function seedWeekProjections({
 
   if (!snap.empty) {
     const last = snap.docs[snap.docs.length - 1];
-    // use the same field as orderBy — we used 'name'
     nextCursor = last.get("name") || last.id;
   }
 
@@ -76,5 +72,4 @@ export async function seedWeekProjections({
   };
 }
 
-// Provide a default export too, so dynamic import styles work.
-export default seedWeekProjections;
+export default seedWeekProjectionsFromProps;
