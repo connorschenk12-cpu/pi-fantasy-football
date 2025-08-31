@@ -103,18 +103,34 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
+  // Shared colgroups to keep Slot/Opp/Proj compact
+  const startersCols = (
+    <colgroup>
+      <col style={{ width: 40 }} />     {/* Slot (SUPER NARROW) */}
+      <col />                           {/* Player (flex) */}
+      <col style={{ width: 64 }} />     {/* Opp */}
+      <col style={{ width: 88 }} />     {/* Proj */}
+      <col style={{ width: 160 }} />    {/* Actions */}
+    </colgroup>
+  );
+
+  const benchCols = (
+    <colgroup>
+      <col />                         {/* Player (flex) */}
+      <col style={{ width: 64 }} />   {/* Opp */}
+      <col style={{ width: 88 }} />   {/* Proj */}
+      <col style={{ width: 220 }} />  {/* Start At */}
+    </colgroup>
+  );
+
+  // Player cell style: allow wrapping so names stay visible
+  const playerCellStyle = { whiteSpace: "normal", wordBreak: "break-word" };
+
   return (
     <div className="my-team">
       <h2>Starters</h2>
       <table className="table wide-names">
-        {/* Force sane column widths so Player column is visible */}
-        <colgroup>
-          <col style={{ width: 64 }} />      {/* Slot */}
-          <col />                             {/* Player (flex) */}
-          <col style={{ width: 84 }} />      {/* Opp */}
-          <col style={{ width: 120 }} />     {/* Proj */}
-          <col style={{ width: 180 }} />     {/* Actions */}
-        </colgroup>
+        {startersCols}
         <thead>
           <tr>
             <th>Slot</th>
@@ -128,7 +144,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
           {rosterLines.map(({ slot, pid, player, projected, opp, pos }) => (
             <tr key={slot}>
               <td>{slot}</td>
-              <td>
+              <td style={playerCellStyle}>
                 {player ? (
                   <>
                     <PlayerBadge player={player} />
@@ -164,12 +180,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
 
       <h2 style={{ marginTop: 24 }}>Bench</h2>
       <table className="table wide-names">
-        <colgroup>
-          <col />                          {/* Player (flex) */}
-          <col style={{ width: 84 }} />    {/* Opp */}
-          <col style={{ width: 120 }} />   {/* Proj */}
-          <col style={{ width: 220 }} />   {/* Start At */}
-        </colgroup>
+        {benchCols}
         <thead>
           <tr>
             <th>Player</th>
@@ -184,20 +195,13 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
 
             const slotOptions = (() => {
               switch (pos) {
-                case "QB":
-                  return ["QB"];
-                case "RB":
-                  return ["RB1", "RB2", "FLEX"];
-                case "WR":
-                  return ["WR1", "WR2", "FLEX"];
-                case "TE":
-                  return ["TE", "FLEX"];
-                case "K":
-                  return ["K"];
-                case "DEF":
-                  return ["DEF"];
-                default:
-                  return ["FLEX"];
+                case "QB": return ["QB"];
+                case "RB": return ["RB1", "RB2", "FLEX"];
+                case "WR": return ["WR1", "WR2", "FLEX"];
+                case "TE": return ["TE", "FLEX"];
+                case "K":  return ["K"];
+                case "DEF":return ["DEF"];
+                default:   return ["FLEX"];
               }
             })();
 
@@ -215,7 +219,7 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
 
             return (
               <tr key={bp.id}>
-                <td>
+                <td style={playerCellStyle}>
                   <PlayerBadge player={bp} />
                   <span className="player-sub">
                     {pos}
