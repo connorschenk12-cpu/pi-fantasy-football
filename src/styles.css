@@ -143,26 +143,26 @@ body{
 }
 .table .num{ text-align: right; font-variant-numeric: tabular-nums; }
 
-/* ---------- Player Name Column Fix ---------- */
-/* Force wider name column so names + headshots show fully */
-.table.wide-names th:first-child,
-.table.wide-names td:first-child,
+/* ---------- Player Name Column Fix (lists) ---------- */
+/* Make first column wider ONLY on tables where the player is first AND not a lineup table */
+.table.wide-names:not(.lineup) th:first-child,
+.table.wide-names:not(.lineup) td:first-child,
 .table .col-player {
-  min-width: 220px;     /* ensures wide enough space */
-  max-width: 360px;     /* prevents it from stretching too far */
+  min-width: 220px;
+  max-width: 360px;
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;
   font-size: 0.95rem;
 }
 
+/* Common player cell styling */
 .player-cell {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   line-height: 1.2;
 }
-
 .player-cell img {
   width: 28px;
   height: 28px;
@@ -172,8 +172,8 @@ body{
 
 /* Responsive tweak for mobile */
 @media (max-width: 560px){
-  .table.wide-names th:first-child,
-  .table.wide-names td:first-child,
+  .table.wide-names:not(.lineup) th:first-child,
+  .table.wide-names:not(.lineup) td:first-child,
   .table .col-player{
     min-width: 180px;
     font-size: 0.9em;
@@ -208,16 +208,25 @@ body{
 /* ==== Lineup table sizing (My Team) ==== */
 .table.lineup th.slot,
 .table.lineup td.slot{
-  width: 72px;            /* narrower slot column */
+  width: 48px;            /* narrow Slot column */
   text-align: center;
   white-space: nowrap;
 }
 
 .table.lineup th.player,
 .table.lineup td.player{
-  min-width: 280px;       /* wider player column */
-  max-width: 520px;
-  white-space: nowrap;
+  min-width: 260px;       /* wider player column */
+  max-width: 9999px;
+  white-space: normal;    /* allow wrapping to avoid truncation */
+  word-break: break-word;
+}
+
+/* Fallback by order: Player is the 2nd column in lineup tables */
+.table.lineup th:nth-child(2),
+.table.lineup td:nth-child(2){
+  min-width: 260px;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .player-cell .name,
@@ -232,11 +241,4 @@ body{
   font-size: 0.88rem;
   line-height: 1.15;
   color: var(--muted);
-}
-
-/* Make name column wide in lists where it's the first column */
-.table.wide-names th:first-child,
-.table.wide-names td:first-child{
-  min-width: 280px;
-  white-space: nowrap;
 }
