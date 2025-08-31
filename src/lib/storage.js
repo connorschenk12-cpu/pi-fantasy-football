@@ -1,6 +1,3 @@
-/* eslint-disable no-console */
-// src/lib/storage.js
-
 import {
   doc,
   getDoc,
@@ -44,13 +41,22 @@ export function asId(x) {
   return String(x).trim();
 }
 
+// ✅ Normalizer to unify positions (PK → K, D/ST → DEF, etc.)
+export function normalizePosition(pos) {
+  if (!pos) return null;
+  const p = String(pos).toUpperCase().trim();
+  if (p === "PK") return "K";       // Place Kicker → K
+  if (p === "DST" || p === "D/ST") return "DEF"; // Defense
+  return p;
+}
+
 function pickFirstOpen(slots, roster) {
   for (const s of slots) if (!roster[s]) return s;
   return null;
 }
 
 export function defaultSlotForPosition(pos, roster = {}) {
-  const p = String(pos || "").toUpperCase();
+  const p = normalizePosition(pos);
   if (p === "QB") return "QB";
   if (p === "RB") return pickFirstOpen(["RB1", "RB2"], roster) || "FLEX";
   if (p === "WR") return pickFirstOpen(["WR1", "WR2"], roster) || "FLEX";
@@ -75,19 +81,18 @@ export const SLOT_RULES = {
 
 export function isSlotAllowedForPosition(slot, pos) {
   const s = String(slot || "").toUpperCase();
-  const p = String(pos || "").toUpperCase();
+  const p = normalizePosition(pos);
   const allowed = SLOT_RULES[s] || [];
   return allowed.includes(p);
 }
 export function allowedSlotsForPosition(pos) {
-  const p = String(pos || "").toUpperCase();
+  const p = normalizePosition(pos);
   return Object.keys(SLOT_RULES).filter((slot) => SLOT_RULES[slot].includes(p));
 }
 export function allowedSlotsForPlayer(player) {
-  const pos = (player?.position || player?.pos || "").toString().toUpperCase();
+  const pos = normalizePosition(player?.position || player?.pos);
   return allowedSlotsForPosition(pos);
 }
-
 /* =========================================================
    LEAGUE / TEAM READ & LISTEN
    ========================================================= */
@@ -232,9 +237,8 @@ export async function joinLeague({ leagueId, username }) {
   await ensureTeam({ leagueId, username });
   return true;
 }
-
 /* =========================================================
-   PLAYERS (GLOBAL-ONLY SOURCE)
+   PLAYERS (GLOBAL-ONLY SOURCE) + DE-DUPE
    ========================================================= */
 
 export function playerDisplay(p) {
@@ -262,30 +266,32 @@ export function playerDisplay(p) {
   );
 }
 
+function normalizePosition(pos) {
+  const p = String(pos || "").toUpperCase().trim();
+  if (p === "PK") return "K";
+  return p;
+}
+
 /** GLOBAL-ONLY: return players from the root "players" collection and de-dupe */
 export async function listPlayers() {
-  // Load all from GLOBAL collection only
   const raw = [];
   const gSnap = await getDocs(collection(db, "players"));
   gSnap.forEach((d) => raw.push({ id: d.id, __leagueScoped: false, ...d.data() }));
 
-  // Normalize shapes
   const normalized = raw.map((p) => {
     const id = asId(p.id);
-    const position = (p.position || p.pos || "").toString().toUpperCase() || null;
+    const position = normalizePosition(p.position || p.pos);
     const name =
       p.name ??
       p.fullName ??
       p.playerName ??
       (typeof p.id === "string" ? p.id : null);
     const team = p.team || p.nflTeam || p.proTeam || null;
-
     const espnId =
       p.espnId ??
       p.espn_id ??
       (p.espn && (p.espn.playerId || p.espn.id)) ??
       null;
-
     const photo =
       p.photo ||
       p.photoUrl ||
@@ -301,7 +307,6 @@ export async function listPlayers() {
     return { ...p, id, name, position, team, espnId, photo };
   });
 
-  // --- Stronger de-dupe (espnId > name|team|pos) ---
   function identityFor(p) {
     const eid = p.espnId ?? p.espn_id ?? null;
     if (eid) return `espn:${String(eid)}`;
@@ -309,35 +314,26 @@ export async function listPlayers() {
     return `ntp:${k}`;
   }
 
-  // interpret updatedAt across shapes
   function ts(p) {
     const raw = p.updatedAt;
     if (!raw) return 0;
     try {
-      if (raw.toDate) return raw.toDate().getTime();      // Firestore Timestamp (client)
-      if (raw.seconds) return Number(raw.seconds) * 1000; // Firestore Timestamp (admin)
-      if (raw instanceof Date) return raw.getTime();      // Date
-      return Number(raw) || 0;                            // ms
-    } catch (_) {
-      return 0;
-    }
+      if (raw.toDate) return raw.toDate().getTime();
+      if (raw.seconds) return Number(raw.seconds) * 1000;
+      if (raw instanceof Date) return raw.getTime();
+      return Number(raw) || 0;
+    } catch { return 0; }
   }
 
-  // prefer fresher updatedAt; if tie, prefer GLOBAL (here always global)
   function better(a, b) {
-    const ta = ts(a);
-    const tb = ts(b);
+    const ta = ts(a), tb = ts(b);
     if (ta !== tb) return ta > tb ? a : b;
-    const aIsGlobal = !a.__leagueScoped;
-    const bIsGlobal = !b.__leagueScoped;
+    const aIsGlobal = !a.__leagueScoped, bIsGlobal = !b.__leagueScoped;
     if (aIsGlobal !== bIsGlobal) return aIsGlobal ? a : b;
     return a;
   }
 
-  // Mark scope before dedupe (global-only -> false)
   const enriched = normalized.map((p) => ({ ...p, __leagueScoped: !!p.__leagueScoped }));
-
-  // Build identity map
   const byIdent = new Map();
   for (const p of enriched) {
     const idKey = identityFor(p);
@@ -363,9 +359,7 @@ function indexKeysFor(p) {
     p?.yahooId,
     p?.gsisId,
     p?.externalId,
-  ]
-    .map(asId)
-    .filter(Boolean);
+  ].map(asId).filter(Boolean);
 
   const out = new Set(base);
   for (const k of base) {
@@ -393,7 +387,12 @@ export async function getPlayerById({ id }) {
   if (!pid) return null;
   const gref = doc(db, "players", pid);
   const gs = await getDoc(gref);
-  if (gs.exists()) return { id: gs.id, ...gs.data() };
+  if (gs.exists()) {
+    const row = { id: gs.id, ...gs.data() };
+    // normalize PK -> K on read
+    row.position = normalizePosition(row.position || row.pos);
+    return row;
+  }
   return null;
 }
 
@@ -419,9 +418,7 @@ function mergeProjections(existing = {}, incoming = {}) {
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   const out = {};
   for (const k of keys) {
-    const va = a[k];
-    const vb = b[k];
-    // prefer incoming if it's a positive number; else keep existing if defined; else keep incoming if numeric (incl 0)
+    const va = a[k], vb = b[k];
     out[k] = gt0(vb) ? vb : (va != null ? va : (isNum(vb) ? vb : 0));
   }
   return out;
@@ -469,21 +466,19 @@ function safeSlug(s) {
     .slice(0, 64);
 }
 
-/** Seed/merge into GLOBAL players (dedupe + *fresh* batch per chunk + projection/matchup merge) */
+/** Seed/merge into GLOBAL players (dedupe + fresh batch per chunk + PK→K normalize) */
 export async function seedPlayersToGlobal(players = []) {
   if (!Array.isArray(players) || players.length === 0) return { written: 0 };
 
-  // Build an identity index of existing docs so we UPDATE instead of duplicating.
   const existingSnap = await getDocs(collection(db, "players"));
-  const existingById = new Map();  // id -> data
-  const idByIdentity = new Map();  // identity -> id
+  const existingById = new Map();
+  const idByIdentity = new Map();
   existingSnap.forEach((d) => {
     const row = { id: d.id, ...d.data() };
     existingById.set(d.id, row);
     idByIdentity.set(identityForWrite(row), d.id);
   });
 
-  // Build all intended writes first (no batch yet)
   const writes = [];
   for (const raw of players) {
     const espnId =
@@ -492,14 +487,13 @@ export async function seedPlayersToGlobal(players = []) {
       (raw.espn && (raw.espn.playerId || raw.espn.id)) ??
       null;
 
-    const position = (raw.position || raw.pos || "").toString().toUpperCase() || null;
+    const position = normalizePosition(raw.position || raw.pos);
     const team     = raw.team || raw.nflTeam || raw.proTeam || null;
     const name     = playerDisplay(raw);
     const photo    = raw.photo || raw.photoUrl || raw.headshot || raw.image || null;
 
     const identity = identityForWrite({ ...raw, name, team, position, espnId });
 
-    // Choose doc id: existing by identity if present; else deterministic new id
     let docId = idByIdentity.get(identity);
     if (!docId) {
       docId = espnId
@@ -526,23 +520,15 @@ export async function seedPlayersToGlobal(players = []) {
       },
     });
 
-    // keep in-memory indexes consistent to collapse duplicates within this same import
     const merged = {
-      ...prev,
-      id: docId,
-      name,
-      position,
-      team,
-      projections: nextProjections,
-      matchups: nextMatchups,
-      espnId: espnId ?? prev.espnId ?? null,
-      photo: photo || prev.photo || null,
+      ...prev, id: docId, name, position, team,
+      projections: nextProjections, matchups: nextMatchups,
+      espnId: espnId ?? prev.espnId ?? null, photo: photo || prev.photo || null,
     };
     existingById.set(docId, merged);
     idByIdentity.set(identity, docId);
   }
 
-  // Commit in fresh batches per chunk (no reuse-after-commit)
   const CHUNK = 400;
   for (let i = 0; i < writes.length; i += CHUNK) {
     const batch = writeBatch(db);
@@ -554,8 +540,9 @@ export async function seedPlayersToGlobal(players = []) {
 
   return { written: writes.length };
 }
+
 /* =========================================================
-   PROJECTED & ACTUAL POINTS
+   PROJECTED & ACTUAL POINTS / MATCHUPS / STATS
    ========================================================= */
 
 function nameTeamKey(p) {
@@ -564,21 +551,10 @@ function nameTeamKey(p) {
   return name && team ? `${name}|${team}` : null;
 }
 
-// ---- Loose id matching for actual points ----
 function candidateIdsForStats(p) {
-  // collect many possible ids (stringified) plus a NAME|TEAM key
   const ids = [
-    p?.id,
-    p?.sleeperId,
-    p?.player_id,
-    p?.externalId,
-    p?.pid,
-    p?.espnId,
-    p?.yahooId,
-    p?.gsisId,
-  ]
-    .map(asId)
-    .filter(Boolean);
+    p?.id, p?.sleeperId, p?.player_id, p?.externalId, p?.pid, p?.espnId, p?.yahooId, p?.gsisId,
+  ].map(asId).filter(Boolean);
 
   const plus = new Set(ids);
   for (const k of ids) {
@@ -637,18 +613,7 @@ export async function fetchWeekStats({ leagueId, week }) {
     const data = await res.json();
     const out = new Map();
 
-    // PPR scoring
-    const S = {
-      passYds: 0.04,
-      passTD: 4,
-      passInt: -2,
-      rushYds: 0.1,
-      rushTD: 6,
-      recYds: 0.1,
-      recTD: 6,
-      rec: 1,
-      fumbles: -2,
-    };
+    const S = { passYds: 0.04, passTD: 4, passInt: -2, rushYds: 0.1, rushTD: 6, recYds: 0.1, recTD: 6, rec: 1, fumbles: -2 };
     const n = (v) => (v == null ? 0 : Number(v) || 0);
     const computePoints = (row) =>
       Math.round(
@@ -717,6 +682,7 @@ export function pointsForPlayer(p, week, statsMap = null) {
   const proj = projForWeek(p, week);
   return actual || proj || 0;
 }
+
 /** Sum up team points using actual when present else projection */
 export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
   const lines = [];
@@ -733,7 +699,6 @@ export function computeTeamPoints({ roster, week, playersMap, statsMap }) {
   });
   return { lines, total: Math.round(total * 10) / 10 };
 }
-
 /* =========================================================
    CLAIMS (ownership)
    ========================================================= */
@@ -806,7 +771,7 @@ export async function setEntrySettings({ leagueId, enabled, amountPi }) {
       enabled: !!enabled,
       amountPi: amt,
       // lock rake to 2% for paid leagues, 0% for free leagues
-      rakeBps: isPaidLeague ? OWNER_RAKE_BPS : 0,
+      rakeBps: isPaidLeague ? 200 : 0,
     },
   });
 }
@@ -833,19 +798,16 @@ export async function recordSuccessfulEntryPayment({
   if (!snap.exists()) throw new Error("League not found");
   const L = snap.data();
 
-  // determine rake bps: paid leagues use league.entry.rakeBps (default 2%), free => 0
   const isFree = !L?.entry?.enabled || Number(L?.entry?.amountPi || 0) === 0;
-  const rakeBps = isFree ? 0 : Number(L?.entry?.rakeBps ?? OWNER_RAKE_BPS) || 0;
+  const rakeBps = isFree ? 0 : Number(L?.entry?.rakeBps ?? 200) || 0;
 
   const amt = Number(amountPi || 0);
   const rakePi = Math.round(((amt * rakeBps) / 10000) * 10000) / 10000;
   const netPi = Math.round((amt - rakePi) * 10000) / 10000;
 
-  // mark member as paid
   const paid = { ...(L.entry?.paid || {}) };
   paid[username] = { paidAt: serverTimestamp(), txId: paymentId };
 
-  // update treasury
   const T = normalizeTreasury(L);
   const newPool = Number((T.poolPi + netPi).toFixed(4));
   const newRake = Number((T.rakePi + rakePi).toFixed(4));
@@ -896,7 +858,6 @@ export async function allMembersPaidOrFree(leagueId) {
   return members.every((u) => !!paid[u]);
 }
 
-/** Link target for your payment page/flow (Pi) */
 export function paymentCheckoutUrl({ leagueId, username }) {
   return `/payments?league=${encodeURIComponent(leagueId)}&user=${encodeURIComponent(username)}`;
 }
@@ -922,7 +883,7 @@ export function leagueDraftTeamCount(league) {
 }
 export function currentRound(league) {
   const picksTaken = Number(league?.draft?.picksTaken || 0);
-  return Math.min(Math.floor(picksTaken / leagueDraftTeamCount(league)) + 1, DRAFT_ROUNDS_TOTAL);
+  return Math.min(Math.floor(picksTaken / leagueDraftTeamCount(league)) + 1, ROSTER_SLOTS.length + 3);
 }
 export function currentDrafter(league) {
   const d = league?.draft || {};
@@ -931,7 +892,6 @@ export function currentDrafter(league) {
   return order[ptr] || null;
 }
 
-/** Configure the draft order + reset status/pointer */
 export async function configureDraft({ leagueId, order }) {
   const lref = doc(db, "leagues", leagueId);
   const snap = await getDoc(lref);
@@ -944,8 +904,8 @@ export async function configureDraft({ leagueId, order }) {
       direction: 1,
       round: 1,
       picksTaken: 0,
-      roundsTotal: DRAFT_ROUNDS_TOTAL,
-      clockMs: PICK_CLOCK_MS,
+      roundsTotal: ROSTER_SLOTS.length + 3,
+      clockMs: 5000,
       deadline: null,
       scheduledAt: prev?.draft?.scheduledAt || null,
     },
@@ -953,7 +913,6 @@ export async function configureDraft({ leagueId, order }) {
   });
 }
 
-/** NEW: schedule the draft for a future time */
 export async function setDraftSchedule({ leagueId, startsAtMs }) {
   const lref = doc(db, "leagues", leagueId);
   const snap = await getDoc(lref);
@@ -968,9 +927,9 @@ export async function setDraftSchedule({ leagueId, startsAtMs }) {
       direction: 1,
       round: 1,
       picksTaken: 0,
-      roundsTotal: DRAFT_ROUNDS_TOTAL,
-      clockMs: PICK_CLOCK_MS,
-      deadline: Number(startsAtMs) || null, // optional use by cron to flip live
+      roundsTotal: ROSTER_SLOTS.length + 3,
+      clockMs: 5000,
+      deadline: Number(startsAtMs) || null,
     },
     settings: { ...(prev.settings || {}), lockAddDuringDraft: true },
   });
@@ -988,22 +947,7 @@ export async function initDraftOrder({ leagueId }) {
 
 export async function startDraft({ leagueId }) {
   const ref = doc(db, "leagues", leagueId);
-  await updateDoc(ref, { "draft.status": "live", "draft.deadline": Date.now() + PICK_CLOCK_MS });
-}
-
-// Returns leagues whose draft is scheduled and overdue
-export async function findDueDrafts(nowMs = Date.now()) {
-  const leaguesCol = collection(db, "leagues");
-  const all = await getDocs(leaguesCol);
-  const due = [];
-  all.forEach((d) => {
-    const L = d.data();
-    const scheduledAt = Number(L?.draft?.scheduledAt || 0);
-    if (L?.draft?.status === "scheduled" && scheduledAt && nowMs >= scheduledAt) {
-      due.push({ id: d.id, ...L });
-    }
-  });
-  return due;
+  await updateDoc(ref, { "draft.status": "live", "draft.deadline": Date.now() + 5000 });
 }
 
 export async function endDraft({ leagueId }) {
@@ -1020,7 +964,7 @@ export async function setDraftStatus({ leagueId, status }) {
   await updateDoc(doc(db, "leagues", leagueId), { "draft.status": status });
 }
 
-/** Perform a draft pick (now enforces slot rules) */
+/** Perform a draft pick (enforces slot rules) */
 export async function draftPick({ leagueId, username, playerId, playerPosition, slot }) {
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
@@ -1034,12 +978,11 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   const onClock = order[ptr] || null;
   if (onClock !== username) throw new Error("Not your turn");
 
-  // Deny duplicate claims
   const claimRef = doc(db, "leagues", leagueId, "claims", asId(playerId));
   const claimSnap = await getDoc(claimRef);
   if (claimSnap.exists()) throw new Error("Player already owned");
 
-  const pos = String(playerPosition || "").toUpperCase();
+  const pos = normalizePosition(playerPosition);
   let targetSlot = slot ? String(slot).toUpperCase() : null;
 
   if (targetSlot && !isSlotAllowedForPosition(targetSlot, pos)) {
@@ -1051,21 +994,16 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   const team = teamSnap.exists() ? teamSnap.data() : { roster: emptyRoster(), bench: [] };
   const rosterCopy = { ...(team.roster || emptyRoster()) };
 
-  // If no slot provided, choose the first valid open slot; else FLEX (still validated by rules)
   if (!targetSlot) {
     const preferred = allowedSlotsForPosition(pos).find((s) => !rosterCopy[s]);
     targetSlot = preferred || "FLEX";
   }
 
-  // If target slot filled, send to bench
   const sendToBench = !!rosterCopy[targetSlot];
 
   const batch = writeBatch(db);
-
-  // claim
   batch.set(claimRef, { claimedBy: username, at: serverTimestamp() }, { merge: true });
 
-  // put on team
   const newTeam = {
     roster: { ...(team.roster || emptyRoster()) },
     bench: Array.isArray(team.bench) ? [...team.bench] : [],
@@ -1074,11 +1012,10 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   else newTeam.roster[targetSlot] = asId(playerId);
   batch.set(teamRef, newTeam, { merge: true });
 
-  // advance pointer (snake) based on global pick index
   const teamsCount = Math.max(1, Array.isArray(order) ? order.length : 1);
   const prevPicks = Number(league?.draft?.picksTaken || 0);
   const picksTaken = prevPicks + 1;
-  const roundsTotal = Number(league?.draft?.roundsTotal || DRAFT_ROUNDS_TOTAL);
+  const roundsTotal = Number(league?.draft?.roundsTotal || (ROSTER_SLOTS.length + 3));
 
   const mod = picksTaken % teamsCount;
   const round = Math.floor(picksTaken / teamsCount) + 1;
@@ -1086,7 +1023,7 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   const pointer = direction === 1 ? mod : teamsCount - 1 - mod;
 
   const doneAll = picksTaken >= roundsTotal * teamsCount;
-  const nextDeadline = doneAll ? null : Date.now() + (Number(league?.draft?.clockMs) || PICK_CLOCK_MS);
+  const nextDeadline = doneAll ? null : Date.now() + (Number(league?.draft?.clockMs) || 5000);
 
   batch.update(leagueRef, {
     "draft.pointer": Math.max(0, Math.min(teamsCount - 1, pointer)),
@@ -1100,7 +1037,6 @@ export async function draftPick({ leagueId, username, playerId, playerPosition, 
   await batch.commit();
 }
 
-// pick best available (by projections) for the team on clock
 export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   const league = await getLeague(leagueId);
   if (!canDraft(league)) return;
@@ -1128,7 +1064,6 @@ export async function autoPickBestAvailable({ leagueId, currentWeek }) {
   });
 }
 
-// auto-draft on clock expiry
 export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
   const leagueRef = doc(db, "leagues", leagueId);
   const leagueSnap = await getDoc(leagueRef);
@@ -1138,7 +1073,7 @@ export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
   if (!canDraft(league)) return { acted: false, reason: "not-live" };
 
   const now = Date.now();
-  const clockMs = Number(league?.draft?.clockMs || PICK_CLOCK_MS);
+  const clockMs = Number(league?.draft?.clockMs || 5000);
   const deadline = Number(league?.draft?.deadline || 0);
 
   if (!deadline) {
@@ -1155,11 +1090,11 @@ export async function autoDraftIfExpired({ leagueId, currentWeek = 1 }) {
 
   const teamsCount = leagueDraftTeamCount(post);
   const picksTaken = Number(post?.draft?.picksTaken || 0);
-  const roundsTotal = Number(post?.draft?.roundsTotal || DRAFT_ROUNDS_TOTAL);
+  const roundsTotal = Number(post?.draft?.roundsTotal || (ROSTER_SLOTS.length + 3));
   const doneAll = picksTaken >= roundsTotal * teamsCount;
 
   await updateDoc(leagueRef, {
-    "draft.deadline": doneAll ? null : Date.now() + Number(post?.draft?.clockMs || PICK_CLOCK_MS),
+    "draft.deadline": doneAll ? null : Date.now() + Number(post?.draft?.clockMs || clockMs),
     ...(doneAll ? { "draft.status": "done" } : {}),
   });
 
@@ -1175,9 +1110,8 @@ export async function moveToStarter({ leagueId, username, playerId, slot }) {
   const snap = await getDoc(tRef);
   if (!snap.exists()) throw new Error("Team not found");
 
-  // Load player to enforce slot rule
   const player = await getPlayerById({ id: playerId });
-  const pos = (player?.position || "").toUpperCase();
+  const pos = normalizePosition(player?.position || "");
   if (!isSlotAllowedForPosition(slot, pos)) {
     throw new Error(`Cannot place ${pos} in ${slot}.`);
   }
@@ -1491,112 +1425,228 @@ export async function listLeaguesNeedingSettlement() {
 
 /** Compute winners + shares (very simple: 1st place takes all) */
 export async function computeSeasonWinners(league) {
-  // naive: pick highest wins then pointsFor in standings
-  const st = league?.standings || {};
-  const entries = Object.entries(st).map(([u, row]) => ({
-    username: u,
-    pointsFor: Number(row?.pointsFor || 0),
-    wins: Number(row?.wins || 0),
-  }));
-  if (entries.length === 0) return [];
-
-  entries.sort((a, b) => b.wins - a.wins || b.pointsFor - a.pointsFor);
-
-  const winner = entries[0]?.username;
-  if (!winner) return [];
+  if (!league) return { winners: [], totalPoolPi: 0, payouts: [] };
 
   const T = normalizeTreasury(league);
-  const pot = Number(T.poolPi || 0);
+  const totalPool = Number(T.poolPi || 0);
 
-  if (pot < MIN_PAYOUT_PI) return [];
-  return [{ username: winner, sharePi: pot }]; // winner-take-all
-}
+  const standings = league?.standings || {};
+  const rows = Object.entries(standings).map(([username, s]) => ({
+    username,
+    wins: Number(s?.wins || 0),
+    losses: Number(s?.losses || 0),
+    ties: Number(s?.ties || 0),
+    pointsFor: Number(s?.pointsFor || 0),
+    pointsAgainst: Number(s?.pointsAgainst || 0),
+  }));
 
-/** Move pot → payouts.pending; zero the pool. Idempotent-ish. */
-export async function enqueueLeaguePayouts({ leagueId, winners }) {
-  const lref = doc(db, "leagues", leagueId);
-  const snap = await getDoc(lref);
-  if (!snap.exists()) throw new Error("League not found");
-  const L = snap.data();
-  const T = normalizeTreasury(L);
-
-  const total = Number(T.poolPi || 0);
-  if (total < MIN_PAYOUT_PI) return { totalEnqueued: 0 };
-
-  // avoid duplicate enqueues: if there are already pending entries, skip
-  const alreadyPending = (T.payouts.pending || []).some((p) => p.amountPi && p.username);
-  if (alreadyPending) return { totalEnqueued: 0 };
-
-  const now = Date.now();
-  const pending = [...(T.payouts.pending || [])];
-
-  for (const w of winners.slice(0, MAX_WINNERS)) {
-    const amt = Number(w.sharePi || 0);
-    if (amt < MIN_PAYOUT_PI) continue;
-    pending.push({
-      id: `${leagueId}_${w.username}_${now}`,
-      leagueId,
-      username: w.username,
-      amountPi: Math.round(amt * 100) / 100,
-      createdAt: serverTimestamp(),
-      status: "pending",
-    });
+  if (rows.length === 0 || totalPool < MIN_PAYOUT_PI) {
+    return { winners: [], totalPoolPi: totalPool, payouts: [] };
   }
 
-  await updateDoc(lref, {
-    "treasury.payouts.pending": pending,
-    "treasury.poolPi": 0, // move all out of the pool; it now sits in the pending queue
+  // Sort: wins desc, pointsFor desc, losses asc, then name
+  rows.sort((a, b) => {
+    if (b.wins !== a.wins) return b.wins - a.wins;
+    if (b.pointsFor !== a.pointsFor) return b.pointsFor - a.pointsFor;
+    if (a.losses !== b.losses) return a.losses - b.losses;
+    return a.username.localeCompare(b.username);
   });
 
-  return { totalEnqueued: pending.length };
+  const k = Math.max(1, Math.min(MAX_WINNERS, rows.length));
+  const winners = rows.slice(0, k).map((r, i) => ({ username: r.username, rank: i + 1 }));
+
+  // Equal split among winners (rounded to 4dp, fix remainder on the first)
+  const base = Math.floor((totalPool / winners.length) * 10000) / 10000;
+  const amounts = winners.map(() => base);
+  const used = base * winners.length;
+  const remainder = Math.round((totalPool - used) * 10000) / 10000;
+  if (remainder > 0 && amounts.length > 0) amounts[0] = Math.round((amounts[0] + remainder) * 10000) / 10000;
+
+  const payouts = winners.map((w, i) => ({ ...w, amountPi: amounts[i] })).filter(p => p.amountPi >= MIN_PAYOUT_PI);
+
+  return { winners, totalPoolPi: totalPool, payouts };
 }
 
-/** Hook for actually sending Pi from your custodial league wallet to winners.
- *  Replace the TODO with your server-side call that executes the Pi transfer. */
-async function sendPiServerSide({ toUsername, amountPi }) {
-  // TODO: Implement with your Pi backend (server secret) to send Pi.
-  // Return { ok: true, txId: '...' } on success; { ok:false, error:'...' } on failure.
-  console.log("SIMULATED sendPiServerSide ->", toUsername, amountPi);
-  return { ok: true, txId: `sim-${Date.now()}` };
+/* -------------------- Payout queue helpers -------------------- */
+
+function _newPayoutId(username) {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `po-${Date.now()}-${username}-${rand}`;
 }
 
-/** Try to send all pending payouts (best-effort; safe to call daily/cron) */
-export async function trySendPendingPayouts() {
-  const leaguesCol = collection(db, "leagues");
-  const snap = await getDocs(leaguesCol);
-  let sentCount = 0;
+export async function getTreasury(leagueId) {
+  const snap = await getDoc(doc(db, "leagues", leagueId));
+  if (!snap.exists()) return normalizeTreasury(null);
+  return normalizeTreasury(snap.data());
+}
 
-  for (const d of snap.docs) {
-    const L = { id: d.id, ...d.data() };
-    const T = normalizeTreasury(L);
-    const pending = [...(T.payouts.pending || [])];
-    if (pending.length === 0) continue;
+/** Enqueue season payouts if not already queued/sent. Idempotent-ish. */
+export async function enqueueSeasonPayouts({ leagueId }) {
+  const lref = doc(db, "leagues", leagueId);
+  const ls = await getDoc(lref);
+  if (!ls.exists()) throw new Error("League not found");
+  const league = ls.data();
 
-    const newPending = [];
-    const sent = [...(T.payouts.sent || [])];
+  const { payouts } = await computeSeasonWinners(league);
+  if (!payouts.length) return { enqueued: [] };
 
-    for (const p of pending) {
-      // attempt to send each
-      const res = await sendPiServerSide({ toUsername: p.username, amountPi: p.amountPi });
-      if (res.ok) {
-        sent.push({
-          ...p,
-          txId: res.txId || "tx-ok",
-          sentAt: serverTimestamp(),
-          status: "sent",
-        });
-        sentCount += 1;
-      } else {
-        // keep it pending to retry next run
-        newPending.push(p);
-      }
+  const T = normalizeTreasury(league);
+  const existingPending = Array.isArray(T.payouts.pending) ? T.payouts.pending : [];
+  const existingSent = Array.isArray(T.payouts.sent) ? T.payouts.sent : [];
+
+  const already = new Set(
+    [...existingPending, ...existingSent].map(p => `${p.username}|${Number(p.amountPi || 0).toFixed(4)}`)
+  );
+
+  const add = [];
+  for (const p of payouts) {
+    const key = `${p.username}|${Number(p.amountPi || 0).toFixed(4)}`;
+    if (!already.has(key)) {
+      add.push({
+        id: _newPayoutId(p.username),
+        kind: "season",
+        username: p.username,
+        rank: p.rank,
+        amountPi: Number(p.amountPi.toFixed(4)),
+        reason: "Season winnings",
+        status: "pending",
+        at: serverTimestamp(),
+      });
     }
-
-    await updateDoc(doc(db, "leagues", L.id), {
-      "treasury.payouts.pending": newPending,
-      "treasury.payouts.sent": sent,
-    });
   }
 
-  return { sentCount };
+  if (!add.length) return { enqueued: [] };
+
+  const newPending = [...existingPending, ...add];
+  await updateDoc(lref, { "treasury.payouts.pending": newPending });
+  return { enqueued: add.map(p => p.id) };
+}
+
+export async function listPendingPayouts(leagueId) {
+  const snap = await getDoc(doc(db, "leagues", leagueId));
+  if (!snap.exists()) return [];
+  const T = normalizeTreasury(snap.data());
+  return T.payouts.pending;
+}
+
+export async function listSentPayouts(leagueId) {
+  const snap = await getDoc(doc(db, "leagues", leagueId));
+  if (!snap.exists()) return [];
+  const T = normalizeTreasury(snap.data());
+  return T.payouts.sent;
+}
+
+/** Mark a specific pending payout as sent, move to 'sent', deduct pool, and log tx */
+export async function markPayoutSent({ leagueId, payoutId, txId = "manual" }) {
+  const lref = doc(db, "leagues", leagueId);
+  const ls = await getDoc(lref);
+  if (!ls.exists()) throw new Error("League not found");
+  const L = ls.data();
+  const T = normalizeTreasury(L);
+
+  const pending = Array.isArray(T.payouts.pending) ? [...T.payouts.pending] : [];
+  const idx = pending.findIndex(p => p.id === payoutId);
+  if (idx === -1) throw new Error("Payout not found in pending");
+
+  const P = pending[idx];
+  pending.splice(idx, 1);
+
+  const sent = Array.isArray(T.payouts.sent) ? [...T.payouts.sent] : [];
+  const toSend = {
+    ...P,
+    status: "sent",
+    sentAt: serverTimestamp(),
+    txId,
+  };
+  sent.push(toSend);
+
+  const newPool = Math.max(0, Number((T.poolPi - Number(P.amountPi || 0)).toFixed(4)));
+  const txs = Array.isArray(T.txs) ? [...T.txs] : [];
+  txs.push({
+    kind: "payout",
+    username: P.username,
+    amountPi: Number(P.amountPi || 0),
+    txId,
+    at: serverTimestamp(),
+  });
+
+  await updateDoc(lref, {
+    "treasury.poolPi": newPool,
+    "treasury.payouts.pending": pending,
+    "treasury.payouts.sent": sent,
+    "treasury.txs": txs,
+  });
+
+  return { sent: payoutId, poolPi: newPool };
+}
+
+/** Remove a pending payout without sending (admin cancel) */
+export async function cancelPendingPayout({ leagueId, payoutId }) {
+  const lref = doc(db, "leagues", leagueId);
+  const ls = await getDoc(lref);
+  if (!ls.exists()) throw new Error("League not found");
+  const L = ls.data();
+  const T = normalizeTreasury(L);
+
+  const pending = Array.isArray(T.payouts.pending) ? [...T.payouts.pending] : [];
+  const newPending = pending.filter(p => p.id !== payoutId);
+  if (newPending.length === pending.length) return { canceled: false };
+
+  await updateDoc(lref, { "treasury.payouts.pending": newPending });
+  return { canceled: true };
+}
+
+/** One-shot: if league ready, enqueue payouts (doesn't auto-send money) */
+export async function settleLeagueIfReady({ leagueId }) {
+  const lref = doc(db, "leagues", leagueId);
+  const ls = await getDoc(lref);
+  if (!ls.exists()) throw new Error("League not found");
+  const L = ls.data();
+
+  const curWeek = Number(L?.settings?.currentWeek || 1);
+  const seasonEnded = !!L?.settings?.seasonEnded || curWeek >= 18;
+  const ready = L?.draft?.status === "done" && seasonEnded;
+  if (!ready) return { enqueued: [], reason: "not-ready" };
+
+  const res = await enqueueSeasonPayouts({ leagueId });
+  return { enqueued: res.enqueued, reason: res.enqueued.length ? "queued" : "already-queued" };
+}
+
+/* =========================================================
+   ADMIN / DEBUG HELPERS
+   ========================================================= */
+
+export async function clearAllClaims(leagueId) {
+  const col = collection(db, "leagues", leagueId, "claims");
+  const snap = await getDocs(col);
+  const batch = writeBatch(db);
+  snap.forEach((d) => batch.delete(d.ref));
+  await batch.commit();
+}
+
+export async function resetDraftState({ leagueId }) {
+  const lref = doc(db, "leagues", leagueId);
+  await updateDoc(lref, {
+    draft: {
+      status: "scheduled",
+      order: [],
+      pointer: 0,
+      direction: 1,
+      round: 1,
+      picksTaken: 0,
+      roundsTotal: DRAFT_ROUNDS_TOTAL,
+      clockMs: PICK_CLOCK_MS,
+      deadline: null,
+      scheduledAt: null,
+    },
+    "settings.lockAddDuringDraft": false,
+  });
+}
+
+export async function wipeSchedule(leagueId) {
+  const colRef = collection(db, "leagues", leagueId, "schedule");
+  const snap = await getDocs(colRef);
+  const batch = writeBatch(db);
+  snap.forEach((d) => batch.delete(d.ref));
+  await batch.commit();
 }
