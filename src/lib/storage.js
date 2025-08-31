@@ -266,12 +266,6 @@ export function playerDisplay(p) {
   );
 }
 
-function normalizePosition(pos) {
-  const p = String(pos || "").toUpperCase().trim();
-  if (p === "PK") return "K";
-  return p;
-}
-
 /** GLOBAL-ONLY: return players from the root "players" collection and de-dupe */
 export async function listPlayers() {
   const raw = [];
