@@ -1,0 +1,224 @@
+/* eslint-disable no-console */
+import { Timestamp } from "firebase-admin/firestore";
+
+/**
+ * Provider notes:
+ * - The Odds API: https://the-odds-api.com/ (set ODDS_API_KEY)
+ *   We'll query player prop markets: pass yards, rush yards, rec yards, receptions, anytime TD.
+ * - SportsDataIO: https://sportsdata.io/ (set SPORTSDATAIO_KEY)
+ *   If you prefer them, fill the adapter below.
+ *
+ * Output: updates root "players" docs with projections[<week>] = fantasy points
+ * using simple PPR scoring (passYds*0.04 + rushYds*0.1 + recYds*0.1 + receptions*1 + TDprob*6).
+ */
+
+const PPR_WEIGHTS = {
+  passYds: 0.04,
+  rushYds: 0.1,
+  recYds: 0.1,
+  receptions: 1,
+  td: 6, // multiply by touchdown expectation (probability)
+};
+
+// --- util -------------------------------------------------
+
+function asId(x) {
+  if (x == null) return null;
+  if (typeof x === "object" && x.id != null) return String(x.id).trim();
+  return String(x).trim();
+}
+
+function americanToProb(american) {
+  // +150 => 100/(150+100); -120 => 120/(120+100)
+  const a = Number(american);
+  if (!Number.isFinite(a) || a === 0) return 0;
+  return a > 0 ? 100 / (a + 100) : (-a) / ((-a) + 100);
+}
+
+function safeName(s) {
+  return String(s || "").trim().toUpperCase();
+}
+
+function nameTeamKey(name, team) {
+  return `${safeName(name)}|${safeName(team)}`;
+}
+
+function round4(x) {
+  return Math.round(Number(x || 0) * 10000) / 10000;
+}
+
+// --- provider adapters ------------------------------------
+
+/**
+ * The Odds API adapter:
+ * We expect an array of events with a "bookmakers" list containing player prop markets.
+ * Markets we try to use (case-insensitive contains check):
+ * - player_pass_yds
+ * - player_rush_yds
+ * - player_rec_yds
+ * - player_receptions
+ * - player_anytime_td (american odds)
+ *
+ * Configure env:
+ *  ODDS_API_KEY=...
+ */
+async function fetchPropsFromTheOddsAPI({ week, season }) {
+  const apiKey = process.env.ODDS_API_KEY;
+  if (!apiKey) throw new Error("Missing ODDS_API_KEY");
+  // Docs: event-odds endpoint supports player props per event. For simplicity we pull a league snapshot.
+  // NOTE: Tune regions/markets/bookmakers as desired.
+  const url =
+    "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds" +
+    `?regions=us&markets=player_pass_yds,player_rush_yds,player_rec_yds,player_receptions,player_anytime_td&oddsFormat=american&bookmakers=draftkings,fan_duel,caesars&apiKey=${encodeURIComponent(apiKey)}`;
+
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`TheOddsAPI bad response: ${res.status} ${txt}`);
+  }
+  /** @type {Array} */
+  const data = await res.json();
+
+  // Normalize to: [{ name, team, passYds, rushYds, recYds, receptions, anytimeTdProb }]
+  const rows = [];
+
+  for (const event of data || []) {
+    for (const bm of event.bookmakers || []) {
+      for (const market of bm.markets || []) {
+        const mk = (market.key || market.title || "").toLowerCase();
+        for (const outcome of market.outcomes || []) {
+          const player = outcome?.description || outcome?.name || "";
+          const team = outcome?.team || ""; // often blank; we’ll do name-only matches too
+          const k = nameTeamKey(player, team);
+
+          let row = rows.find(r => r.key === k) ||
+                    rows.find(r => r.name === player) ||
+                    null;
+          if (!row) {
+            row = { key: k, name: player, team, passYds: null, rushYds: null, recYds: null, receptions: null, anytimeTdProb: null };
+            rows.push(row);
+          }
+
+          // Over/Under lines typically have "point" (e.g., 62.5 yards)
+          if (mk.includes("pass_yds") && outcome.point != null) row.passYds = Number(outcome.point);
+          if (mk.includes("rush_yds") && outcome.point != null) row.rushYds = Number(outcome.point);
+          if (mk.includes("rec_yds")  && outcome.point != null) row.recYds  = Number(outcome.point);
+          if (mk.includes("receptions") && outcome.point != null) row.receptions = Number(outcome.point);
+
+          if (mk.includes("anytime_td")) {
+            // market returns price (American odds). Convert to implied probability.
+            const american = Number(outcome.price ?? outcome.odds ?? 0);
+            const p = americanToProb(american);
+            if (p > 0) row.anytimeTdProb = Math.max(row.anytimeTdProb ?? 0, p); // take best (highest) implied prob seen
+          }
+        }
+      }
+    }
+  }
+
+  return rows;
+}
+
+/**
+ * (Optional) SportsDataIO adapter skeleton
+ * If you have SPORTSDATAIO_KEY, implement fetching and return the same shape as above.
+ */
+async function fetchPropsFromSportsDataIO({ week, season }) {
+  const key = process.env.SPORTSDATAIO_KEY;
+  if (!key) throw new Error("Missing SPORTSDATAIO_KEY");
+  // Example endpoint (pseudo): https://api.sportsdata.io/v3/nfl/odds/json/PlayerPropsByWeek/{season}/{week}?key=...
+  // Map to { name, team, passYds, rushYds, recYds, receptions, anytimeTdProb }
+  // return rows;
+  throw new Error("SportsDataIO adapter not implemented. Use The Odds API or fill this adapter.");
+}
+
+// --- main -------------------------------------------------
+
+/**
+ * Seeds projections[week] for players in the global "players" collection.
+ * Matching heuristic: (NAME|TEAM) if team provided; else NAME only (case-insensitive).
+ * If multiple players share a name, add team data to your mapping or improve identity logic.
+ */
+export async function seedWeekProjectionsFromProps({ adminDb, week, season, limit = 200, cursor = null, provider = "the-odds-api" }) {
+  if (!week) throw new Error("week is required");
+
+  const fetcher =
+    provider === "sportsdataio" ? fetchPropsFromSportsDataIO
+    : fetchPropsFromTheOddsAPI;
+
+  const propsRows = await fetcher({ week, season });
+
+  // Build a quick index by name and by name|team for matching
+  const byName = new Map();
+  const byNameTeam = new Map();
+  for (const r of propsRows) {
+    const k1 = safeName(r.name);
+    const k2 = nameTeamKey(r.name, r.team);
+    if (!byName.has(k1)) byName.set(k1, r);
+    if (!byNameTeam.has(k2)) byNameTeam.set(k2, r);
+  }
+
+  // Page through players (so we don’t write too many at once)
+  // We’ll order by "name" (string). If you didn’t create this index, Firestore will ask for it once.
+  const col = adminDb.collection("players").orderBy("name");
+  const page = cursor ? col.startAfter(cursor).limit(limit) : col.limit(limit);
+  const snap = await page.get();
+
+  let updated = 0;
+  let skipped = 0;
+  let lastNameForCursor = null;
+
+  const batch = adminDb.batch();
+
+  for (const doc of snap.docs) {
+    const p = doc.data();
+    lastNameForCursor = p?.name || lastNameForCursor;
+
+    const name = p?.name || p?.displayName || "";
+    const team = p?.team || p?.nflTeam || p?.proTeam || "";
+    if (!name) { skipped++; continue; }
+
+    // Try exact name|team first, then name only
+    const r = byNameTeam.get(nameTeamKey(name, team)) || byName.get(safeName(name));
+    if (!r) { skipped++; continue; }
+
+    const passYds = Number(r.passYds || 0);
+    const rushYds = Number(r.rushYds || 0);
+    const recYds  = Number(r.recYds  || 0);
+    const recs    = Number(r.receptions || 0);
+    const tdProb  = Number(r.anytimeTdProb || 0);
+
+    // Use prop lines as expectations (they’re medians-ish; this is a simple heuristic)
+    const fantasy =
+      passYds * PPR_WEIGHTS.passYds +
+      rushYds * PPR_WEIGHTS.rushYds +
+      recYds  * PPR_WEIGHTS.recYds +
+      recs    * PPR_WEIGHTS.receptions +
+      tdProb  * PPR_WEIGHTS.td;
+
+    const wkey = String(week);
+    const projections = { ...(p.projections || {}) };
+    const prev = Number(projections[wkey] || 0);
+    const next = round4(fantasy);
+
+    // Only write if it changes meaningfully (avoid churn)
+    if (Math.abs(next - prev) >= 0.01) {
+      projections[wkey] = next;
+      batch.set(doc.ref, { projections, updatedAt: Timestamp.now() }, { merge: true });
+      updated++;
+    } else {
+      skipped++;
+    }
+  }
+
+  if (updated > 0) await batch.commit();
+
+  return {
+    ok: true,
+    processed: snap.size,
+    updated,
+    skipped,
+    done: snap.empty || !snap.docs.length || snap.docs.length < limit,
+    nextCursor: lastNameForCursor || null,
+  };
+}
