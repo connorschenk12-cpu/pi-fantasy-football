@@ -2,7 +2,7 @@
 // src/components/PlayersList.js
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  listPlayers,            // <-- global-only (no args)
+  listPlayers,            // GLOBAL-only (no args)
   projForWeek,
   opponentForWeek,
   addDropPlayer,
@@ -18,19 +18,19 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
   const [week, setWeek] = useState(Number(currentWeek || 1));
   const [claims, setClaims] = useState(new Map());
 
-  // Load GLOBAL players (no leagueId argument now)
+  // Load GLOBAL players
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        const arr = await listPlayers(); // <-- changed
+        const arr = await listPlayers();
         if (mounted) setPlayers(arr || []);
       } catch (e) {
         console.error("listPlayers error:", e);
       }
     })();
     return () => { mounted = false; };
-  }, []); // <-- no leagueId dependency
+  }, []);
 
   // Listen to league claims so we can show "Owned by ..."
   useEffect(() => {
@@ -39,17 +39,21 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
     return () => unsub && unsub();
   }, [leagueId]);
 
+  // Sync week from parent prop
   useEffect(() => setWeek(Number(currentWeek || 1)), [currentWeek]);
 
+  // Build team list
   const teams = useMemo(() => {
     const s = new Set();
     (players || []).forEach((p) => { if (p.team) s.add(p.team); });
     return ["ALL", ...Array.from(s).sort()];
   }, [players]);
 
-  const filtered = useMemo(() => {
+  // Filter + precompute projection/opponent + sort by highest projection
+  const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return (players || [])
+
+    const base = (players || [])
       .filter((p) => (pos === "ALL" ? true : String(p.position || "").toUpperCase() === pos))
       .filter((p) => (teamFilter === "ALL" ? true : String(p.team || "") === teamFilter))
       .filter((p) => {
@@ -58,8 +62,26 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
         const idStr = String(p.id || "").toLowerCase();
         return name.includes(needle) || idStr.includes(needle);
       })
-      .sort((a, b) => projForWeek(b, week) - projForWeek(a, week));
-  }, [players, q, pos, teamFilter, week]);
+      .map((p) => {
+        const projection = Number(projForWeek(p, week) || 0);
+        const opp = opponentForWeek(p, week) || "";
+        const claimedBy = claims.get(p.id)?.claimedBy || null;
+        return { ...p, projection, opp, claimedBy };
+      });
+
+    // Sort: projection desc, then name asc, then team asc
+    base.sort((a, b) => {
+      if (b.projection !== a.projection) return b.projection - a.projection;
+      const an = (a.name || "").toLowerCase();
+      const bn = (b.name || "").toLowerCase();
+      if (an !== bn) return an < bn ? -1 : 1;
+      const at = (a.team || "").toLowerCase();
+      const bt = (b.team || "").toLowerCase();
+      return at < bt ? -1 : at > bt ? 1 : 0;
+    });
+
+    return base;
+  }, [players, q, pos, teamFilter, week, claims]);
 
   const canManage =
     !!username &&
@@ -117,33 +139,30 @@ export default function PlayersList({ leagueId, league, username, currentWeek })
           </tr>
         </thead>
         <tbody>
-          {filtered.map((p) => {
-            const claimedBy = claims.get(p.id)?.claimedBy || null;
-            return (
-              <tr key={p.id}>
+          {rows.map((p) => (
+            <tr key={p.id}>
+              <td>
+                <PlayerBadge player={p} />
+                <span className="player-sub">
+                  {(p.position || "-")}{p.team ? ` • ${p.team}` : ""}
+                </span>
+              </td>
+              <td>{p.opp || "-"}</td>
+              <td className="num">{p.projection.toFixed(1)}</td>
+              {username && (
                 <td>
-                  <PlayerBadge player={p} />
-                  <span className="player-sub">
-                    {(p.position || "-")}{p.team ? ` • ${p.team}` : ""}
-                  </span>
+                  {p.claimedBy ? (
+                    <span style={{ color: "#999" }}>Owned by {p.claimedBy}</span>
+                  ) : canManage ? (
+                    <button className="btn btn-primary" onClick={() => handleAdd(p.id)}>Add</button>
+                  ) : (
+                    <span style={{ color: "#999" }}>Locked (draft)</span>
+                  )}
                 </td>
-                <td>{opponentForWeek(p, week) || "-"}</td>
-                <td className="num">{projForWeek(p, week).toFixed(1)}</td>
-                {username && (
-                  <td>
-                    {claimedBy ? (
-                      <span style={{ color: "#999" }}>Owned by {claimedBy}</span>
-                    ) : canManage ? (
-                      <button className="btn btn-primary" onClick={() => handleAdd(p.id)}>Add</button>
-                    ) : (
-                      <span style={{ color: "#999" }}>Locked (draft)</span>
-                    )}
-                  </td>
-                )}
-              </tr>
-            );
-          })}
-          {filtered.length === 0 && (
+              )}
+            </tr>
+          ))}
+          {rows.length === 0 && (
             <tr>
               <td colSpan={username ? 4 : 3} style={{ color: "#999", paddingTop: 12 }}>
                 No players match your filters. If this is a fresh deploy, try “Refresh Players”
