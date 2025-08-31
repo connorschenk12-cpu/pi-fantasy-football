@@ -3,7 +3,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ROSTER_SLOTS,
-  allowedSlotsForPlayer,
   listenTeam,
   emptyRoster,
   asId,
@@ -27,6 +26,19 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
   const [team, setTeam] = useState({ roster: emptyRoster(), bench: [] });
   const [playersMap, setPlayersMap] = useState(new Map());
   const week = Number(currentWeek || 1);
+
+  // lightweight, component-scoped CSS to keep columns tight & names ellipsized
+  const styles = `
+    .compact-table { table-layout: fixed; width: 100%; }
+    .compact-table th, .compact-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .slot-col { width: 56px; }          /* narrower slot column */
+    .opp-col { width: 64px; }
+    .proj-col { width: 92px; text-align: right; }
+    .actions-col { width: 170px; }
+    .player-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .badge-wrap { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .player-sub { display: block; color: #777; font-size: 12px; }
+  `;
 
   // live team
   useEffect(() => {
@@ -104,39 +116,62 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
     }
   }
 
+  // helper to produce legal start targets for a bench player
+  function legalTargetsFor(pos) {
+    switch (pos) {
+      case "QB":  return ["QB"];
+      case "RB":  return ["RB1", "RB2", "FLEX"];
+      case "WR":  return ["WR1", "WR2", "FLEX"];
+      case "TE":  return ["TE", "FLEX"];
+      case "K":   return ["K"];
+      case "DEF": return ["DEF"];
+      default:    return ["FLEX"];
+    }
+  }
+
   return (
     <div className="my-team">
+      <style>{styles}</style>
+
       <h2>Starters</h2>
-      <table className="table wide-names">
+      <table className="table wide-names compact-table">
+        <colgroup>
+          <col className="slot-col" />
+          <col />
+          <col className="opp-col" />
+          <col className="proj-col" />
+          <col className="actions-col" />
+        </colgroup>
         <thead>
           <tr>
-            {/* make Slot column a bit narrower so names have room */}
-            <th style={{ width: 60 }}>Slot</th>
+            <th className="slot-col">Slot</th>
             <th>Player</th>
-            <th>Opp</th>
-            <th className="num">Proj (W{week})</th>
-            <th>Actions</th>
+            <th className="opp-col">Opp</th>
+            <th className="proj-col">Proj (W{week})</th>
+            <th className="actions-col">Actions</th>
           </tr>
         </thead>
         <tbody>
           {rosterLines.map(({ slot, pid, player, projected, opp, pos }) => (
             <tr key={slot}>
-              <td>{slot}</td>
+              <td className="slot-col">{slot}</td>
               <td>
                 {player ? (
-                  <>
-                    <PlayerBadge player={player} />
-                    <span className="player-sub">
-                      {pos}{player.team ? ` • ${player.team}` : ""}
-                    </span>
-                  </>
+                  <div className="player-cell">
+                    <div className="badge-wrap">
+                      <PlayerBadge player={player} />
+                      <span className="player-sub">
+                        {pos}{player.team ? ` • ${player.team}` : ""}
+                      </span>
+                    </div>
+                  </div>
                 ) : (
                   <span style={{ color: "#888" }}>— empty —</span>
                 )}
               </td>
-              <td>{opp || "-"}</td>
-              <td className="num">{projected ? projected.toFixed(1) : "0.0"}</td>
-              <td>
+              <td className="opp-col">{opp || "-"}</td>
+              <td className="proj-col">{projected ? projected.toFixed(1) : "0.0"}</td>
+              <td className="actions-col">
                 {player ? (
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     <button className="btn" onClick={() => doBench(slot)}>
@@ -156,63 +191,42 @@ export default function MyTeam({ leagueId, username, currentWeek }) {
       </table>
 
       <h2 style={{ marginTop: 24 }}>Bench</h2>
-      <table className="table wide-names">
+      <table className="table wide-names compact-table">
+        <colgroup>
+          <col />
+          <col className="opp-col" />
+          <col className="proj-col" />
+          <col className="actions-col" />
+        </colgroup>
         <thead>
           <tr>
             <th>Player</th>
-            <th>Opp</th>
-            <th className="num">Proj (W{week})</th>
-            <th>Start At</th>
+            <th className="opp-col">Opp</th>
+            <th className="proj-col">Proj (W{week})</th>
+            <th className="actions-col">Start At</th>
           </tr>
         </thead>
         <tbody>
           {benchPlayers.map((bp) => {
             const pos = normPos(bp?.position);
-
-            const slotOptions = (() => {
-              switch (pos) {
-                case "QB":
-                  return ["QB"];
-                case "RB":
-                  return ["RB1", "RB2", "FLEX"];
-                case "WR":
-                  return ["WR1", "WR2", "FLEX"];
-                case "TE":
-                  return ["TE", "FLEX"];
-                case "K":
-                  return ["K"];
-                case "DEF":
-                  return ["DEF"];
-                default:
-                  return ["FLEX"];
-              }
-            })();
-
-            const legalTargets = slotOptions.filter((slot) => {
-              if (slot.startsWith("RB")) return pos === "RB";
-              if (slot.startsWith("WR")) return pos === "WR";
-              return (
-                (slot === "QB" && pos === "QB") ||
-                (slot === "TE" && pos === "TE") ||
-                (slot === "K" && pos === "K") ||
-                (slot === "DEF" && pos === "DEF") ||
-                (slot === "FLEX" && (pos === "RB" || pos === "WR" || pos === "TE"))
-              );
-            });
-
+            const targets = legalTargetsFor(pos);
             return (
               <tr key={bp.id}>
                 <td>
-                  <PlayerBadge player={bp} />
-                  <span className="player-sub">
-                    {pos}{bp.team ? ` • ${bp.team}` : ""}
-                  </span>
+                  <div className="player-cell">
+                    <div className="badge-wrap">
+                      <PlayerBadge player={bp} />
+                      <span className="player-sub">
+                        {pos}{bp.team ? ` • ${bp.team}` : ""}
+                      </span>
+                    </div>
+                  </div>
                 </td>
-                <td>{opponentForWeek(bp, week) || "-"}</td>
-                <td className="num">{projForWeek(bp, week).toFixed(1)}</td>
-                <td>
+                <td className="opp-col">{opponentForWeek(bp, week) || "-"}</td>
+                <td className="proj-col">{projForWeek(bp, week).toFixed(1)}</td>
+                <td className="actions-col">
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {legalTargets.map((slot) => (
+                    {targets.map((slot) => (
                       <button
                         key={slot}
                         className="btn btn-primary"
