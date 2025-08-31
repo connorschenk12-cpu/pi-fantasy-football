@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 // src/server/cron/refreshPlayersFromEspn.js
-import { fetchJsonNoStore } from "../util/fetchJsonNoStore.js";
+import fetchJsonNoStore from './fetchJsonNoStore.js';
 
 // ESPN endpoints
 const TEAMS_URL = "http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams";
