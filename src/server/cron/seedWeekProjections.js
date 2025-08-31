@@ -1,118 +1,156 @@
 /* eslint-disable no-console */
-// src/server/cron/seedWeekProjections.js
-// Paged + throttled seeding of per-week projections.
-// Call via: /api/cron?task=projections&week=1&limit=50[&cursor=<name|id>][&overwrite=true]
+// src/server/cron/seedWeekProjectionsFromProps.js
+// Seeds players.projections[<week>] using your /api/props/week endpoint.
+// Matching is by (name|team|pos), with PK->K and DST/D-ST/DST -> DEF normalization.
 
-function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
-
-async function commitWithBackoff(batch, attempt=0){
-  try { await batch.commit(); }
-  catch(e){
-    const msg = String(e?.message||e);
-    if (/RESOURCE_EXHAUSTED/i.test(msg) && attempt < 5){
-      const wait = 300 * Math.pow(2, attempt);
-      console.warn(`projections: backoff ${wait}ms (attempt ${attempt+1})`);
-      await sleep(wait);
-      return commitWithBackoff(batch, attempt+1);
-    }
-    throw e;
-  }
+function normPos(pos) {
+  if (!pos) return "";
+  const p = String(pos).trim().toUpperCase();
+  if (p === "PK") return "K";
+  if (p === "DST" || p === "D/ST" || p === "D-ST") return "DEF";
+  return p;
 }
 
-// very light baseline PPR projections just to keep UI meaningful
-const BASELINE = {
-  QB: 16.0,
-  RB: 12.0,
-  WR: 11.0,
-  TE: 8.0,
-  K: 7.0,
-  DEF: 6.0,
-};
-
-function normPos(p){
-  const raw = (p?.position || p?.pos || "").toString().toUpperCase();
-  if (raw.includes("DST") || raw === "D/ST" || raw === "DEFENSE") return "DEF";
-  return raw || "FLEX";
+function baseUrlFromReq(req) {
+  const proto = req.headers["x-forwarded-proto"] || "https";
+  const host  = req.headers["x-forwarded-host"] || req.headers.host;
+  return `${proto}://${host}`;
 }
 
-function computeProjection(p){
-  const pos = normPos(p);
-  if (BASELINE[pos] != null) return BASELINE[pos];
-  // unknown position → very small baseline
-  return 5.0;
+function safeNumber(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// Build a key like "name|team|pos" in lowercase
+function keyFor(name, team, pos) {
+  return [
+    String(name || "").trim().toLowerCase(),
+    String(team || "").trim().toLowerCase(),
+    String(normPos(pos) || "").trim().toLowerCase(),
+  ].join("|");
 }
 
 /**
- * Page through players ordered by (name, id).
- * For each player, if projections[week] is missing (or overwrite=true),
- * set a baseline value.
+ * Expected shape of /api/props/week response (flexible):
+ * {
+ *   ok: true,
+ *   week: 1,
+ *   season: 2025,
+ *   rows: [
+ *     { name: "Josh Allen", team: "BUF", pos: "QB", fantasyPoints: 22.3 }  // preferred field
+ *     // or { points: 22.3 } or { line: 22.3 } etc. We'll pick the first numeric we find.
+ *   ]
+ * }
  */
-export async function seedWeekProjections({
+export async function seedWeekProjectionsFromProps({
   adminDb,
-  week,
-  season,          // currently unused (here for future external sources)
-  limit = 50,
+  week = 1,
+  season = new Date().getFullYear(),
+  limit = 25,
   cursor = null,
   overwrite = false,
+  req,
 }) {
-  if (!Number.isFinite(Number(week)) || Number(week) <= 0) {
-    return { ok:false, error:"week is required and must be > 0" };
+  if (!adminDb) throw new Error("adminDb required");
+
+  // 1) Pull props once per invocation
+  let propsJson = null;
+  try {
+    const base = req ? baseUrlFromReq(req) : "";
+    const url  = `${base}/api/props/week?week=${encodeURIComponent(week)}&season=${encodeURIComponent(season)}`;
+    const resp = await fetch(url, { headers: { "cache-control": "no-store" } });
+    if (!resp.ok) {
+      return { ok:false, error:`props fetch failed: ${resp.status}`, processed:0, updated:0, skipped:0, done:true };
+    }
+    propsJson = await resp.json();
+  } catch (e) {
+    console.warn("seedWeekProjectionsFromProps: props fetch error:", e);
+    return { ok:false, error: String(e?.message || e), processed:0, updated:0, skipped:0, done:true };
   }
-  const wKey = String(week);
 
-  const pageSize = Math.max(1, Math.min(Number(limit)||50, 100));
-  const col = adminDb.collection("players");
+  const rows = Array.isArray(propsJson?.rows) ? propsJson.rows : [];
+  if (!rows.length) {
+    return { ok:true, processed:0, updated:0, skipped:0, done:true, note:"no props rows" };
+  }
 
-  let q = col.orderBy("name").orderBy("id").limit(pageSize);
-  if (cursor && cursor.includes("|")){
-    const [n,i] = cursor.split("|");
-    q = q.startAfter(n, i);
+  // 2) Build a props lookup keyed by name|team|pos
+  const propsMap = new Map();
+  for (const r of rows) {
+    const k = keyFor(r.name, r.team, r.pos);
+    if (!k) continue;
+    // pick the first numeric field we recognize for fantasy point projection
+    const pts =
+      safeNumber(r.fantasyPoints, NaN) ??
+      safeNumber(r.points, NaN) ??
+      safeNumber(r.line, NaN) ??
+      safeNumber(r.fp, NaN);
+    if (!Number.isFinite(pts)) continue;
+    propsMap.set(k, Number(pts));
+  }
+
+  // 3) Page through players by "name" (to keep index simple)
+  //    Cursor is just the last "name" we saw (optionally pipe+id if you prefer).
+  const playersCol = adminDb.collection("players");
+  let q = playersCol.orderBy("name", "asc").limit(Number(limit) || 25);
+
+  // If your prior run used "Name|id" as cursor, split safely
+  if (cursor) {
+    const nameOnly = String(cursor).split("|")[0];
+    q = q.startAfter(nameOnly);
   }
 
   const snap = await q.get();
-  if (snap.empty) return { ok:true, done:true, processed:0, updated:0, skipped:0 };
 
   let processed = 0;
   let updated = 0;
-  let skipped  = 0;
+  let skipped = 0;
 
-  const batch = adminDb.batch();
+  for (const doc of snap.docs) {
+    processed++;
+    const p = doc.data() || {};
+    const name = p.name || "";
+    const team = p.team || p.nflTeam || p.proTeam || "";
+    const pos  = normPos(p.position || p.pos || "");
+    const k    = keyFor(name, team, pos);
 
-  for (const d of snap.docs){
-    processed += 1;
-    const p = d.data() || {};
-    const projections = (p.projections && typeof p.projections === "object") ? { ...p.projections } : {};
-
-    const hasValue = projections[wKey] != null && projections[wKey] !== "";
-    if (hasValue && !String(overwrite).toLowerCase().startsWith("t")) {
-      skipped += 1;
+    const propsPts = propsMap.get(k);
+    if (!Number.isFinite(propsPts)) {
+      skipped++;
       continue;
     }
 
-    // Only set if missing OR overwrite=true
-    const value = computeProjection(p);
-    projections[wKey] = Number(value) || 0;
+    const wKey = String(week);
+    const prevProj = (p.projections && Number(p.projections[wKey])) || 0;
 
-    batch.set(d.ref, { projections, updatedAt: new Date() }, { merge:true });
-    updated += 1;
+    const shouldWrite =
+      overwrite ||
+      !p.projections ||
+      p.projections[wKey] == null ||
+      Number(prevProj) === 0;
+
+    if (!shouldWrite) {
+      skipped++;
+      continue;
+    }
+
+    await doc.ref.set(
+      { projections: { ...(p.projections || {}), [wKey]: Number(propsPts) } },
+      { merge: true }
+    );
+    updated++;
   }
 
-  if (updated > 0){
-    await commitWithBackoff(batch);
-    await sleep(250);
-  }
-
-  const last = snap.docs[snap.docs.length-1];
-  const nextCursor = `${last.get("name")||""}|${last.get("id")||last.id}`;
+  const lastDoc = snap.docs[snap.docs.length - 1];
+  const done = snap.empty || !lastDoc || snap.size < (Number(limit) || 25);
+  const nextCursor = lastDoc ? `${lastDoc.get("name") || lastDoc.id}|${lastDoc.id}` : null;
 
   return {
     ok: true,
     processed,
     updated,
     skipped,
-    done: snap.size < pageSize,
+    done,
     nextCursor,
   };
 }
-
-export default seedWeekProjections;
