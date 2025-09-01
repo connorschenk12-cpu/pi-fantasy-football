@@ -24,7 +24,7 @@ function unauthorized(req) {
 function pageParams(url) {
   const limit = Number(url.searchParams.get("limit")) || 25; // gentle default
   const cursor = url.searchParams.get("cursor") || null;
-  return { limit: Math.max(1, Math.min(limit, 100)), cursor };
+  return { limit: Math.max(1, Math.min(limit, 1000)), cursor };
 }
 
 // Resolve possible named/default exports
@@ -77,7 +77,6 @@ export default async function handler(req, res) {
       }
 
       case "projections": {
-        // choose source (normal vs props)
         const ProjFn = source === "props" ? seedWeekProjectionsFromProps : seedWeekProjections;
         if (typeof ProjFn !== "function") {
           return res.status(500).json({ ok: false, error: "seedWeekProjections not available" });
@@ -126,8 +125,7 @@ export default async function handler(req, res) {
         return res.status(200).json(out);
       }
 
-      case "prune":
-      case "purge": {
+      case "prune": {
         if (typeof pruneIrrelevantPlayers !== "function") {
           return res.status(500).json({ ok: false, error: "pruneIrrelevantPlayers not available" });
         }
@@ -139,8 +137,7 @@ export default async function handler(req, res) {
         return res.status(400).json({
           ok: false,
           error: "unknown task",
-          hint:
-            "use ?task=refresh|projections|matchups|headshots|dedupe|settle|prune&limit=25&cursor=<from-last>&source=props",
+          hint: "use ?task=refresh|projections|matchups|headshots|dedupe|settle|prune&limit=25&cursor=<from-last>&source=props",
         });
     }
   } catch (e) {
