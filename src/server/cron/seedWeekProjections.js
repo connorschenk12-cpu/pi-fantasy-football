@@ -35,6 +35,13 @@ export async function seedWeekProjections({
     const projections = data.projections || {};
     const key = String(week || 1);
 
+    // Defensive players / OL have no projections -> skip
+    const pos = String(data.position || "").toUpperCase();
+    if (!["QB", "RB", "WR", "TE", "K", "DEF"].includes(pos)) {
+      skipped++;
+      continue;
+    }
+
     // If we don't want to overwrite and a value exists, skip
     if (!overwrite && projections[key] != null) {
       skipped++;
@@ -43,7 +50,6 @@ export async function seedWeekProjections({
 
     // Placeholder logic: set a tiny baseline so UI sorts consistently
     // (e.g., QBs slightly above others). Replace with real logic later.
-    const pos = String(data.position || "").toUpperCase();
     const base =
       pos === "QB" ? 12.0 :
       pos === "RB" ? 9.0 :
