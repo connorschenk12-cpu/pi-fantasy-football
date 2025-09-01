@@ -10,6 +10,7 @@ import * as MatchupsMod from "../../src/server/cron/seedWeekMatchups.js";
 import * as HeadshotsMod from "../../src/server/cron/backfillHeadshots.js";
 import * as DedupeMod from "../../src/server/cron/dedupePlayers.js";
 import * as SettleMod from "../../src/server/cron/settleSeason.js";
+import * as PruneMod from "../../src/server/cron/pruneIrrelevantPlayers.js";
 
 export const config = { maxDuration: 60 };
 
@@ -47,6 +48,9 @@ const dedupePlayers =
 
 const settleSeason =
   SettleMod.settleSeason || SettleMod.default;
+
+const pruneIrrelevantPlayers =
+  PruneMod.pruneIrrelevantPlayers || PruneMod.default;
 
 export default async function handler(req, res) {
   try {
@@ -122,11 +126,21 @@ export default async function handler(req, res) {
         return res.status(200).json(out);
       }
 
+      case "prune":
+      case "purge": {
+        if (typeof pruneIrrelevantPlayers !== "function") {
+          return res.status(500).json({ ok: false, error: "pruneIrrelevantPlayers not available" });
+        }
+        out = await pruneIrrelevantPlayers({ adminDb, limit, cursor });
+        return res.status(200).json(out);
+      }
+
       default:
         return res.status(400).json({
           ok: false,
           error: "unknown task",
-          hint: "use ?task=refresh|projections|matchups|headshots|dedupe|settle&limit=25&cursor=<from-last>&source=props",
+          hint:
+            "use ?task=refresh|projections|matchups|headshots|dedupe|settle|prune&limit=25&cursor=<from-last>&source=props",
         });
     }
   } catch (e) {
