@@ -1,14 +1,14 @@
 /* eslint-disable no-console */
 // src/server/cron/refreshPlayersFromEspn.js
-import fetchJsonNoStore from './fetchJsonNoStore.js';
+import fetchJsonNoStore from "./fetchJsonNoStore.js";
 
-// ESPN endpoints
-const TEAMS_URL = "http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams";
+// ESPN endpoints (HTTPS!)
+const TEAMS_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams";
 
 const normPos = (pos) => {
   const p = String(pos || "").toUpperCase().trim();
   if (p === "PK") return "K";
-  if (p === "DST") return "DEF";
+  if (p === "DST" || p === "D/ST") return "DEF";
   return p;
 };
 const normTeam = (t) => String(t || "").toUpperCase().trim();
@@ -35,6 +35,11 @@ const identityFor = (p) => {
 // tiny delay to be nice to Firestore
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Seeds/refreshes the global "players" collection from ESPN:
+ * - QB/RB/WR/TE/K from team rosters
+ * - + one synthetic DEF per team (D/ST)
+ */
 export async function refreshPlayersFromEspn({ adminDb }) {
   // 1) pull teams
   const teamsJson = await fetchJsonNoStore(TEAMS_URL, "teams");
@@ -46,22 +51,25 @@ export async function refreshPlayersFromEspn({ adminDb }) {
       id: String(t.id),
       abbr: t.abbreviation || t.shortDisplayName || t.name,
       name: t.displayName || t.name,
-    }));
+    }))
+    .filter((t) => !!t.id && !!t.abbr);
 
   if (!teams.length) {
     return { ok: false, where: "teams-parse", error: "no teams found" };
   }
 
-  // 2) fetch rosters
+  // 2) fetch rosters (one request per team)
   const rosterUrls = teams.map(
-    (t) => `http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${t.id}?enable=roster`
+    (t) => `https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${t.id}?enable=roster`
   );
   const results = await Promise.allSettled(
     rosterUrls.map((u) => fetchJsonNoStore(u, `roster:${u}`))
   );
 
-  // 3) normalize players
+  // 3) normalize players (filter to fantasy-relevant positions)
+  const KEEP = new Set(["QB", "RB", "WR", "TE", "K"]); // DEF is synthesized below
   const collected = [];
+
   results.forEach((res, idx) => {
     const teamMeta = teams[idx];
     if (res.status !== "fulfilled") {
@@ -75,9 +83,12 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     for (const bucket of buckets) {
       const items = bucket?.items || bucket || [];
       if (!Array.isArray(items)) continue;
+
       for (const it of items) {
-        const pid = it?.id ?? it?.uid ?? null;
+        // ESPN can return either a wrapper with .athlete or the athlete object itself.
         const person = it?.athlete || it;
+
+        // Position
         const posRaw =
           person?.position?.abbreviation ||
           person?.position?.name ||
@@ -85,23 +96,24 @@ export async function refreshPlayersFromEspn({ adminDb }) {
           it?.position;
         const pos = normPos(posRaw);
 
+        if (!KEEP.has(pos)) continue; // filter out OL, DL, LB, DB, etc.
+
+        // Team
         const teamAbbr =
           person?.team?.abbreviation ||
           person?.team?.name ||
           person?.team?.displayName ||
           teamMeta?.abbr;
 
-        const espnId = person?.id ?? person?.uid ?? pid ?? null;
+        const espnId = person?.id ?? person?.uid ?? it?.id ?? it?.uid ?? null;
 
         const name =
           person?.displayName ||
-          (person?.firstName && person?.lastName
-            ? `${person.firstName} ${person.lastName}`
-            : null) ||
-          person?.name ||
-          it?.displayName ||
-          it?.name ||
-          espnId;
+          displayName({
+            firstName: person?.firstName,
+            lastName: person?.lastName,
+            id: espnId,
+          });
 
         const player = {
           id: String(espnId || name || "").trim(),
@@ -114,11 +126,7 @@ export async function refreshPlayersFromEspn({ adminDb }) {
           matchups: {},
         };
 
-        // keep only positions we support (QB/RB/WR/TE/K/DEF); ignore strange depth entries
-        if (!player.position) continue;
-        if (!["QB", "RB", "WR", "TE", "K"].includes(player.position)) continue;
-        if (!player.id) continue;
-
+        if (!player.id || !player.position) continue;
         collected.push(player);
       }
     }
@@ -127,11 +135,10 @@ export async function refreshPlayersFromEspn({ adminDb }) {
   // 3b) Synthesize D/ST per team (not present in roster feed)
   for (const t of teams) {
     const abbr = normTeam(t.abbr);
-    const name = `${abbr} D/ST`;
-    const id = `DEF:${abbr}`; // stable deterministic id
+    const id = `DEF:${abbr}`; // stable deterministic id (keeps your existing shape)
     collected.push({
       id,
-      name,
+      name: `${abbr} D/ST`,
       position: "DEF",
       team: abbr,
       espnId: null,
@@ -141,7 +148,7 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     });
   }
 
-  // 4) de-dupe
+  // 4) de-dupe (prefer first seen)
   const byIdent = new Map();
   for (const p of collected) {
     const k = identityFor(p);
@@ -156,6 +163,7 @@ export async function refreshPlayersFromEspn({ adminDb }) {
   while (i < finalPlayers.length) {
     const chunk = finalPlayers.slice(i, i + 400);
     const batch = adminDb.batch();
+
     for (const raw of chunk) {
       const ref = adminDb.collection("players").doc(String(raw.id));
       batch.set(
@@ -174,10 +182,11 @@ export async function refreshPlayersFromEspn({ adminDb }) {
         { merge: true }
       );
     }
+
     await batch.commit();
     written += chunk.length;
     i += chunk.length;
-    await sleep(100); // gentle throttle
+    await sleep(100); // gentle throttle for quotas
   }
 
   return {
