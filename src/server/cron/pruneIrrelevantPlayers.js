@@ -1,86 +1,129 @@
 /* eslint-disable no-console */
-// src/server/cron/pruneIrrelevantPlayers.js
-// Remove players that can never score fantasy points (OL, IDP, etc.)
+// /api/cron/index.js
+import { adminDb } from "../../src/lib/firebaseAdmin.js";
 
-const KEEP = new Set(["QB", "RB", "WR", "TE", "K", "DEF"]);
+// Defensive module imports (support named or default)
+import * as RefreshMod   from "../../src/server/cron/refreshPlayersFromEspn.js";
+import * as ProjMod      from "../../src/server/cron/seedWeekProjections.js";
+import * as ProjPropsMod from "../../src/server/cron/seedWeekProjectionsFromProps.js";
+import * as MatchupsMod  from "../../src/server/cron/seedWeekMatchups.js";
+import * as HeadshotsMod from "../../src/server/cron/backfillHeadshots.js";
+import * as DedupeMod    from "../../src/server/cron/dedupePlayers.js";
+import * as SettleMod    from "../../src/server/cron/settleSeason.js";
+import * as PruneMod     from "../../src/server/cron/pruneIrrelevantPlayers.js"; // <- make sure filename is lowercase
 
-function normPos(pos) {
-  return String(pos || "").toUpperCase().trim();
+export const config = { maxDuration: 60 };
+
+function unauthorized(req) {
+  const need = process.env.CRON_SECRET;
+  if (!need) return false;
+  const got = req.headers["x-cron-secret"];
+  return got !== need;
 }
 
-/**
- * Prunes player docs whose `position` is not one of KEEP.
- * Supports paging with `limit` and `cursor` (cursor = last 'name' value).
- *
- * @param {object} opts
- * @param {import('firebase-admin').firestore.Firestore} opts.adminDb
- * @param {number} [opts.limit=250]
- * @param {string|null} [opts.cursor=null] - value to startAfter for 'name'
- * @param {boolean} [opts.dryRun=false] - if true, don't delete, just count
- */
-export async function pruneIrrelevantPlayers({
-  adminDb,
-  limit = 250,
-  cursor = null,
-  dryRun = false,
-} = {}) {
-  if (!adminDb) throw new Error("adminDb required");
+function pageParams(url) {
+  const limit = Number(url.searchParams.get("limit")) || 25; // gentle default
+  const cursor = url.searchParams.get("cursor") || null;
+  return { limit: Math.max(1, Math.min(limit, 100)), cursor };
+}
 
-  const col = adminDb.collection("players");
+// Resolve possible named/default exports
+const refreshPlayersFromEspn      = RefreshMod.refreshPlayersFromEspn      || RefreshMod.default;
+const seedWeekProjections         = ProjMod.seedWeekProjections            || ProjMod.default;
+const seedWeekProjectionsFromProps= ProjPropsMod.seedWeekProjectionsFromProps || ProjPropsMod.default;
+const seedWeekMatchups            = MatchupsMod.seedWeekMatchups           || MatchupsMod.default;
+const backfillHeadshots           = HeadshotsMod.backfillHeadshots         || HeadshotsMod.default;
+const dedupePlayers               = DedupeMod.dedupePlayers                || DedupeMod.default;
+const settleSeason                = SettleMod.settleSeason                 || SettleMod.default;
+const pruneIrrelevantPlayers      = PruneMod.pruneIrrelevantPlayers        || PruneMod.default;
 
-  // We page by name so we don’t need composite indexes.
-  let q = col.orderBy("name").limit(Math.max(1, Math.min(1000, Number(limit) || 250)));
-  if (cursor) q = q.startAfter(cursor);
+export default async function handler(req, res) {
+  try {
+    if (unauthorized(req)) return res.status(401).json({ ok:false, error:"unauthorized" });
 
-  const snap = await q.get();
-  let scanned = 0;
-  let deleted = 0;
-  let kept = 0;
+    const url   = new URL(req.url, `http://${req.headers.host}`);
+    const task  = (url.searchParams.get("task") || "").toLowerCase();
+    const source= (url.searchParams.get("source") || "").toLowerCase(); // e.g. "props"
 
-  // Batch deletes in chunks of <= 500
-  let batch = adminDb.batch();
-  let opsInBatch = 0;
+    const { limit, cursor } = pageParams(url);
+    const week      = url.searchParams.get("week");
+    const season    = url.searchParams.get("season");
+    const overwrite = url.searchParams.get("overwrite");
 
-  for (const doc of snap.docs) {
-    scanned++;
-    const data = doc.data() || {};
-    const pos = normPos(data.position);
+    let out;
 
-    // keep only fantasy-relevant positions
-    const isKeep = KEEP.has(pos);
-
-    if (!isKeep) {
-      deleted++;
-      if (!dryRun) {
-        batch.delete(doc.ref);
-        opsInBatch++;
-        if (opsInBatch >= 450) {
-          await batch.commit();
-          batch = adminDb.batch();
-          opsInBatch = 0;
+    switch (task) {
+      case "refresh": {
+        if (typeof refreshPlayersFromEspn !== "function") {
+          return res.status(500).json({ ok:false, error:"refreshPlayersFromEspn not available" });
         }
+        out = await refreshPlayersFromEspn({ adminDb, limit, cursor });
+        return res.status(200).json(out);
       }
-    } else {
-      kept++;
+
+      case "projections": {
+        const ProjFn = source === "props" ? seedWeekProjectionsFromProps : seedWeekProjections;
+        if (typeof ProjFn !== "function") {
+          return res.status(500).json({ ok:false, error:"seedWeekProjections not available" });
+        }
+        out = await ProjFn({
+          adminDb,
+          week:   week   != null ? Number(week)   : undefined,
+          season: season != null ? Number(season) : undefined,
+          limit, cursor, overwrite, req,
+        });
+        return res.status(200).json(out);
+      }
+
+      case "matchups": {
+        if (typeof seedWeekMatchups !== "function") {
+          return res.status(500).json({ ok:false, error:"seedWeekMatchups not available" });
+        }
+        out = await seedWeekMatchups({ adminDb, week: Number(week), season: Number(season), limit, cursor, req });
+        return res.status(200).json(out);
+      }
+
+      case "headshots": {
+        if (typeof backfillHeadshots !== "function") {
+          return res.status(500).json({ ok:false, error:"backfillHeadshots not available" });
+        }
+        out = await backfillHeadshots({ adminDb, limit, cursor });
+        return res.status(200).json(out);
+      }
+
+      case "dedupe": {
+        if (typeof dedupePlayers !== "function") {
+          return res.status(500).json({ ok:false, error:"dedupePlayers not available" });
+        }
+        out = await dedupePlayers({ adminDb, limit, cursor });
+        return res.status(200).json(out);
+      }
+
+      case "settle": {
+        if (typeof settleSeason !== "function") {
+          return res.status(500).json({ ok:false, error:"settleSeason not available" });
+        }
+        out = await settleSeason({ adminDb, limit, cursor });
+        return res.status(200).json(out);
+      }
+
+      case "prune": {
+        if (typeof pruneIrrelevantPlayers !== "function") {
+          return res.status(500).json({ ok:false, error:"pruneIrrelevantPlayers not available" });
+        }
+        out = await pruneIrrelevantPlayers({ adminDb, limit, cursor });
+        return res.status(200).json(out);
+      }
+
+      default:
+        return res.status(400).json({
+          ok:false,
+          error:"unknown task",
+          hint:"use ?task=refresh|projections|matchups|headshots|dedupe|settle|prune&limit=25&cursor=<from-last>&source=props",
+        });
     }
+  } catch (e) {
+    console.error("cron index fatal:", e);
+    res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
-
-  if (opsInBatch > 0) {
-    await batch.commit();
-  }
-
-  const nextCursor = !snap.empty ? (snap.docs[snap.docs.length - 1].get("name") || snap.docs[snap.docs.length - 1].id) : null;
-  const done = snap.empty || snap.size < (Number(limit) || 250);
-
-  return {
-    ok: true,
-    scanned,
-    kept,
-    deleted,
-    done,
-    nextCursor,
-    dryRun,
-  };
 }
-
-export default pruneIrrelevantPlayers;
