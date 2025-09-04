@@ -1,31 +1,27 @@
 /* eslint-disable no-console */
 // src/server/cron/seedWeekProjections.js
+// Uses a composite cursor (name + __name__) so pagination never stalls.
+// Writes a basic placeholder projection unless overwrite=true.
 
 export async function seedWeekProjections({
   adminDb,
   week = 1,
   season,
   limit = 25,
-  cursor = null,
+  cursorName = null, // string
+  cursorId = null,   // doc id string
   overwrite = false,
 }) {
   if (!adminDb) throw new Error("adminDb required");
 
   const db = adminDb;
-  const playersCol = db.collection("players");
+  const col = db.collection("players");
 
-  // ORDER BY name, then id — cursor must match this exact chain
-  let q = playersCol.orderBy("name").orderBy("id").limit(Number(limit) || 25);
+  // stable composite ordering to support (name, id) cursor
+  let q = col.orderBy("name").orderBy("__name__").limit(Math.max(1, Math.min(1000, Number(limit) || 25)));
 
-  if (cursor) {
-    // cursor is "name|id"
-    const [cName, cId] = String(cursor).split("|");
-    if (cName && cId) {
-      q = q.startAfter(cName, cId);
-    } else if (cName) {
-      // fallback: allow old single-name cursors if they exist
-      q = q.startAfter(cName);
-    }
+  if (cursorName && cursorId) {
+    q = q.startAfter(cursorName, cursorId);
   }
 
   const snap = await q.get();
@@ -34,6 +30,8 @@ export async function seedWeekProjections({
   let updated = 0;
   let skipped = 0;
   let nextCursor = null;
+  let nextCursorName = null;
+  let nextCursorId = null;
 
   for (const doc of snap.docs) {
     processed++;
@@ -49,11 +47,11 @@ export async function seedWeekProjections({
     const pos = String(data.position || "").toUpperCase();
     const base =
       pos === "QB" ? 12.0 :
-      pos === "RB" ?  9.0 :
-      pos === "WR" ?  9.0 :
-      pos === "TE" ?  7.0 :
-      pos === "K"  ?  6.0 :
-      pos === "DEF"?  6.0 : 5.0;
+      pos === "RB" ? 9.0  :
+      pos === "WR" ? 9.0  :
+      pos === "TE" ? 7.0  :
+      pos === "K"  ? 6.0  :
+      pos === "DEF"? 6.0  : 5.0;
 
     projections[key] = Number(base.toFixed(1));
 
@@ -63,14 +61,24 @@ export async function seedWeekProjections({
 
   if (!snap.empty) {
     const last = snap.docs[snap.docs.length - 1];
-    const lastName = last.get("name") || "";
-    const lastId = last.get("id") || last.id;
-    nextCursor = `${lastName}|${lastId}`;
+    nextCursorName = last.get("name") || "";
+    nextCursorId = last.id;
+    nextCursor = `${nextCursorName}||${nextCursorId}`;
   }
 
   const done = snap.empty || snap.size < (Number(limit) || 25);
 
-  return { ok: true, processed, updated, skipped, done, nextCursor };
+  return {
+    ok: true,
+    processed,
+    updated,
+    skipped,
+    done,
+    // human and machine friendly cursors:
+    nextCursor,          // "Name||docId"
+    nextCursorName,
+    nextCursorId,
+  };
 }
 
 export default seedWeekProjections;
