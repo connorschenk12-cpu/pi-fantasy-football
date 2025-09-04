@@ -5,23 +5,22 @@ import fetchJsonNoStore from "./fetchJsonNoStore.js";
 const TEAMS_URL = "http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams";
 const ALLOWED = new Set(["QB","RB","WR","TE","K"]);
 
-const normPos = (pos) => {
+const normPos  = (pos) => {
   const p = String(pos || "").toUpperCase().trim();
   if (p === "PK") return "K";
   if (p === "DST" || p === "D/ST") return "DEF";
   return p;
 };
 const normTeam = (t) => String(t || "").toUpperCase().trim();
-const safeStr = (x) => (x == null ? "" : String(x));
+const s        = (x) => (x == null ? "" : String(x));
+
 const displayName = (p) =>
-  p.name ||
-  p.fullName ||
-  p.displayName ||
+  p.name || p.fullName || p.displayName ||
   (p.firstName && p.lastName ? `${p.firstName} ${p.lastName}` : null) ||
-  safeStr(p.id || "");
+  s(p.id || "");
 
 const espnHeadshot = (espnId) => {
-  const idStr = safeStr(espnId).replace(/[^\d]/g, "");
+  const idStr = s(espnId).replace(/[^\d]/g, "");
   return idStr ? `https://a.espncdn.com/i/headshots/nfl/players/full/${idStr}.png` : null;
 };
 
@@ -41,23 +40,19 @@ export async function refreshPlayersFromEspn({ adminDb }) {
   const teams = teamItems
     .map((t) => t?.team)
     .filter(Boolean)
-    .map((t) => ({
-      id: safeStr(t.id),
-      abbr: t.abbreviation || t.shortDisplayName || t.name,
-      name: t.displayName || t.name,
-    }));
+    .map((t) => ({ id: s(t.id), abbr: t.abbreviation || t.shortDisplayName || t.name, name: t.displayName || t.name }));
 
   if (!teams.length) return { ok: false, where: "teams-parse", error: "no teams found" };
 
-  // 2) rosters
-  const rosterUrls = teams.map(
-    (t) => `http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${t.id}?enable=roster`
+  // 2) rosters per team
+  const rosterUrls = teams.map((t) =>
+    `http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${t.id}?enable=roster`
   );
   const results = await Promise.allSettled(
     rosterUrls.map((u) => fetchJsonNoStore(u, { headers: { "user-agent": "pi-fantasy/1.0" } }))
   );
 
-  // 3) normalize
+  // 3) normalize with fallback depth counters
   const collected = [];
   results.forEach((res, idx) => {
     const teamMeta = teams[idx];
@@ -68,11 +63,21 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     const data = res.value || {};
     const buckets = Array.isArray(data?.team?.athletes) ? data.team.athletes : [];
 
+    // depth counters per team+pos when ESPN doesn't give one
+    const depthCounter = new Map(); // key: `${TEAM}|${POS}` -> nextDepthInt
+
+    const nextDepth = (team, pos) => {
+      const k = `${team}|${pos}`;
+      const cur = depthCounter.get(k) || 0;
+      const nxt = cur + 1;
+      depthCounter.set(k, nxt);
+      return nxt;
+    };
+
     for (const bucket of buckets) {
       const items = bucket?.items || bucket || [];
       if (!Array.isArray(items)) continue;
 
-      // ESPN sometimes has depth info at item or nested athlete
       for (const it of items) {
         const person = it?.athlete || it;
         const posRaw =
@@ -82,17 +87,13 @@ export async function refreshPlayersFromEspn({ adminDb }) {
           it?.position;
         const pos = normPos(posRaw);
 
-        // keep only fantasy-relevant offensive positions
-        if (!ALLOWED.has(pos)) continue;
+        if (!ALLOWED.has(pos)) continue; // skip IDP/OL entirely
 
         const espnId = person?.id ?? person?.uid ?? it?.id ?? it?.uid ?? null;
         const name =
           person?.displayName ||
           (person?.firstName && person?.lastName ? `${person.firstName} ${person.lastName}` : null) ||
-          person?.name ||
-          it?.displayName ||
-          it?.name ||
-          espnId;
+          person?.name || it?.displayName || it?.name || espnId;
 
         const teamAbbr =
           person?.team?.abbreviation ||
@@ -100,28 +101,25 @@ export async function refreshPlayersFromEspn({ adminDb }) {
           person?.team?.displayName ||
           teamMeta?.abbr;
 
-        // depth & starter heuristics
-        const depth =
+        // Prefer ESPN depth when present, else deterministic counter
+        const espnDepth =
           Number(it?.depthChartOrder) ||
           Number(person?.depthChartOrder) ||
           Number(person?.depth) ||
-          Number(it?.depth) ||
-          null;
+          Number(it?.depth) || null;
 
-        const isStarter =
-          Boolean(it?.starter) ||
-          Boolean(person?.starter) ||
-          (depth != null ? depth === 1 : false);
+        const depth = espnDepth || nextDepth(normTeam(teamAbbr), pos);
+        const starter = depth === 1;
 
         collected.push({
-          id: safeStr(espnId || name).trim(),
+          id: s(espnId || name).trim(),
           name: displayName({ name }),
           position: pos,
           team: normTeam(teamAbbr),
-          espnId: espnId ? safeStr(espnId) : null,
+          espnId: espnId ? s(espnId) : null,
           photo: espnHeadshot(espnId),
-          depth: depth || null,
-          starter: !!isStarter,
+          depth,
+          starter,
           projections: {},
           matchups: {},
         });
@@ -161,11 +159,11 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     const chunk = finalPlayers.slice(i, i + 400);
     const batch = adminDb.batch();
     for (const raw of chunk) {
-      const ref = adminDb.collection("players").doc(safeStr(raw.id));
+      const ref = adminDb.collection("players").doc(s(raw.id));
       batch.set(
         ref,
         {
-          id: safeStr(raw.id),
+          id: s(raw.id),
           name: raw.name,
           position: raw.position,
           team: raw.team || null,
