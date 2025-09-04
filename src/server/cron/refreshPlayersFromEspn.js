@@ -1,11 +1,17 @@
 /* eslint-disable no-console */
 // src/server/cron/refreshPlayersFromEspn.js
+// Fetch NFL teams + rosters from ESPN and (re)seed the global "players" collection.
+// Keeps only fantasy-relevant positions: QB/RB/WR/TE/K + one DEF per team.
+
 import fetchJsonNoStore from "./fetchJsonNoStore.js";
 
-// ESPN endpoints (HTTPS)
-const TEAMS_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams";
+const TEAMS_URL = "http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams";
 
+// Positions we keep (skill + kickers). DEF is synthesized separately per team.
 const ALLOWED_POS = new Set(["QB", "RB", "WR", "TE", "K"]);
+
+// ---- small helpers ----
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const normPos = (pos) => {
   const p = String(pos || "").toUpperCase().trim();
@@ -34,22 +40,12 @@ const identityFor = (p) => {
   return `ntp:${k}`;
 };
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
+// ---- main ----
 export async function refreshPlayersFromEspn({ adminDb }) {
   if (!adminDb) throw new Error("adminDb required");
 
-  console.log("[refreshPlayersFromEspn] start");
-
-  // 1) pull teams
-  let teamsJson;
-  try {
-    teamsJson = await fetchJsonNoStore(TEAMS_URL, { method: "GET" });
-  } catch (e) {
-    console.error("[refreshPlayersFromEspn] teams fetch failed:", e?.status, e?.message);
-    throw e;
-  }
-
+  // 1) Teams list
+  const teamsJson = await fetchJsonNoStore(TEAMS_URL, { method: "GET" });
   const teamItems = teamsJson?.sports?.[0]?.leagues?.[0]?.teams || [];
   const teams = teamItems
     .map((t) => t?.team)
@@ -61,22 +57,25 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     }));
 
   if (!teams.length) {
-    console.warn("[refreshPlayersFromEspn] no teams parsed");
     return { ok: false, where: "teams-parse", error: "no teams found" };
   }
 
-  // 2) fetch rosters (HTTPS)
+  // 2) Pull each roster
   const rosterUrls = teams.map(
-    (t) => `https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${t.id}?enable=roster`
+    (t) => `http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${t.id}?enable=roster`
   );
 
-  console.log(`[refreshPlayersFromEspn] fetching ${rosterUrls.length} rosters…`);
   const results = await Promise.allSettled(
     rosterUrls.map((u) => fetchJsonNoStore(u, { method: "GET" }))
   );
 
-  // 3) normalize players (only fantasy-relevant positions)
+  const fulfilled = results.filter((r) => r.status === "fulfilled").length;
+  const rejected = results.length - fulfilled;
+  console.log(`[refreshPlayersFromEspn] roster fetches: ok=${fulfilled}, failed=${rejected}`);
+
+  // 3) Normalize + keep only relevant positions
   const collected = [];
+
   results.forEach((res, idx) => {
     const teamMeta = teams[idx];
     if (res.status !== "fulfilled") {
@@ -84,67 +83,71 @@ export async function refreshPlayersFromEspn({ adminDb }) {
       return;
     }
     const data = res.value || {};
-    const roster = data?.team?.athletes || [];
-    const buckets = Array.isArray(roster) ? roster : [];
 
-    for (const bucket of buckets) {
-      const items = bucket?.items || bucket || [];
-      if (!Array.isArray(items)) continue;
-      for (const it of items) {
-        const pid = it?.id ?? it?.uid ?? null;
-        const person = it?.athlete || it;
+    // ESPN can return athletes as an array of buckets or an object keyed by position.
+    const groups = Array.isArray(data?.team?.athletes)
+      ? data.team.athletes
+      : Object.values(data?.team?.athletes || {});
 
-        const posRaw =
-          person?.position?.abbreviation ||
-          person?.position?.name ||
-          person?.position ||
-          it?.position;
-        const pos = normPos(posRaw);
+    const flatItems = [];
+    for (const g of groups) {
+      if (!g) continue;
+      if (Array.isArray(g.items)) flatItems.push(...g.items);
+      else if (Array.isArray(g)) flatItems.push(...g);
+    }
 
-        // Ignore everything that can't score in your game (IDP / OL, etc.)
-        if (!ALLOWED_POS.has(pos)) continue;
+    for (const it of flatItems) {
+      const pid = it?.id ?? it?.uid ?? null;
+      const person = it?.athlete || it;
 
-        const teamAbbr =
-          person?.team?.abbreviation ||
-          person?.team?.name ||
-          person?.team?.displayName ||
-          teamMeta?.abbr;
+      const posRaw =
+        person?.position?.abbreviation ||
+        person?.position?.name ||
+        person?.position ||
+        it?.position;
+      const pos = normPos(posRaw);
 
-        const espnId = person?.id ?? person?.uid ?? pid ?? null;
+      // Drop non-fantasy positions (defensive players, OL, etc.)
+      if (!ALLOWED_POS.has(pos)) continue;
 
-        const name =
-          person?.displayName ||
-          (person?.firstName && person?.lastName
-            ? `${person.firstName} ${person.lastName}`
-            : null) ||
-          person?.name ||
-          it?.displayName ||
-          it?.name ||
-          espnId;
+      const teamAbbr =
+        person?.team?.abbreviation ||
+        person?.team?.name ||
+        person?.team?.displayName ||
+        teamMeta?.abbr;
 
-        if (!name) continue;
+      const espnId = person?.id ?? person?.uid ?? pid ?? null;
 
-        const player = {
-          id: String(espnId || name || "").trim(),
-          name: displayName({ name }),
-          position: pos,
-          team: normTeam(teamAbbr),
-          espnId: espnId ? String(espnId) : null,
-          photo: espnHeadshot(espnId),
-          projections: {},
-          matchups: {},
-        };
+      const name =
+        person?.displayName ||
+        (person?.firstName && person?.lastName ? `${person.firstName} ${person.lastName}` : null) ||
+        person?.name ||
+        it?.displayName ||
+        it?.name ||
+        espnId;
 
-        collected.push(player);
-      }
+      if (!name) continue;
+
+      const player = {
+        id: String(espnId || name || "").trim(),
+        name: displayName({ name }),
+        position: pos,
+        team: normTeam(teamAbbr),
+        espnId: espnId ? String(espnId) : null,
+        photo: espnHeadshot(espnId),
+        projections: {},
+        matchups: {},
+      };
+
+      collected.push(player);
     }
   });
 
-  // 3b) Synthesize D/ST per team (team defenses)
+  // 3b) Add one synthesized D/ST per team
   for (const t of teams) {
     const abbr = normTeam(t.abbr);
     const name = `${abbr} D/ST`;
-    const id = `DEF:${abbr}`; // deterministic id
+    const id = `DEF:${abbr}`;
     collected.push({
       id,
       name,
@@ -157,7 +160,7 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     });
   }
 
-  // 4) de-dupe by identity
+  // 4) De-dupe by identity
   const byIdent = new Map();
   for (const p of collected) {
     const k = identityFor(p);
@@ -166,9 +169,7 @@ export async function refreshPlayersFromEspn({ adminDb }) {
   const finalPlayers = Array.from(byIdent.values());
   const countReceived = finalPlayers.length;
 
-  console.log(`[refreshPlayersFromEspn] normalized ${countReceived} players (incl. D/ST)`);
-
-  // 5) write in chunks
+  // 5) Write in chunks
   let written = 0;
   let i = 0;
   while (i < finalPlayers.length) {
@@ -195,10 +196,8 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     await batch.commit();
     written += chunk.length;
     i += chunk.length;
-    await sleep(100);
+    await sleep(100); // gentle throttle
   }
-
-  console.log(`[refreshPlayersFromEspn] wrote ${written} docs`);
 
   return {
     ok: true,
@@ -208,5 +207,4 @@ export async function refreshPlayersFromEspn({ adminDb }) {
   };
 }
 
-// default export, so dynamic import styles work too
 export default refreshPlayersFromEspn;
