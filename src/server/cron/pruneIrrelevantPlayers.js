@@ -1,26 +1,28 @@
 /* eslint-disable no-console */
 // src/server/cron/pruneIrrelevantPlayers.js
+
 const KEEP = new Set(["QB","RB","WR","TE","K","DEF"]);
 const IDP_OL = new Set([
-  "C","G","LG","RG","LT","RT","OL",
-  "DE","DT","DL","EDGE","LB","ILB","OLB","MLB",
+  // O-line
+  "C","G","LG","RG","LT","RT","OL","T","OT","OG",
+  // Front seven
+  "DE","DT","DL","EDGE","NT","LB","ILB","OLB","MLB",
+  // Secondary
   "CB","DB","S","FS","SS",
-  "NT"
+  // Specialists we don't use
+  "P","LS"
 ]);
 
 export async function pruneIrrelevantPlayers({ adminDb, limit = 1000 }) {
   const col = adminDb.collection("players");
-  let checked = 0;
-  let deleted = 0;
 
-  // Scan in chunks by name ascending
-  let cursor = null;
-  let loops = 0;
-  const started = Date.now();
+  let checked = 0, deleted = 0, loops = 0;
+  let cursorName = null, cursorId = null;
+  const start = Date.now();
 
-  do {
-    let q = col.orderBy("name").limit(Math.min(1000, Number(limit) || 1000));
-    if (cursor) q = q.startAfter(cursor);
+  while (true) {
+    let q = col.orderBy("name").orderBy("id").limit(Math.min(Number(limit) || 1000, 1000));
+    if (cursorName || cursorId) q = q.startAfter(cursorName || "", cursorId || "");
     const snap = await q.get();
     if (snap.empty) break;
 
@@ -41,15 +43,16 @@ export async function pruneIrrelevantPlayers({ adminDb, limit = 1000 }) {
 
     if (batched) await batch.commit();
 
-    cursor = snap.docs[snap.docs.length - 1]?.get("name") || snap.docs[snap.docs.length - 1]?.id || null;
+    const last = snap.docs[snap.docs.length - 1];
+    cursorName = last.get("name") || "";
+    cursorId = last.get("id") || last.id;
+
     loops++;
+    if (Date.now() - start > 45_000) break; // serverless guard
+    if (snap.size < (Number(limit) || 1000)) break;
+  }
 
-    // time/loop guard for serverless
-    if (Date.now() - started > 45_000) break;
-    if (loops > 200) break;
-  } while (cursor);
-
-  return { ok: true, checked, deleted, done: !cursor };
+  return { ok: true, checked, deleted, done: true };
 }
 
 export default pruneIrrelevantPlayers;
