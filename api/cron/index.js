@@ -5,11 +5,12 @@ import { adminDb } from "../../src/lib/firebaseAdmin.js";
 // Defensive module imports (support named or default)
 import * as RefreshMod from "../../src/server/cron/refreshPlayersFromEspn.js";
 import * as ProjMod from "../../src/server/cron/seedWeekProjections.js";
+import * as ProjPropsMod from "../../src/server/cron/seedWeekProjectionsFromProps.js";
 import * as MatchupsMod from "../../src/server/cron/seedWeekMatchups.js";
 import * as HeadshotsMod from "../../src/server/cron/backfillHeadshots.js";
 import * as DedupeMod from "../../src/server/cron/dedupePlayers.js";
 import * as SettleMod from "../../src/server/cron/settleSeason.js";
-import * as PruneMod from "../../src/server/cron/pruneIrrelevantPlayers.js"; // optional
+import * as PruneMod from "../../src/server/cron/pruneIrrelevantPlayers.js";
 
 export const config = { maxDuration: 60 };
 
@@ -21,137 +22,182 @@ function unauthorized(req) {
 }
 
 function pageParams(url) {
-  const limit = Number(url.searchParams.get("limit")) || 25;
+  const limit = Number(url.searchParams.get("limit")) || 25; // gentle default
   const cursor = url.searchParams.get("cursor") || null;
   return { limit: Math.max(1, Math.min(limit, 1000)), cursor };
 }
 
-const refreshPlayersFromEspn = RefreshMod.refreshPlayersFromEspn || RefreshMod.default;
-const seedWeekProjections   = ProjMod.seedWeekProjections || ProjMod.default;
-const seedWeekMatchups      = MatchupsMod.seedWeekMatchups || MatchupsMod.default;
-const backfillHeadshots     = HeadshotsMod.backfillHeadshots || HeadshotsMod.default;
-const dedupePlayers         = DedupeMod.dedupePlayers || DedupeMod.default;
-const settleSeason          = SettleMod.settleSeason || SettleMod.default;
-const pruneIrrelevant       = PruneMod.pruneIrrelevantPlayers || PruneMod.default;
+// Resolve possible named/default exports
+const refreshPlayersFromEspn =
+  RefreshMod.refreshPlayersFromEspn || RefreshMod.default;
+
+const seedWeekProjections =
+  ProjMod.seedWeekProjections || ProjMod.default;
+
+const seedWeekProjectionsFromProps =
+  ProjPropsMod.seedWeekProjectionsFromProps || ProjPropsMod.default;
+
+const seedWeekMatchups =
+  MatchupsMod.seedWeekMatchups || MatchupsMod.default;
+
+const backfillHeadshots =
+  HeadshotsMod.backfillHeadshots || HeadshotsMod.default;
+
+const dedupePlayers =
+  DedupeMod.dedupePlayers || DedupeMod.default;
+
+const settleSeason =
+  SettleMod.settleSeason || SettleMod.default;
+
+const pruneIrrelevant =
+  PruneMod.pruneIrrelevantPlayers || PruneMod.default;
 
 export default async function handler(req, res) {
   try {
-    if (unauthorized(req)) return res.status(401).json({ ok:false, error:"unauthorized" });
+    if (unauthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
 
     const url = new URL(req.url, `http://${req.headers.host}`);
     const task = (url.searchParams.get("task") || "").toLowerCase();
-    const loop = url.searchParams.get("loop") || url.searchParams.get("all"); // truthy = loop all pages
-    const { limit } = pageParams(url);
+    const source = (url.searchParams.get("source") || "").toLowerCase(); // e.g. "props"
 
-    const week   = url.searchParams.get("week");
+    const { limit } = pageParams(url);
+    const week = url.searchParams.get("week");
     const season = url.searchParams.get("season");
     const overwrite = url.searchParams.get("overwrite");
 
-    let out;
+    // cursor variants we might receive
+    let cursor = url.searchParams.get("cursor"); // legacy single string
+    let cursorName = url.searchParams.get("cursorName");
+    let cursorId = url.searchParams.get("cursorId");
 
     switch (task) {
       case "refresh": {
         if (typeof refreshPlayersFromEspn !== "function") {
-          return res.status(500).json({ ok:false, error:"refreshPlayersFromEspn not available" });
+          return res.status(500).json({ ok: false, error: "refreshPlayersFromEspn not available" });
         }
-        out = await refreshPlayersFromEspn({ adminDb });
+        const out = await refreshPlayersFromEspn({ adminDb, limit, cursor });
         return res.status(200).json(out);
       }
 
       case "projections": {
-        if (typeof seedWeekProjections !== "function") {
-          return res.status(500).json({ ok:false, error:"seedWeekProjections not available" });
+        // Choose source (normal vs props)
+        const ProjFn = source === "props" ? seedWeekProjectionsFromProps : seedWeekProjections;
+        if (typeof ProjFn !== "function") {
+          return res.status(500).json({ ok: false, error: "seedWeekProjections not available" });
         }
 
-        // loop server-side if loop=1/all=1 present
-        let totalProcessed = 0, totalUpdated = 0, totalSkipped = 0;
-        let cursorName = url.searchParams.get("cursorName");
-        let cursorId   = url.searchParams.get("cursorId");
-        let pages = 0;
+        // Default looping behavior:
+        // If no cursor params were provided, loop through all pages this run.
+        const loopParam = url.searchParams.get("loop") || url.searchParams.get("all");
+        const loop = !!(loopParam || (!cursor && !cursorName && !cursorId));
+
+        let processed = 0, updated = 0, skipped = 0;
+        let iterations = 0;
         let done = false;
+        let lastResp = null;
 
         do {
-          // safety cap for a single invocation
-          if (pages >= 200) break;
-          const r = await seedWeekProjections({
+          const resp = await ProjFn({
             adminDb,
             week: week != null ? Number(week) : undefined,
             season: season != null ? Number(season) : undefined,
             limit,
+            // pass whatever cursor shape your seeder supports
+            cursor,
             cursorName,
             cursorId,
-            overwrite: overwrite === "true" || overwrite === "1",
+            overwrite,
+            req,
           });
-          totalProcessed += r.processed;
-          totalUpdated   += r.updated;
-          totalSkipped   += r.skipped;
-          cursorName = r.nextCursorName || null;
-          cursorId   = r.nextCursorId || null;
-          done = !!r.done;
-          pages += 1;
-        } while (loop && !done && cursorId);
 
-        return res.status(200).json({
+          lastResp = resp || {};
+          processed += Number(lastResp.processed || 0);
+          updated   += Number(lastResp.updated || 0);
+          skipped   += Number(lastResp.skipped || 0);
+          done = !!lastResp.done;
+
+          // advance cursors – handle both shapes
+          cursorName = lastResp.nextCursorName ?? cursorName ?? null;
+          cursorId   = lastResp.nextCursorId   ?? cursorId   ?? null;
+          cursor     = lastResp.nextCursor     ?? cursor     ?? null;
+
+          iterations += 1;
+          // guardrail
+          if (iterations > 500) break;
+        } while (loop && !done);
+
+        const payload = {
           ok: true,
-          processed: totalProcessed,
-          updated: totalUpdated,
-          skipped: totalSkipped,
+          processed,
+          updated,
+          skipped,
           done,
-          nextCursorName: cursorName,
-          nextCursorId: cursorId,
-          hint: "Call again with ?cursorName=<...>&cursorId=<...> or add &loop=1 to process all pages in one call.",
-        });
+          nextCursor: cursor || null,
+          nextCursorName: cursorName || null,
+          nextCursorId: cursorId || null,
+          ...(loop ? {} : { hint: "Add &loop=1 to process all pages in one call." }),
+        };
+        return res.status(200).json(payload);
       }
 
       case "matchups": {
         if (typeof seedWeekMatchups !== "function") {
-          return res.status(500).json({ ok:false, error:"seedWeekMatchups not available" });
+          return res.status(500).json({ ok: false, error: "seedWeekMatchups not available" });
         }
-        out = await seedWeekMatchups({ adminDb, week: Number(week), season: Number(season) });
+        const out = await seedWeekMatchups({ adminDb, week: Number(week), season: Number(season), limit, cursorName, cursorId, req });
         return res.status(200).json(out);
       }
 
       case "headshots": {
         if (typeof backfillHeadshots !== "function") {
-          return res.status(500).json({ ok:false, error:"backfillHeadshots not available" });
+          return res.status(500).json({ ok: false, error: "backfillHeadshots not available" });
         }
-        out = await backfillHeadshots({ adminDb, limit });
+        const out = await backfillHeadshots({ adminDb, limit, cursorName, cursorId });
         return res.status(200).json(out);
       }
 
       case "dedupe": {
         if (typeof dedupePlayers !== "function") {
-          return res.status(500).json({ ok:false, error:"dedupePlayers not available" });
+          return res.status(500).json({ ok: false, error: "dedupePlayers not available" });
         }
-        out = await dedupePlayers({ adminDb, limit });
+        const out = await dedupePlayers({ adminDb, limit, cursorName, cursorId });
         return res.status(200).json(out);
       }
 
       case "settle": {
         if (typeof settleSeason !== "function") {
-          return res.status(500).json({ ok:false, error:"settleSeason not available" });
+          return res.status(500).json({ ok: false, error: "settleSeason not available" });
         }
-        out = await settleSeason({ adminDb, limit });
+        const out = await settleSeason({ adminDb, limit, cursorName, cursorId });
         return res.status(200).json(out);
       }
 
       case "prune": {
         if (typeof pruneIrrelevant !== "function") {
-          return res.status(500).json({ ok:false, error:"pruneIrrelevantPlayers not available" });
+          return res.status(500).json({ ok: false, error: "pruneIrrelevantPlayers not available" });
         }
-        out = await pruneIrrelevant({ adminDb, limit });
-        return res.status(200).json(out);
+        let totalChecked = 0, totalDeleted = 0, loops = 0, done = false;
+        const pageSize = Math.max(1, Math.min(Number(url.searchParams.get("limit") || limit || 500), 2000));
+        do {
+          const r = await pruneIrrelevant({ adminDb, limit: pageSize });
+          totalChecked += Number(r.checked || 0);
+          totalDeleted += Number(r.deleted || 0);
+          done = !!r.done;
+          loops++;
+          if (loops > 200) break; // safety
+        } while (!done);
+        return res.status(200).json({ ok: true, checked: totalChecked, deleted: totalDeleted, done });
       }
 
       default:
         return res.status(400).json({
-          ok:false,
-          error:"unknown task",
-          hint:"use ?task=refresh|projections|matchups|headshots|dedupe|settle|prune&limit=25&cursorName=...&cursorId=...&loop=1",
+          ok: false,
+          error: "unknown task",
+          hint: "use ?task=refresh|projections|matchups|headshots|dedupe|settle|prune&limit=25&cursor=<from-last>&source=props",
         });
     }
   } catch (e) {
     console.error("cron index fatal:", e);
-    res.status(500).json({ ok:false, error:String(e?.message || e) });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
