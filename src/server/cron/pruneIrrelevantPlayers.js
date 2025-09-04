@@ -1,55 +1,36 @@
 /* eslint-disable no-console */
 // src/server/cron/pruneIrrelevantPlayers.js
-// Removes players that can never score fantasy points (defenders, OL, etc.)
-// Keeps only: QB, RB, WR, TE, K, DEF
+// Deletes any player whose position is NOT one of: QB, RB, WR, TE, K, DEF
 
-export async function pruneIrrelevantPlayers({
-  adminDb,
-  limit = 500,
-  cursor = null,
-}) {
+const KEEP = new Set(["QB","RB","WR","TE","K","DEF"]);
+
+export async function pruneIrrelevantPlayers({ adminDb, limit = 500 }) {
   if (!adminDb) throw new Error("adminDb required");
-
-  const KEEP = new Set(["QB", "RB", "WR", "TE", "K", "DEF"]);
-
   const col = adminDb.collection("players");
-  let q = col.orderBy("name").limit(Number(limit) || 500);
-  if (cursor) q = q.startAfter(cursor);
 
-  const snap = await q.get();
+  // Scan in name order to keep a stable cursor; use __name__ as tiebreaker if you want.
+  const snap = await col.orderBy("name").limit(Number(limit) || 500).get();
+  if (snap.empty) {
+    return { ok: true, checked: 0, deleted: 0, done: true };
+  }
 
-  let processed = 0;
-  let removed = 0;
-  let kept = 0;
-  let nextCursor = null;
-
+  let checked = 0, deleted = 0;
   const batch = adminDb.batch();
 
   for (const doc of snap.docs) {
-    processed++;
-    const p = doc.data() || {};
-    const pos = String(p.position || "").toUpperCase();
-
+    checked++;
+    const pos = String(doc.get("position") || "").toUpperCase();
     if (!KEEP.has(pos)) {
       batch.delete(doc.ref);
-      removed++;
-    } else {
-      kept++;
+      deleted++;
     }
   }
 
-  if (!snap.empty) {
-    const last = snap.docs[snap.docs.length - 1];
-    nextCursor = last.get("name") || last.id;
-  }
+  if (deleted) await batch.commit();
 
-  if (removed > 0) {
-    await batch.commit();
-  }
-
-  const done = snap.empty || snap.size < (Number(limit) || 500);
-
-  return { ok: true, processed, removed, kept, done, nextCursor };
+  // naive paging: when < limit we’re likely done;
+  const done = snap.size < (Number(limit) || 500);
+  return { ok: true, checked, deleted, done };
 }
 
 export default pruneIrrelevantPlayers;
