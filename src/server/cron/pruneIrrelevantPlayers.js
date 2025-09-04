@@ -1,36 +1,55 @@
 /* eslint-disable no-console */
 // src/server/cron/pruneIrrelevantPlayers.js
-// Deletes any player whose position is NOT one of: QB, RB, WR, TE, K, DEF
-
 const KEEP = new Set(["QB","RB","WR","TE","K","DEF"]);
+const IDP_OL = new Set([
+  "C","G","LG","RG","LT","RT","OL",
+  "DE","DT","DL","EDGE","LB","ILB","OLB","MLB",
+  "CB","DB","S","FS","SS",
+  "NT"
+]);
 
-export async function pruneIrrelevantPlayers({ adminDb, limit = 500 }) {
-  if (!adminDb) throw new Error("adminDb required");
+export async function pruneIrrelevantPlayers({ adminDb, limit = 1000 }) {
   const col = adminDb.collection("players");
+  let checked = 0;
+  let deleted = 0;
 
-  // Scan in name order to keep a stable cursor; use __name__ as tiebreaker if you want.
-  const snap = await col.orderBy("name").limit(Number(limit) || 500).get();
-  if (snap.empty) {
-    return { ok: true, checked: 0, deleted: 0, done: true };
-  }
+  // Scan in chunks by name ascending
+  let cursor = null;
+  let loops = 0;
+  const started = Date.now();
 
-  let checked = 0, deleted = 0;
-  const batch = adminDb.batch();
+  do {
+    let q = col.orderBy("name").limit(Math.min(1000, Number(limit) || 1000));
+    if (cursor) q = q.startAfter(cursor);
+    const snap = await q.get();
+    if (snap.empty) break;
 
-  for (const doc of snap.docs) {
-    checked++;
-    const pos = String(doc.get("position") || "").toUpperCase();
-    if (!KEEP.has(pos)) {
-      batch.delete(doc.ref);
-      deleted++;
+    const batch = adminDb.batch();
+    let batched = 0;
+
+    for (const d of snap.docs) {
+      checked++;
+      const p = d.data() || {};
+      const pos = String(p.position || "").toUpperCase().trim();
+
+      if (!KEEP.has(pos) || IDP_OL.has(pos)) {
+        batch.delete(d.ref);
+        deleted++;
+        batched++;
+      }
     }
-  }
 
-  if (deleted) await batch.commit();
+    if (batched) await batch.commit();
 
-  // naive paging: when < limit we’re likely done;
-  const done = snap.size < (Number(limit) || 500);
-  return { ok: true, checked, deleted, done };
+    cursor = snap.docs[snap.docs.length - 1]?.get("name") || snap.docs[snap.docs.length - 1]?.id || null;
+    loops++;
+
+    // time/loop guard for serverless
+    if (Date.now() - started > 45_000) break;
+    if (loops > 200) break;
+  } while (cursor);
+
+  return { ok: true, checked, deleted, done: !cursor };
 }
 
 export default pruneIrrelevantPlayers;
