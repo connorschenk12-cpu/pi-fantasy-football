@@ -1,125 +1,192 @@
 /* eslint-disable no-console */
 // src/server/cron/seedWeekMatchups.js
-// Builds a map TEAM -> OPPONENT from ESPN scoreboard for the given week,
-// then stamps every player on that team with matchups[week].opp = OPP.
-// Quota-safe (chunked + backoff) and 404-safe (no-games returns ok:true).
+import fetchJsonNoStore from "./fetchJsonNoStore.js";
 
-const BATCH_SIZE = 200;     // writes per commit
-const SLEEP_MS   = 120;     // small pause between commits
-const MAX_RETRIES = 4;
+/**
+ * Build ESPN scoreboard URLs to try, in order.
+ * 1) week+seasontype+season
+ * 2) dates fallback (Thu..Tue window) if #1 had no events
+ */
+function buildScoreboardUrls({ season, week, datesRange = null }) {
+  const urls = [];
+  // canonical week/season (regular season = seasontype 2)
+  if (season && week) {
+    urls.push(
+      `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?week=${week}&seasontype=2&season=${season}`
+    );
+  }
+  // fallback by dates (ESPN accepts yyyymmdd or yyyymmdd-yyyymmdd)
+  if (datesRange) {
+    urls.push(
+      `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${datesRange}`
+    );
+  }
+  return urls;
+}
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+/** yyyy-mm-dd -> yyyymmdd */
+function ymdCompact(d) {
+  return d.toISOString().slice(0, 10).replace(/-/g, "");
+}
 
-async function withBackoff(fn, label = "op") {
-  let attempt = 0;
-  for (;;) {
-    try {
-      return await fn();
-    } catch (e) {
-      const msg = String(e?.message || e);
-      const quota = msg.includes("RESOURCE_EXHAUSTED") || msg.toLowerCase().includes("quota");
-      if (!quota || attempt >= MAX_RETRIES) throw e;
-      const delay = 250 + attempt * 250;
-      console.warn(`${label}: quota hit, retrying in ${delay}ms (attempt ${attempt + 1})`);
-      await sleep(delay);
-      attempt += 1;
+/** For a given week anchor (Thursday), return Thu..Tue span */
+function thursThroughTueRange(anchorDate) {
+  // anchorDate should be the Thursday of the target week
+  const start = new Date(anchorDate);
+  const end = new Date(anchorDate);
+  end.setDate(end.getDate() + 5); // Thu..Tue
+
+  return `${ymdCompact(start)}-${ymdCompact(end)}`;
+}
+
+/**
+ * Very light "opening week" anchor guesser:
+ * For a given season (year), the NFL Week 1 Thursday is usually
+ * the first Thursday after Labor Day. This picker chooses the
+ * first Thursday in September >= Sep 5.
+ */
+function guessOpeningThursdayUTC(season) {
+  const d = new Date(Date.UTC(season, 8, 5)); // Sep 5, <season> @ 00:00Z
+  // advance to first Thursday (Thursday = 4 using getUTCDay)
+  const day = d.getUTCDay();
+  const delta = (4 - day + 7) % 7;
+  d.setUTCDate(d.getUTCDate() + delta);
+  return d;
+}
+
+/** Parse ESPN scoreboard JSON into simple [{home, away, date}] */
+function parseEvents(json) {
+  const leagues = json?.sports?.[0]?.leagues?.[0];
+  const events = leagues?.events || json?.events || [];
+  const out = [];
+
+  for (const ev of events) {
+    const comp = Array.isArray(ev?.competitions) ? ev.competitions[0] : null;
+    const date = ev?.date || comp?.date || null;
+
+    const teams = Array.isArray(comp?.competitors) ? comp.competitors : [];
+    const home = teams.find((t) => t?.homeAway === "home");
+    const away = teams.find((t) => t?.homeAway === "away");
+
+    const abbr = (t) =>
+      (t?.team?.abbreviation ||
+        t?.team?.shortDisplayName ||
+        t?.team?.name ||
+        "").toUpperCase();
+
+    if (home && away) {
+      out.push({ home: abbr(home), away: abbr(away), date });
     }
   }
+  return out;
 }
 
-async function fetchJson(url, where) {
-  const r = await fetch(url, { headers: { "x-espn-site-app": "sports" } });
-  if (r.status === 404) {
-    // ESPN returns 404 for weeks that don't exist; bubble a typed signal
-    const body = await r.text().catch(() => "");
-    const err = new Error(`scoreboard 404: ${body || "{code:404}"}`);
-    err._is404 = true;
-    throw err;
+/** Batch write helper with gentle throttling */
+async function commitInChunks(adminDb, writes, { chunk = 400, pauseMs = 60 } = {}) {
+  let i = 0;
+  let committed = 0;
+  while (i < writes.length) {
+    const batch = adminDb.batch();
+    const slice = writes.slice(i, i + chunk);
+    for (const fn of slice) fn(batch);
+    await batch.commit();
+    committed += slice.length;
+    i += slice.length;
+    if (pauseMs) await new Promise((r) => setTimeout(r, pauseMs));
   }
-  if (!r.ok) {
-    const body = await r.text().catch(() => "");
-    throw new Error(`${where} ${r.status}: ${body.slice(0, 400)}`);
-  }
-  return r.json();
+  return committed;
 }
 
-export async function seedWeekMatchups({ adminDb, week, season, seasontype = 2 } = {}) {
+/**
+ * Seed week matchups: set players.{id}.matchups[week] = { opp, date }
+ * For each game, every player on team HOME gets opp=AWAY, and vice versa.
+ */
+export async function seedWeekMatchups({
+  adminDb,
+  week = 1,
+  season,
+  limit,     // unused here; we do full write for the week
+  cursor,    // unused here
+  req,       // unused here
+}) {
   if (!adminDb) throw new Error("adminDb required");
+  if (!season || !week) throw new Error("season and week required");
 
-  const w = Number(week);
-  if (!Number.isFinite(w) || w <= 0) {
-    return { ok: false, error: "week is required (?week=1..18)" };
-  }
-  const yr = Number(season) || new Date().getFullYear();
-  const st = Number(seasontype) || 2; // 2 = regular
+  // 1) Try canonical week+season first
+  const tryUrls = [];
+  tryUrls.push(...buildScoreboardUrls({ season, week }));
 
-  const scoreboard = `https://site.api.espn.com/apis/v2/sports/football/nfl/scoreboard?week=${w}&seasontype=${st}&season=${yr}`;
+  // 2) Fallback to a date span (Thu..Tue) if the first attempt yields no events.
+  //    Guess opening Thursday for W1, otherwise offset from it.
+  const openingThu = guessOpeningThursdayUTC(season);
+  const thursdayOfWeek = new Date(openingThu);
+  thursdayOfWeek.setUTCDate(openingThu.getUTCDate() + (week - 1) * 7);
+  const datesRange = thursThroughTueRange(thursdayOfWeek);
 
-  let scJson;
-  try {
-    scJson = await fetchJson(scoreboard, "scoreboard");
-  } catch (e) {
-    if (e?._is404) {
-      console.warn(`No games for week=${w} season=${yr} seasontype=${st}`);
-      return { ok: true, reason: "no-games", updated: 0, teams: 0 };
+  // Add fallback URL second
+  tryUrls.push(...buildScoreboardUrls({ season, week, datesRange }));
+
+  let games = [];
+  let usedUrl = null;
+
+  for (const u of tryUrls) {
+    try {
+      const json = await fetchJsonNoStore(u);
+      const events = parseEvents(json);
+      if (events.length) {
+        games = events;
+        usedUrl = u;
+        break;
+      }
+    } catch (e) {
+      console.warn("scoreboard fetch failed:", u, e?.message || e);
     }
-    throw e;
   }
 
-  const events = Array.isArray(scJson?.events) ? scJson.events : [];
-  if (events.length === 0) {
+  if (!games.length) {
     return { ok: true, reason: "no-games", updated: 0, teams: 0 };
   }
 
-  // Build TEAM -> OPP map (both directions)
-  const teamOpp = new Map(); // "BUF" -> "NYJ"
-  for (const e of events) {
-    const comps = Array.isArray(e?.competitions) ? e.competitions : [];
-    for (const c of comps) {
-      const competitors = Array.isArray(c?.competitors) ? c.competitors : [];
-      if (competitors.length !== 2) continue;
-      const a = competitors[0]?.team?.abbreviation || competitors[0]?.team?.shortDisplayName;
-      const b = competitors[1]?.team?.abbreviation || competitors[1]?.team?.shortDisplayName;
-      const A = (a || "").toUpperCase();
-      const B = (b || "").toUpperCase();
-      if (A && B) {
-        teamOpp.set(A, B);
-        teamOpp.set(B, A);
-      }
-    }
+  // 3) Build team->opponent map for this week
+  const oppMap = new Map(); // teamAbbr -> { opp, date }
+  for (const g of games) {
+    oppMap.set(g.home, { opp: g.away, date: g.date || null });
+    oppMap.set(g.away, { opp: g.home, date: g.date || null });
   }
 
-  if (teamOpp.size === 0) {
-    return { ok: true, reason: "parsed-zero", updated: 0, teams: 0 };
+  // 4) Write to all players for each team
+  // players where team == abbr → set matchups[week] = {opp, date}
+  const writes = [];
+  const weekKey = String(week);
+
+  for (const [team, meta] of oppMap.entries()) {
+    const snap = await adminDb.collection("players").where("team", "==", team).get();
+    if (snap.empty) continue;
+
+    snap.forEach((doc) => {
+      const data = doc.data() || {};
+      const matchups = { ...(data.matchups || {}) };
+      matchups[weekKey] = {
+        ...(matchups[weekKey] || {}),
+        opp: meta.opp,
+        date: meta.date || matchups[weekKey]?.date || null,
+      };
+
+      writes.push((batch) => {
+        batch.set(doc.ref, { matchups }, { merge: true });
+      });
+    });
   }
 
-  // Load all players once (simplest & avoids 'in' query limits)
-  const allSnap = await withBackoff(() => adminDb.collection("players").get(), "players-read");
-  const docs = allSnap.docs;
+  const updated = await commitInChunks(adminDb, writes, { chunk: 400, pauseMs: 50 });
 
-  // Prepare patches for players whose team is in the map
-  const fieldKey = `matchups.${w}`;
-  const toPatch = [];
-  for (const d of docs) {
-    const p = d.data() || {};
-    const team = String(p.team || p.nflTeam || p.proTeam || "").toUpperCase();
-    const opp = teamOpp.get(team);
-    if (!opp) continue;
-    toPatch.push({ ref: d.ref, patch: { [fieldKey]: { ...(p.matchups?.[w] || {}), opp } } });
-  }
-
-  // Apply in batches
-  let updated = 0;
-  for (let i = 0; i < toPatch.length; i += BATCH_SIZE) {
-    const chunk = toPatch.slice(i, i + BATCH_SIZE);
-    const batch = adminDb.batch();
-    for (const { ref, patch } of chunk) {
-      batch.set(ref, patch, { merge: true });
-      updated += 1;
-    }
-    await withBackoff(() => batch.commit(), "matchups-write");
-    await sleep(SLEEP_MS);
-  }
-
-  return { ok: true, week: w, season: yr, teams: teamOpp.size, updated };
+  return {
+    ok: true,
+    reason: "updated",
+    updated,
+    teams: oppMap.size,
+    url: usedUrl,
+  };
 }
+
+export default seedWeekMatchups;
