@@ -5,14 +5,14 @@ import fetchJsonNoStore from "./fetchJsonNoStore.js";
 const TEAMS_URL = "http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams";
 const ALLOWED = new Set(["QB","RB","WR","TE","K"]);
 
+const s = (x) => (x == null ? "" : String(x));
 const normPos  = (pos) => {
-  const p = String(pos || "").toUpperCase().trim();
+  const p = s(pos).toUpperCase().trim();
   if (p === "PK") return "K";
   if (p === "DST" || p === "D/ST") return "DEF";
   return p;
 };
-const normTeam = (t) => String(t || "").toUpperCase().trim();
-const s        = (x) => (x == null ? "" : String(x));
+const normTeam = (t) => s(t).toUpperCase().trim();
 
 const displayName = (p) =>
   p.name || p.fullName || p.displayName ||
@@ -33,6 +33,46 @@ const identityFor = (p) => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function safeGetRosterBuckets(json) {
+  // ESPN responses vary by season/deploy:
+  // - team.athletes: [{ position: {...}, items:[{athlete:{...}}] }]
+  // - team.roster.athletes: [{...}]
+  // - athletes: [...]
+  const t = json?.team || {};
+  if (Array.isArray(t.athletes)) return t.athletes;
+  if (Array.isArray(t?.roster?.athletes)) return t.roster.athletes;
+  if (Array.isArray(json?.athletes)) return json.athletes;
+  return [];
+}
+
+function extractItems(bucket) {
+  // bucket may be {items:[...]} or already an array of athletes
+  if (Array.isArray(bucket?.items)) return bucket.items;
+  if (Array.isArray(bucket)) return bucket;
+  return [];
+}
+
+function readPos(obj) {
+  return (
+    obj?.position?.abbreviation ||
+    obj?.position?.name ||
+    obj?.defaultPosition?.abbreviation ||
+    obj?.defaultPosition?.name ||
+    obj?.pos ||
+    obj?.position
+  );
+}
+
+function readDepth(obj) {
+  const n =
+    Number(obj?.depthChartOrder) ||
+    Number(obj?.depth) ||
+    Number(obj?.athlete?.depthChartOrder) ||
+    Number(obj?.athlete?.depth) ||
+    null;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 export async function refreshPlayersFromEspn({ adminDb }) {
   // 1) teams
   const teamsJson = await fetchJsonNoStore(TEAMS_URL, { headers: { "user-agent": "pi-fantasy/1.0" } });
@@ -42,9 +82,9 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     .filter(Boolean)
     .map((t) => ({ id: s(t.id), abbr: t.abbreviation || t.shortDisplayName || t.name, name: t.displayName || t.name }));
 
-  if (!teams.length) return { ok: false, where: "teams-parse", error: "no teams found" };
+  if (!teams.length) return { ok:false, where:"teams-parse", error:"no teams found" };
 
-  // 2) rosters per team
+  // 2) rosters
   const rosterUrls = teams.map((t) =>
     `http://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${t.id}?enable=roster`
   );
@@ -52,7 +92,6 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     rosterUrls.map((u) => fetchJsonNoStore(u, { headers: { "user-agent": "pi-fantasy/1.0" } }))
   );
 
-  // 3) normalize with fallback depth counters
   const collected = [];
   results.forEach((res, idx) => {
     const teamMeta = teams[idx];
@@ -61,10 +100,9 @@ export async function refreshPlayersFromEspn({ adminDb }) {
       return;
     }
     const data = res.value || {};
-    const buckets = Array.isArray(data?.team?.athletes) ? data.team.athletes : [];
 
-    // depth counters per team+pos when ESPN doesn't give one
-    const depthCounter = new Map(); // key: `${TEAM}|${POS}` -> nextDepthInt
+    const buckets = safeGetRosterBuckets(data);
+    const depthCounter = new Map(); // `${TEAM}|${POS}` -> int
 
     const nextDepth = (team, pos) => {
       const k = `${team}|${pos}`;
@@ -75,19 +113,11 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     };
 
     for (const bucket of buckets) {
-      const items = bucket?.items || bucket || [];
-      if (!Array.isArray(items)) continue;
-
+      const items = extractItems(bucket);
       for (const it of items) {
         const person = it?.athlete || it;
-        const posRaw =
-          person?.position?.abbreviation ||
-          person?.position?.name ||
-          person?.position ||
-          it?.position;
-        const pos = normPos(posRaw);
-
-        if (!ALLOWED.has(pos)) continue; // skip IDP/OL entirely
+        const pos = normPos(readPos(person) || readPos(it));
+        if (!ALLOWED.has(pos)) continue;
 
         const espnId = person?.id ?? person?.uid ?? it?.id ?? it?.uid ?? null;
         const name =
@@ -101,14 +131,8 @@ export async function refreshPlayersFromEspn({ adminDb }) {
           person?.team?.displayName ||
           teamMeta?.abbr;
 
-        // Prefer ESPN depth when present, else deterministic counter
-        const espnDepth =
-          Number(it?.depthChartOrder) ||
-          Number(person?.depthChartOrder) ||
-          Number(person?.depth) ||
-          Number(it?.depth) || null;
-
-        const depth = espnDepth || nextDepth(normTeam(teamAbbr), pos);
+        const explicitDepth = readDepth(it) ?? readDepth(person);
+        const depth = explicitDepth || nextDepth(normTeam(teamAbbr), pos);
         const starter = depth === 1;
 
         collected.push({
@@ -127,7 +151,7 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     }
   });
 
-  // 3b) add one DEF per team
+  // 2b) D/ST per team
   for (const t of teams) {
     const abbr = normTeam(t.abbr);
     collected.push({
@@ -144,7 +168,7 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     });
   }
 
-  // 4) de-dupe
+  // 3) de-dupe
   const byIdent = new Map();
   for (const p of collected) {
     const k = identityFor(p);
@@ -153,7 +177,7 @@ export async function refreshPlayersFromEspn({ adminDb }) {
   const finalPlayers = Array.from(byIdent.values());
   const countReceived = finalPlayers.length;
 
-  // 5) write
+  // 4) write in chunks
   let written = 0;
   for (let i = 0; i < finalPlayers.length; i += 400) {
     const chunk = finalPlayers.slice(i, i + 400);
@@ -183,7 +207,7 @@ export async function refreshPlayersFromEspn({ adminDb }) {
     await sleep(80);
   }
 
-  return { ok: true, source: "espn:teams+rosters (+D/ST)", written, countReceived };
+  return { ok:true, source:"espn:teams+rosters (+D/ST)", written, countReceived };
 }
 
 export default refreshPlayersFromEspn;
