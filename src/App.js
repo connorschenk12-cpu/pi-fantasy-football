@@ -11,6 +11,35 @@ function getPi() {
   return null;
 }
 
+// Pi requires apps to resolve any payment left dangling from a previous session
+// (e.g. the user closed the app mid-payment) before a new login can proceed.
+async function handleIncompletePayment(payment) {
+  try {
+    const paymentId = payment?.identifier;
+    const txid = payment?.transaction?.txid;
+    if (!paymentId) return;
+
+    if (txid) {
+      // The chain transaction already happened — finish recording it.
+      await fetch("/api/payments/complete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paymentId, txid }),
+      });
+    } else {
+      // No on-chain tx yet — safe to approve so Pi keeps tracking it, or just leave
+      // it for the user to retry; approving here re-triggers Pi's normal flow.
+      await fetch("/api/payments/approve", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paymentId }),
+      });
+    }
+  } catch (e) {
+    console.warn("Failed to resolve incomplete payment", e);
+  }
+}
+
 export default function App() {
   const [piReady, setPiReady] = useState(false);
   const [username, setUsername] = useState(null);
@@ -61,9 +90,7 @@ export default function App() {
         );
         return;
       }
-      const user = await Pi.authenticate(scopes, (payment) =>
-        console.log("incompletePayment", payment)
-      );
+      const user = await Pi.authenticate(scopes, handleIncompletePayment);
       const uname = user?.user?.username;
       if (!uname) throw new Error("No username returned from Pi SDK");
       setUsername(uname);
