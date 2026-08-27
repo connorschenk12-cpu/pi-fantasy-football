@@ -1,21 +1,33 @@
 // src/components/EntryFeeButton.js
 import React, { useState } from "react";
-import { markEntryPaid } from "../lib/storage";
 
 /**
  * EntryFeeButton
- * - Shows a button to pay the entry fee (π).
- * - Sandbox-only "server" logic: marks paid as soon as onReadyForServerApproval fires.
- * - In production, you'd forward the payment to your server to verify/approve/complete.
+ * Starts a Pi payment for league dues. The actual "this team is paid" write only
+ * happens on the server (api/payments/complete.js), after Pi confirms the on-chain
+ * transaction — the client never marks itself as paid.
  */
 export default function EntryFeeButton({ league, username, onPaid }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
 
-  const fee = Number(league?.entry?.feePi || 0);
+  const fee = Number(league?.entry?.feePi ?? league?.entry?.amountPi ?? 0);
   const enabled = !!league?.entry?.enabled;
 
   if (!enabled || fee <= 0) return null;
+
+  async function postJson(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json?.ok === false) {
+      throw new Error(json?.error || `Request to ${url} failed`);
+    }
+    return json;
+  }
 
   async function pay() {
     try {
@@ -26,14 +38,12 @@ export default function EntryFeeButton({ league, username, onPaid }) {
 
       setBusy(true);
 
-      // Ensure we’re initialized (safe to call multiple times)
       try {
         window.Pi.init?.({ version: "2.0", sandbox: true });
       } catch {
-        // ignore init errors here; Pi.init may already be called elsewhere
+        // Pi.init may already be called elsewhere; ignore.
       }
 
-      // Ensure we have payments scope
       try {
         await window.Pi.authenticate(["username", "payments"]);
       } catch (e) {
@@ -47,18 +57,21 @@ export default function EntryFeeButton({ league, username, onPaid }) {
           metadata: { leagueId: league?.id, username },
         },
         {
-          onReadyForServerApproval: async (data) => {
-            // SANDBOX ONLY: instantly mark paid (no backend yet)
+          onReadyForServerApproval: async (paymentId) => {
             try {
-              await markEntryPaid(league.id, username, data?.identifier || "sandbox", fee);
-              setMsg("Payment recorded (sandbox).");
-              onPaid && onPaid();
+              await postJson("/api/payments/approve", { paymentId });
             } catch (e) {
-              setMsg(e?.message || "Failed to record payment");
+              setMsg(e?.message || "Server could not approve payment");
             }
           },
-          onReadyForServerCompletion: async () => {
-            // No-op in sandbox
+          onReadyForServerCompletion: async (paymentId, txid) => {
+            try {
+              await postJson("/api/payments/complete", { paymentId, txid });
+              setMsg("Dues paid!");
+              onPaid && onPaid();
+            } catch (e) {
+              setMsg(e?.message || "Server could not confirm payment");
+            }
           },
           onCancel: () => {
             setMsg("Payment cancelled.");
