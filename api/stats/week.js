@@ -30,44 +30,77 @@ async function fetchJson(url, label) {
   const r = await fetch(url, { headers: { "x-espn-site-app": "sports" }, cache: "no-store" });
   if (!r.ok) {
     const t = await r.text().catch(() => "");
-    throw new Error(`${label} ${r.status}: ${t.slice(0,200)}`);
+    throw new Error(`${label} ${r.status}: ${t.slice(0, 200)}`);
   }
   return r.json();
 }
 
-function normalizePlayerStat(p, teamAbbr) {
-  const athlete = p?.athlete || {};
-  const id = athlete?.id != null ? String(athlete.id) : null;
+/**
+ * ESPN's NFL boxscore (from the /summary?event= endpoint) reports each stat
+ * category as parallel arrays: `labels` (e.g. ["C/ATT","YDS","AVG","TD","INT",...])
+ * and each athlete's `stats` (same-length array of string values in that order).
+ * Some labels are combined values like "C/ATT" -> "18/27"; we split those we need.
+ */
+function statByLabel(category, label) {
+  const labels = Array.isArray(category?.labels) ? category.labels : [];
+  const idx = labels.findIndex((l) => (l || "").toUpperCase() === label);
+  return idx;
+}
 
-  const name = (athlete?.displayName || "").toUpperCase().trim();
-  const team = (teamAbbr || athlete?.team?.abbreviation || "").toUpperCase().trim();
-  const nameTeamKey = name && team ? `${name}|${team}` : null;
+function parseTeamBoxscore(teamEntry, out) {
+  const teamAbbr = (teamEntry?.team?.abbreviation || teamEntry?.team?.shortDisplayName || "").toUpperCase().trim();
+  const categories = Array.isArray(teamEntry?.statistics) ? teamEntry.statistics : [];
 
-  const cats = Array.isArray(p?.statistics) ? p.statistics : [];
-  const grab = (groupName, pred) => {
-    const g = cats.find(c => (c?.name || "").toLowerCase() === groupName);
-    if (!g || !Array.isArray(g?.stats)) return 0;
-    const s = g.stats.find(s =>
-      pred(s?.shortDisplayName) || pred(s?.abbreviation) || pred(s?.name)
-    );
-    return s?.value != null ? Number(s.value) : 0;
+  const byCategoryName = {};
+  for (const cat of categories) {
+    const name = (cat?.name || "").toLowerCase();
+    if (name) byCategoryName[name] = cat;
+  }
+
+  const collectFrom = (categoryName, wanted) => {
+    const cat = byCategoryName[categoryName];
+    if (!cat) return;
+    const athletes = Array.isArray(cat?.athletes) ? cat.athletes : [];
+    for (const a of athletes) {
+      const athlete = a?.athlete || {};
+      const id = athlete?.id != null ? String(athlete.id) : null;
+      const name = (athlete?.displayName || "").toUpperCase().trim();
+      const nameTeamKey = name && teamAbbr ? `${name}|${teamAbbr}` : null;
+      if (!id && !nameTeamKey) continue;
+
+      const key = id || nameTeamKey;
+      if (!out[key]) {
+        out[key] = { id, nameTeamKey, passYds: 0, passTD: 0, passInt: 0, rushYds: 0, rushTD: 0, recYds: 0, recTD: 0, rec: 0, fumbles: 0 };
+      }
+      const row = out[key];
+      const stats = Array.isArray(a?.stats) ? a.stats : [];
+
+      for (const [field, label, transform] of wanted) {
+        const idx = statByLabel(cat, label);
+        if (idx === -1) continue;
+        const raw = stats[idx];
+        row[field] = n(row[field]) + (transform ? transform(raw) : n(raw));
+      }
+    }
   };
 
-  const passYds = grab("passing", v => v === "YDS");
-  const passTD  = grab("passing", v => v === "TD");
-  const passInt = grab("passing", v => v === "INT");
-
-  const rushYds = grab("rushing", v => v === "YDS");
-  const rushTD  = grab("rushing", v => v === "TD");
-
-  const recYds  = grab("receiving", v => v === "YDS");
-  const recTD   = grab("receiving", v => v === "TD");
-  const rec     = grab("receiving", v => v === "REC");
-
-  const fumbles = grab("fumbles", v => v === "LOST");
-
-  const row = { passYds, passTD, passInt, rushYds, rushTD, recYds, recTD, rec, fumbles };
-  return { id, nameTeamKey, ...row, points: points(row) };
+  collectFrom("passing", [
+    ["passYds", "YDS"],
+    ["passTD", "TD"],
+    ["passInt", "INT"],
+  ]);
+  collectFrom("rushing", [
+    ["rushYds", "YDS"],
+    ["rushTD", "TD"],
+  ]);
+  collectFrom("receiving", [
+    ["recYds", "YDS"],
+    ["recTD", "TD"],
+    ["rec", "REC"],
+  ]);
+  collectFrom("fumbles", [
+    ["fumbles", "LOST"],
+  ]);
 }
 
 export default async function handler(req, res) {
@@ -79,63 +112,40 @@ export default async function handler(req, res) {
 
     // If week not provided, let ESPN pick the "current" week by omitting &week=
     const sbUrl = week
-      ? `https://site.api.espn.com/apis/v2/sports/football/nfl/scoreboard?week=${encodeURIComponent(week)}&seasontype=${seasontype}&season=${season}`
-      : `https://site.api.espn.com/apis/v2/sports/football/nfl/scoreboard?seasontype=${seasontype}&season=${season}`;
+      ? `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?week=${encodeURIComponent(week)}&seasontype=${seasontype}&season=${season}`
+      : `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?seasontype=${seasontype}&season=${season}`;
 
     const sb = await fetchJson(sbUrl, "scoreboard");
     const events = Array.isArray(sb?.events) ? sb.events : [];
 
-    const compIds = [];
-    for (const e of events) {
-      const comps = Array.isArray(e?.competitions) ? e.competitions : [];
-      for (const c of comps) if (c?.id) compIds.push(String(c.id));
-    }
-    if (compIds.length === 0) return res.status(200).json({ stats: {} });
+    const eventIds = events.map((e) => e?.id).filter(Boolean).map(String);
+    if (eventIds.length === 0) return res.status(200).json({ stats: {} });
 
-    const statsById = new Map();
-    const statsByNameTeam = new Map();
+    const merged = {};
 
-    const merge = (a, b) => {
-      const m = {
-        passYds: n(a?.passYds) + n(b.passYds),
-        passTD:  n(a?.passTD)  + n(b.passTD),
-        passInt: n(a?.passInt) + n(b.passInt),
-        rushYds: n(a?.rushYds) + n(b.rushYds),
-        rushTD:  n(a?.rushTD)  + n(b.rushTD),
-        recYds:  n(a?.recYds)  + n(b.recYds),
-        recTD:   n(a?.recTD)   + n(b.recTD),
-        rec:     n(a?.rec)     + n(b.rec),
-        fumbles: n(a?.fumbles) + n(b.fumbles),
-      };
-      return { ...m, points: points(m) };
-    };
-
-    await Promise.all(compIds.map(async (cid) => {
-      const boxUrl = `https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/competitions/${cid}/boxscore`;
-      const j = await fetchJson(boxUrl, "boxscore");
-      const teams = Array.isArray(j?.boxscore?.teams) ? j.boxscore.teams : [];
-      for (const t of teams) {
-        const teamAbbr = t?.team?.abbreviation || t?.team?.shortDisplayName;
-        const players = Array.isArray(t?.statistics?.players) ? t.statistics.players : [];
-        for (const player of players) {
-          const norm = normalizePlayerStat(player, teamAbbr);
-          if (!norm.id && !norm.nameTeamKey) continue;
-
-          if (norm.id) {
-            const prev = statsById.get(norm.id);
-            statsById.set(norm.id, prev ? merge(prev, norm) : norm);
-          }
-          if (norm.nameTeamKey) {
-            const prev = statsByNameTeam.get(norm.nameTeamKey);
-            statsByNameTeam.set(norm.nameTeamKey, prev ? merge(prev, norm) : norm);
-          }
-        }
+    await Promise.all(eventIds.map(async (eventId) => {
+      const summaryUrl = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${encodeURIComponent(eventId)}`;
+      let j;
+      try {
+        j = await fetchJson(summaryUrl, `summary(${eventId})`);
+      } catch (e) {
+        // Games that haven't started yet, or a transient ESPN error, shouldn't
+        // take down the whole week's stats — skip just this game.
+        console.warn(`Skipping event ${eventId}:`, e?.message || e);
+        return;
+      }
+      const teamEntries = Array.isArray(j?.boxscore?.players) ? j.boxscore.players : [];
+      for (const teamEntry of teamEntries) {
+        parseTeamBoxscore(teamEntry, merged);
       }
     }));
 
     const out = {};
-    for (const [id, row] of statsById.entries()) out[id] = row;
-    for (const [key, row] of statsByNameTeam.entries()) if (!out[key]) out[key] = row;
+    for (const [key, row] of Object.entries(merged)) {
+      const finalRow = { ...row, points: points(row) };
+      if (row.id) out[row.id] = finalRow;
+      if (row.nameTeamKey && !out[row.nameTeamKey]) out[row.nameTeamKey] = finalRow;
+    }
 
     res.status(200).json({ stats: out });
   } catch (err) {
