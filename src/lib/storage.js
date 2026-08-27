@@ -11,8 +11,8 @@ import {
   where,
   serverTimestamp,
   writeBatch,
-  deleteDoc,
 } from "firebase/firestore";
+
 import { db } from "./firebase";
 
 /* =========================================================
@@ -26,7 +26,7 @@ export const DRAFT_ROUNDS_TOTAL = ROSTER_SLOTS.length + BENCH_SIZE; // 12
 export const PICK_CLOCK_MS = 5000; // 5s auto-pick clock
 
 // Owner rake fixed at 2% (200 basis points) for paid leagues
-const OWNER_RAKE_BPS = 200;
+
 
 export function emptyRoster() {
   const r = {};
